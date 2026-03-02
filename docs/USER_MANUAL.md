@@ -8,7 +8,7 @@ A practical guide to the project: structure, scripts, conventions, and how to wo
 
 **Goal:** Train a small math model (Qwen-2.5-0.5B) with **Budget-Aware DPO** — a custom loss that encourages short answers for easy problems and full chain-of-thought for hard ones.
 
-**Status:** Phases 0–8 complete. Dummy pipeline works end-to-end. Real data loaded and trained. Phases 9–11 (evaluation, visualization, final report) pending.
+**Status:** Phases 0–10 complete. Dummy and real pipelines work end-to-end. Real data: training, evaluation (GSM8K, MATH), and visualization done. Final ACL report deferred to user notes.
 
 ---
 
@@ -22,7 +22,9 @@ nlp_final_project/
 │   ├── dummy_openmathinstruct.jsonl
 │   ├── processed_dpo_dataset/      # Dummy DPO pairs
 │   ├── real_openmathinstruct.jsonl # Real (gitignored)
-│   └── processed_dpo_dataset_real/ # Real DPO pairs (gitignored)
+│   ├── processed_dpo_dataset_real/ # Real DPO pairs (gitignored)
+│   ├── gsm8k_test.jsonl            # GSM8K test set (Phase 9)
+│   └── math_test.jsonl              # MATH test set (Phase 9)
 ├── checkpoints/          # Model checkpoints (gitignored)
 ├── docs/
 │   ├── USER_MANUAL.md    # This file
@@ -52,7 +54,9 @@ nlp_final_project/
 │   ├── training/dpo_trainer.py
 │   ├── evaluation/
 │   └── visualization/
-├── reports/figures_dummy/  # PDF figures from dummy run
+├── reports/
+│   ├── figures_dummy/    # PDF figures from dummy run
+│   └── figures/          # PDF figures from real run
 └── implementation_plan.md  # Full phase plan (reference)
 ```
 
@@ -107,7 +111,7 @@ Runs: generate dummy data → model load check → preprocessing → sanity chec
 |--------|---------|-------|------|
 | `generate_dummy_data.py` | Create 50 synthetic examples | ✓ | — |
 | `check_model_load.py` | Verify Qwen-2.5-0.5B loads | ✓ | ✓ |
-| `load_real_data.py` | Load OpenMathInstruct-2 from HuggingFace | — | ✓ |
+| `load_real_data.py` | Load OpenMathInstruct-2, GSM8K, MATH from HuggingFace | — | ✓ |
 | `preprocess_dpo_data.py` | Build DPO pairs (4-way augmentation) | ✓ | ✓ |
 | `train_sanity_check.py` | Overfit on 30 pairs (sanity check) | ✓ | — |
 | `train_baseline_dpo.py` | Train standard DPO | ✓ | ✓ |
@@ -132,13 +136,13 @@ USE_DUMMY_DATA=0 python scripts/preprocess_dpo_data.py
 USE_DUMMY_DATA=0 python scripts/training/train_baseline_dpo.py --max-steps 1000
 USE_DUMMY_DATA=0 python scripts/training/train_budget_aware_dpo.py --max-steps 1000
 
-# Evaluation
+# Evaluation (real: requires GSM8K+MATH test sets — run load_real_data.py or --test-sets-only)
 USE_DUMMY_DATA=1 python scripts/run_evaluation.py --dummy
 USE_DUMMY_DATA=0 python scripts/run_evaluation.py
 
-# Visualization
+# Visualization (default = real; --dummy for dummy)
+python scripts/run_visualization.py
 python scripts/run_visualization.py --dummy
-python scripts/run_visualization.py --output-dir reports/figures
 ```
 
 ---
@@ -212,9 +216,9 @@ Cursor agents are instructed to:
 | 6 | ✅ | Visualization (histograms, results table) |
 | 7 | ✅ | Real data (OpenMathInstruct-2), synthetic DPO pairs |
 | 8 | ✅ | Full training on real data (short run verified) |
-| 9 | ⏳ | Evaluation on real data (GSM8K, MATH) |
-| 10 | ⏳ | Visualization from real data |
-| 11 | ⏳ | Final ACL report |
+| 9 | ✅ | Evaluation on real data (GSM8K, MATH) |
+| 10 | ✅ | Visualization from real data |
+| 11 | 📋 | Final ACL report (in user notes; deferred) |
 
 ---
 
@@ -243,9 +247,13 @@ USE_DUMMY_DATA=1 ./scripts/run_all_dummy.sh
 # 3. Inspect sanity outputs
 USE_DUMMY_DATA=1 python scripts/inspect_sanity_outputs.py
 
-# 4. Run evaluation (optional)
+# 4. Run evaluation and visualization (optional)
 USE_DUMMY_DATA=1 python scripts/run_evaluation.py --dummy
 python scripts/run_visualization.py --dummy
+
+# Real evaluation (requires: load_real_data.py --test-sets-only)
+USE_DUMMY_DATA=0 python scripts/run_evaluation.py
+python scripts/run_visualization.py
 ```
 
 ---
@@ -256,6 +264,7 @@ python scripts/run_visualization.py --dummy
 - **FileNotFoundError: processed dataset** → Run `preprocess_dpo_data.py` first.
 - **CUDA out of memory** → Reduce `--batch-size` or use `--data-limit`.
 - **Real data not found** → Run `load_real_data.py` before preprocessing with `USE_DUMMY_DATA=0`.
+- **GSM8K/MATH test sets not found** → Run `python scripts/load_real_data.py --test-sets-only` before real evaluation.
 
 ---
 
