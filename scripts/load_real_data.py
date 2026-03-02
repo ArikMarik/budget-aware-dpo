@@ -68,13 +68,23 @@ def load_gsm8k_test() -> list[dict]:
     return examples
 
 
+MATH_CONFIGS = [
+    "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
+    "number_theory", "prealgebra", "precalculus",
+]
+
+
 def load_math_test() -> list[dict]:
     """Load MATH test set for Phase 9 evaluation."""
-    from datasets import load_dataset
+    from datasets import load_dataset, concatenate_datasets
 
-    # EleutherAI/hendrycks_math or hendrycks/competition_math
+    # EleutherAI/hendrycks_math has per-subject configs; concatenate all
     try:
-        ds = load_dataset("EleutherAI/hendrycks_math", split="test")
+        parts = [
+            load_dataset("EleutherAI/hendrycks_math", cfg, split="test", trust_remote_code=False)
+            for cfg in MATH_CONFIGS
+        ]
+        ds = concatenate_datasets(parts)
     except Exception:
         try:
             ds = load_dataset("hendrycks/competition_math", split="test")
@@ -103,21 +113,23 @@ def main():
     parser.add_argument("--split", default="train_1M", help="OpenMathInstruct split: train_1M, train_2M, train_5M, train")
     parser.add_argument("--limit", type=int, default=None, help="Limit training examples (for quick test)")
     parser.add_argument("--skip-test-sets", action="store_true", help="Skip loading GSM8K/MATH test (faster)")
+    parser.add_argument("--test-sets-only", action="store_true", help="Load only GSM8K/MATH test (for Phase 9 evaluation)")
     args = parser.parse_args()
 
     DATA_PATH.mkdir(parents=True, exist_ok=True)
 
-    print("Loading OpenMathInstruct-2...")
-    train_data = load_openmathinstruct(split=args.split, limit=args.limit)
-    print(f"Loaded {len(train_data)} training examples")
+    if not args.test_sets_only:
+        print("Loading OpenMathInstruct-2...")
+        train_data = load_openmathinstruct(split=args.split, limit=args.limit)
+        print(f"Loaded {len(train_data)} training examples")
 
-    REAL_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(REAL_DATASET_PATH, "w", encoding="utf-8") as f:
-        for ex in train_data:
-            f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-    print(f"Saved to {REAL_DATASET_PATH}")
+        REAL_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(REAL_DATASET_PATH, "w", encoding="utf-8") as f:
+            for ex in train_data:
+                f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+        print(f"Saved to {REAL_DATASET_PATH}")
 
-    if not args.skip_test_sets:
+    if args.test_sets_only or not args.skip_test_sets:
         print("Loading GSM8K test...")
         gsm8k = load_gsm8k_test()
         GSM8K_TEST_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +145,10 @@ def main():
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
         print(f"Saved {len(math_test)} MATH test to {MATH_TEST_PATH}")
 
-    print("Done. Run preprocess_dpo_data.py with USE_DUMMY_DATA=0 to process.")
+    if args.test_sets_only:
+        print("Done. Run: USE_DUMMY_DATA=0 python scripts/run_evaluation.py")
+    else:
+        print("Done. Run preprocess_dpo_data.py with USE_DUMMY_DATA=0 to process.")
 
 
 if __name__ == "__main__":

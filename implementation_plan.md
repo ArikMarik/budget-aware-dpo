@@ -234,7 +234,7 @@
 | Phase 6 | ✅ Complete | Visualization code, run on **dummy** (no final report) |
 | Phase 7 | ✅ Complete | Real data (OpenMathInstruct-2), synthetic DPO pairs |
 | Phase 8 | ✅ Complete | Full training on **real** data (100-step verification run) |
-| Phase 9 | ⏳ Pending | Evaluation on **real** data |
+| Phase 9 | ✅ Complete | Evaluation on **real** data (GSM8K, MATH) |
 | Phase 10 | ⏳ Pending | Visualization from **real** data |
 | Phase 11 | ⏳ Pending | Final ACL report (**real** data) |
 
@@ -243,3 +243,4 @@
 # User notes and todos
 
 - [ ] **Dataset imbalance:** Phase 7 real data preprocessing produced ~85% Hard pairs (742 easy, 4252 hard). Investigate whether this imbalance affects training quality/evaluation and consider rebalancing (e.g., oversampling easy, stratified sampling, or loading more GSM8K-heavy subsets).
+- [ ] **Training extent:** Check how Phase 8 training was done—was it extensive enough or just a fast verification run on the real dataset? Consider running full training (e.g., more steps, full epochs) if current checkpoints are from a short run.
