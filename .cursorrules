@@ -4,5 +4,6 @@
 - **Data Paths:** Route all data, cache, and model weights to the persistent cluster storage: `/vol/joberant_nobck/data/NLP_368307701_2526a/<your_user_name>`.
 - **Reproducibility:** Fix random seeds for all libraries (`torch`, `numpy`, `transformers`) at the start of every script.
 - **Reporting:** After completing **every** step or phase, automatically generate a clear Markdown report (e.g., `docs/feature_reports/report_<feature>_<date>.md`) detailing the implementation, test results, issues resolved, and next steps. Do not skip.
+- **Report Appendix:** Each phase report MUST include an appendix section titled "Appendix: Problems Encountered and Solutions" summarizing any problems encountered during implementation and how they were resolved. If no problems occurred, state "No significant problems encountered."
 - **Git Integration:** Commit changes to Git automatically after each successfully tested step or phase. Use clear, descriptive commit messages. Do not skip commits. Make one commit per logical change (not one big commit for all changes). Ensure the repository is initialized before starting.
 - **Documentation:** Maintain a "white paper" focus in code comments and outputs, omitting exhaustive dead-end work logs.

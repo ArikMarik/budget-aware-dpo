@@ -237,3 +237,9 @@
 | Phase 9 | ⏳ Pending | Evaluation on **real** data |
 | Phase 10 | ⏳ Pending | Visualization from **real** data |
 | Phase 11 | ⏳ Pending | Final ACL report (**real** data) |
+
+---
+
+# User notes and todos for the future
+
+- [ ] **Dataset imbalance:** Phase 7 real data preprocessing produced ~85% Hard pairs (742 easy, 4252 hard). Investigate whether this imbalance affects training quality/evaluation and consider rebalancing (e.g., oversampling easy, stratified sampling, or loading more GSM8K-heavy subsets).
