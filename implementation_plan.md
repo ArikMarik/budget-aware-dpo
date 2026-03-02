@@ -230,8 +230,8 @@
 | Phase 2 | ✅ Complete | 4-way augmentation on **dummy** data |
 | Phase 3 | ✅ Complete | Budget-aware DPO, sanity check on **dummy** |
 | Phase 4 | ✅ Complete | Training scripts, run on **dummy** |
-| Phase 5 | ⏳ Pending | Evaluation code, run on **dummy** |
-| Phase 6 | ⏳ Pending | Visualization code, run on **dummy** (no final report) |
+| Phase 5 | ✅ Complete | Evaluation code, run on **dummy** |
+| Phase 6 | ✅ Complete | Visualization code, run on **dummy** (no final report) |
 | Phase 7 | ⏳ Pending | Real data preprocessing (GSM8K, MATH) |
 | Phase 8 | ⏳ Pending | Full training on **real** data |
 | Phase 9 | ⏳ Pending | Evaluation on **real** data |

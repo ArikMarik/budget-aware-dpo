@@ -6,3 +6,4 @@ peft>=0.7.0
 accelerate>=0.25.0
 unsloth
 vllm>=0.4.0
+matplotlib>=3.7.0
