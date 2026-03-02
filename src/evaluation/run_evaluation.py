@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from src.config import CHECKPOINT_DIR, MODEL_NAME, PROCESSED_DATASET_PATH
+from src.config import CHECKPOINT_DIR, MODEL_NAME, get_processed_dataset_path
 from src.evaluation.answer_extraction import extract_answer, normalize_answer
 from src.utils import set_seed
 
@@ -18,7 +18,7 @@ set_seed(42)
 
 def load_eval_problems(limit: Optional[int] = None) -> list[dict]:
     """Load unique problems with expected answer from chosen."""
-    path = PROCESSED_DATASET_PATH / "dataset.jsonl"
+    path = get_processed_dataset_path() / "dataset.jsonl"
     seen = {}
     with open(path) as f:
         for line in f:

@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""
+Load real datasets (OpenMathInstruct-2, GSM8K test, MATH test) and convert to JSONL.
+Saves training data for DPO preprocessing; holds out test sets for Phase 9 evaluation.
+"""
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, REAL_DATASET_PATH
+from src.utils import set_seed
+
+set_seed(42)
+
+
+def approx_tokens(text: str) -> int:
+    """Word count as proxy for token count."""
+    return max(1, len(str(text).split()))
+
+
+def extract_gsm8k_answer(answer: str) -> str:
+    """Extract final answer from GSM8K format (#### N)."""
+    m = re.search(r"####\s*(\S+)", answer)
+    return m.group(1).strip() if m else ""
+
+
+def convert_openmathinstruct(item: dict) -> dict:
+    """Convert OpenMathInstruct-2 item to our format."""
+    solution = item.get("generated_solution", "")
+    return {
+        "problem": item["problem"],
+        "generated_solution": solution,
+        "expected_answer": item.get("expected_answer", ""),
+        "problem_source": item.get("problem_source", "unknown"),
+        "teacher_token_count": approx_tokens(solution),
+        "correctness_flag": True,  # Assume correct for training data
+    }
+
+
+def load_openmathinstruct(split: str = "train_1M", limit: int | None = None) -> list[dict]:
+    """Load OpenMathInstruct-2 from HuggingFace."""
+    from datasets import load_dataset
+
+    dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split)
+    examples = []
+    for i, item in enumerate(dataset):
+        if limit and i >= limit:
+            break
+        examples.append(convert_openmathinstruct(dict(item)))
+    return examples
+
+
+def load_gsm8k_test() -> list[dict]:
+    """Load GSM8K test set for Phase 9 evaluation."""
+    from datasets import load_dataset
+
+    ds = load_dataset("openai/gsm8k", "main", split="test")
+    examples = []
+    for item in ds:
+        examples.append({
+            "problem": item["question"],
+            "answer": item["answer"],
+            "expected_answer": extract_gsm8k_answer(item["answer"]),
+            "problem_source": "gsm8k",
+        })
+    return examples
+
+
+def load_math_test() -> list[dict]:
+    """Load MATH test set for Phase 9 evaluation."""
+    from datasets import load_dataset
+
+    # EleutherAI/hendrycks_math or hendrycks/competition_math
+    try:
+        ds = load_dataset("EleutherAI/hendrycks_math", split="test")
+    except Exception:
+        try:
+            ds = load_dataset("hendrycks/competition_math", split="test")
+        except Exception:
+            ds = load_dataset("lighteval/MATH", split="test")
+    examples = []
+    for item in ds:
+        problem = item.get("problem", item.get("question", ""))
+        solution = item.get("solution", item.get("answer", ""))
+        expected = item.get("answer", "")
+        if not expected and solution and "\\boxed{" in str(solution):
+            m = re.search(r"\\boxed\{([^}]+)\}", str(solution))
+            expected = m.group(1).strip() if m else ""
+        examples.append({
+            "problem": problem,
+            "answer": solution,
+            "expected_answer": str(expected) if expected else "",
+            "problem_source": "math",
+            "level": item.get("level", ""),
+        })
+    return examples
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split", default="train_1M", help="OpenMathInstruct split: train_1M, train_2M, train_5M, train")
+    parser.add_argument("--limit", type=int, default=None, help="Limit training examples (for quick test)")
+    parser.add_argument("--skip-test-sets", action="store_true", help="Skip loading GSM8K/MATH test (faster)")
+    args = parser.parse_args()
+
+    DATA_PATH.mkdir(parents=True, exist_ok=True)
+
+    print("Loading OpenMathInstruct-2...")
+    train_data = load_openmathinstruct(split=args.split, limit=args.limit)
+    print(f"Loaded {len(train_data)} training examples")
+
+    REAL_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(REAL_DATASET_PATH, "w", encoding="utf-8") as f:
+        for ex in train_data:
+            f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+    print(f"Saved to {REAL_DATASET_PATH}")
+
+    if not args.skip_test_sets:
+        print("Loading GSM8K test...")
+        gsm8k = load_gsm8k_test()
+        GSM8K_TEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(GSM8K_TEST_PATH, "w", encoding="utf-8") as f:
+            for ex in gsm8k:
+                f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+        print(f"Saved {len(gsm8k)} GSM8K test to {GSM8K_TEST_PATH}")
+
+        print("Loading MATH test...")
+        math_test = load_math_test()
+        with open(MATH_TEST_PATH, "w", encoding="utf-8") as f:
+            for ex in math_test:
+                f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+        print(f"Saved {len(math_test)} MATH test to {MATH_TEST_PATH}")
+
+    print("Done. Run preprocess_dpo_data.py with USE_DUMMY_DATA=0 to process.")
+
+
+if __name__ == "__main__":
+    main()

@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 
-from src.config import CHECKPOINT_DIR, MODEL_NAME, PROCESSED_DATASET_PATH
+from src.config import CHECKPOINT_DIR, MODEL_NAME, get_processed_dataset_path
 from src.utils import set_seed
 
 
@@ -37,7 +37,7 @@ class DPODataset(Dataset):
 
 def load_pairs(limit: Optional[int] = None) -> list[dict]:
     pairs = []
-    path = PROCESSED_DATASET_PATH / "dataset.jsonl"
+    path = get_processed_dataset_path() / "dataset.jsonl"
     with open(path) as f:
         for line in f:
             pairs.append(json.loads(line))

@@ -70,10 +70,21 @@ def label_preference(example: dict, complexity: int) -> str:
     return "rejected"
 
 
+def _make_short_answer(solution: str, expected: str = "") -> str:
+    """Create short answer string from solution or expected_answer."""
+    from src.evaluation.answer_extraction import extract_answer
+    ans = extract_answer(solution) or expected
+    if ans:
+        return f"The answer is {ans}."
+    return solution[:100] + "..." if len(solution) > 100 else solution
+
+
 def build_dpo_pairs(raw_data: list[dict]) -> list[dict]:
     """
     Group by (problem, complexity) and build preferred/rejected pairs.
-    Each problem can have multiple (preferred, rejected) pairs.
+    When natural pairs exist (multiple solutions per problem), use them.
+    Otherwise create synthetic pairs: Easy = short preferred / verbose rejected;
+    Hard = CoT preferred / oversimplified rejected.
     """
     from collections import defaultdict
     groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
@@ -87,16 +98,25 @@ def build_dpo_pairs(raw_data: list[dict]) -> list[dict]:
     for (problem, complexity), items in groups.items():
         preferred = [x for x in items if x["label"] == "preferred"]
         rejected = [x for x in items if x["label"] == "rejected"]
-        if not preferred or not rejected:
-            continue
-        for pw in preferred:
-            for rj in rejected:
-                pairs.append({
-                    "problem": problem,
-                    "chosen": pw["generated_solution"],
-                    "rejected": rj["generated_solution"],
-                    "complexity": complexity,
-                })
+        if preferred and rejected:
+            for pw in preferred:
+                for rj in rejected:
+                    pairs.append({
+                        "problem": problem,
+                        "chosen": pw["generated_solution"],
+                        "rejected": rj["generated_solution"],
+                        "complexity": complexity,
+                    })
+        elif items:
+            # Synthetic pair: create short vs long from first item
+            ex = items[0]
+            sol = ex["generated_solution"]
+            expected = ex.get("expected_answer", "")
+            short = _make_short_answer(sol, expected)
+            if complexity == 0:  # Easy: short preferred, verbose rejected
+                pairs.append({"problem": problem, "chosen": short, "rejected": sol, "complexity": 0})
+            else:  # Hard: CoT preferred, oversimplified rejected
+                pairs.append({"problem": problem, "chosen": sol, "rejected": short, "complexity": 1})
     return pairs
 
 

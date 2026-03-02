@@ -19,6 +19,17 @@ DATA_PATH = Path(
 DUMMY_DATASET_PATH = DATA_PATH / "dummy_openmathinstruct.jsonl"
 PROCESSED_DATASET_PATH = DATA_PATH / "processed_dpo_dataset"
 
+# Real data (Phase 7+)
+REAL_DATASET_PATH = DATA_PATH / "real_openmathinstruct.jsonl"
+PROCESSED_DATASET_PATH_REAL = DATA_PATH / "processed_dpo_dataset_real"
+GSM8K_TEST_PATH = DATA_PATH / "gsm8k_test.jsonl"
+MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
+
+
+def get_processed_dataset_path() -> Path:
+    """Return processed dataset path based on USE_DUMMY_DATA."""
+    return PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH_REAL
+
 # Checkpoints
 CHECKPOINT_DIR = Path(os.environ.get("CHECKPOINT_DIR", PROJECT_ROOT / "checkpoints"))
 

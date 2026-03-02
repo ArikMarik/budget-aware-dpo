@@ -8,7 +8,13 @@ import json
 import logging
 from pathlib import Path
 
-from src.config import DUMMY_DATASET_PATH, PROCESSED_DATASET_PATH, USE_DUMMY_DATA
+from src.config import (
+    DUMMY_DATASET_PATH,
+    PROCESSED_DATASET_PATH,
+    PROCESSED_DATASET_PATH_REAL,
+    REAL_DATASET_PATH,
+    USE_DUMMY_DATA,
+)
 from src.data.preprocessing import (
     build_dpo_pairs,
     compute_statistics,
@@ -22,16 +28,23 @@ logger = logging.getLogger(__name__)
 def get_input_path() -> Path:
     if USE_DUMMY_DATA:
         return DUMMY_DATASET_PATH
-    return DUMMY_DATASET_PATH  # Fallback for now
+    return REAL_DATASET_PATH
+
+
+def get_output_path() -> Path:
+    if USE_DUMMY_DATA:
+        return PROCESSED_DATASET_PATH
+    return PROCESSED_DATASET_PATH_REAL
 
 
 def main():
-    PROCESSED_DATASET_PATH.mkdir(parents=True, exist_ok=True)
-    meta_path = PROCESSED_DATASET_PATH / "metadata.json"
-    dataset_path = PROCESSED_DATASET_PATH / "dataset.jsonl"
+    output_dir = get_output_path()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = output_dir / "metadata.json"
+    dataset_path = output_dir / "dataset.jsonl"
 
     if meta_path.exists() and dataset_path.exists():
-        logger.info("Processed dataset exists. Loading from disk.")
+        logger.info("Processed dataset exists at %s. Loading from disk.", output_dir)
         with open(meta_path) as f:
             stats = json.load(f)
         logger.info("Stats: %s", stats)
@@ -39,8 +52,12 @@ def main():
 
     input_path = get_input_path()
     if not input_path.exists():
+        if USE_DUMMY_DATA:
+            raise FileNotFoundError(
+                f"Input data not found: {input_path}. Run generate_dummy_data.py first."
+            )
         raise FileNotFoundError(
-            f"Input data not found: {input_path}. Run generate_dummy_data.py first."
+            f"Input data not found: {input_path}. Run load_real_data.py first."
         )
 
     raw_data = load_jsonl(input_path)
@@ -56,7 +73,7 @@ def main():
     with open(meta_path, "w") as f:
         json.dump(stats, f, indent=2)
 
-    logger.info("Saved processed dataset to %s", PROCESSED_DATASET_PATH)
+    logger.info("Saved processed dataset to %s", output_dir)
 
 
 if __name__ == "__main__":
