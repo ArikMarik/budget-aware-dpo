@@ -33,6 +33,18 @@ def get_processed_dataset_path() -> Path:
 # Checkpoints
 CHECKPOINT_DIR = Path(os.environ.get("CHECKPOINT_DIR", PROJECT_ROOT / "checkpoints"))
 
+
+def get_baseline_output_dir() -> Path:
+    """Return baseline DPO checkpoint dir (dummy vs real)."""
+    suffix = "" if USE_DUMMY_DATA else "_real"
+    return CHECKPOINT_DIR / f"baseline_dpo{suffix}"
+
+
+def get_budget_aware_output_dir() -> Path:
+    """Return budget-aware DPO checkpoint dir (dummy vs real)."""
+    suffix = "" if USE_DUMMY_DATA else "_real"
+    return CHECKPOINT_DIR / f"budget_aware_dpo{suffix}"
+
 # Model
 MODEL_NAME = "Qwen/Qwen2.5-0.5B"
 UNSLOTH_MODEL_NAME = "unsloth/Qwen2.5-0.5B"

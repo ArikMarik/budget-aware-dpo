@@ -6,13 +6,13 @@ Train standard DPO baseline (no length penalty).
 import argparse
 from pathlib import Path
 
-from src.config import CHECKPOINT_DIR
+from src.config import get_baseline_output_dir
 from src.training.dpo_trainer import train_dpo
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=str, default=None, help="Output directory")
+    parser.add_argument("--output-dir", type=str, default=None, help="Output directory (default: baseline_dpo or baseline_dpo_real)")
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir or str(CHECKPOINT_DIR / "baseline_dpo"))
+    output_dir = Path(args.output_dir or str(get_baseline_output_dir()))
     train_dpo(
         use_budget_aware=False,
         output_dir=output_dir,
