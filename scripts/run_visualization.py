@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Generate figures from evaluation results.
-Usage: python scripts/run_visualization.py --dummy
-Output: reports/figures_dummy/
+Usage:
+  Dummy: python scripts/run_visualization.py --dummy
+  Real:  python scripts/run_visualization.py
+Output: reports/figures_dummy/ or reports/figures/
 """
 
 import argparse
@@ -18,9 +20,9 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None)
     args = parser.parse_args()
 
-    suffix = "_dummy" if args.dummy else ""
+    suffix = "_dummy" if args.dummy else "_real"
     eval_dir = CHECKPOINT_DIR
-    output_dir = Path(args.output_dir or f"reports/figures{suffix}")
+    output_dir = Path(args.output_dir or ("reports/figures_dummy" if args.dummy else "reports/figures"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Figures

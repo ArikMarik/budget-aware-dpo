@@ -1,6 +1,6 @@
 # Implementation Plan: Budget-Aware DPO
 
-**Data Strategy:** Phases 0–6 use **dummy data only** for debugging and sanity checks. Phases 7–11 use **real data** (GSM8K, MATH) for production training, evaluation, and the final report.
+**Data Strategy:** Phases 0–6 use **dummy data only** for debugging and sanity checks. Phases 7–10 use **real data** (GSM8K, MATH) for production training, evaluation, and visualization. Final report is in User notes.
 
 # ---
 
@@ -205,18 +205,6 @@
 
 * **Git Action:** git add reports/figures/ && git commit \-m "feat: visualization from real data"
 
-# ---
-
-**Phase 11: Final Report**
-
-**Goal:** Compile the final ACL-formatted project report using real-data results.
-
-1. **Report Drafting:** ACL template, ≤8 pages. Introduction, Background, Method, Experimental Design, Results, Discussion.
-2. **Formatting:** PDF figures, algorithm box, bibliography.
-3. **Self-Contained:** Code link, no critical content in appendix.
-
-* **Git Action:** git add reports/ && git commit \-m "docs: final ACL report (real data)"
-
 ---
 
 # Implementation Progress
@@ -235,12 +223,12 @@
 | Phase 7 | ✅ Complete | Real data (OpenMathInstruct-2), synthetic DPO pairs |
 | Phase 8 | ✅ Complete | Full training on **real** data (100-step verification run) |
 | Phase 9 | ✅ Complete | Evaluation on **real** data (GSM8K, MATH) |
-| Phase 10 | ⏳ Pending | Visualization from **real** data |
-| Phase 11 | ⏳ Pending | Final ACL report (**real** data) |
+| Phase 10 | ✅ Complete | Visualization from **real** data |
 
 ---
 
 # User notes and todos
 
+- [ ] **Final report (Phase 11):** Compile ACL-formatted project report (≤8 pages). Introduction, Background, Method, Experimental Design, Results, Discussion. PDF figures, algorithm box, bibliography. Deferred from implementation plan.
 - [ ] **Dataset imbalance:** Phase 7 real data preprocessing produced ~85% Hard pairs (742 easy, 4252 hard). Investigate whether this imbalance affects training quality/evaluation and consider rebalancing (e.g., oversampling easy, stratified sampling, or loading more GSM8K-heavy subsets).
 - [ ] **Training extent:** Check how Phase 8 training was done—was it extensive enough or just a fast verification run on the real dataset? Consider running full training (e.g., more steps, full epochs) if current checkpoints are from a short run.

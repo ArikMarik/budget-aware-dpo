@@ -80,16 +80,24 @@ def generate_results_table(metrics_path: Path, output_path: Path) -> None:
     with open(metrics_path) as f:
         data = json.load(f)
     metrics = data.get("metrics", data)
-    lines = [
-        "| Model | Accuracy | TPCA | Avg Tokens (Easy) | Avg Tokens (Hard) |",
-        "|-------|----------|------|--------------------|-------------------|",
-    ]
+    has_math45 = any(m.get("math_level_4_5_accuracy") is not None for m in metrics.values())
+    if has_math45:
+        headers = "| Model | Accuracy | TPCA | Avg Tokens (Easy) | Avg Tokens (Hard) | MATH L4-5 |"
+        sep = "|-------|----------|------|--------------------|-------------------|----------|"
+    else:
+        headers = "| Model | Accuracy | TPCA | Avg Tokens (Easy) | Avg Tokens (Hard) |"
+        sep = "|-------|----------|------|--------------------|-------------------|"
+    lines = [headers, sep]
     for name, m in metrics.items():
         acc = f"{m['accuracy']:.1%}"
         tpca = f"{m['tpca']:.1f}"
         easy = f"{m['avg_tokens_easy']:.1f}"
         hard = f"{m['avg_tokens_hard']:.1f}"
-        lines.append(f"| {name} | {acc} | {tpca} | {easy} | {hard} |")
+        row = f"| {name} | {acc} | {tpca} | {easy} | {hard} |"
+        if has_math45:
+            math45 = f"{m.get('math_level_4_5_accuracy', 0):.1%}" if m.get("math_level_4_5_accuracy") is not None else "—"
+            row += f" {math45} |"
+        lines.append(row)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         f.write("\n".join(lines))
