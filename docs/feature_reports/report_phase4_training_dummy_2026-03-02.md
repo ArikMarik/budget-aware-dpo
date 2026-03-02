@@ -1,7 +1,8 @@
-# Phase 4: Full Model Training & Baselines — Report
+# Phase 4: Full Model Training & Baselines — Report (Dummy Data)
 
 **Date:** 2026-03-02  
-**Status:** Complete
+**Status:** Complete  
+**Data:** Dummy data only (18 pairs)
 
 ## Implementation Summary
 
@@ -12,7 +13,7 @@
 - **Experiment tracking:** `training_config.json`, `metrics.json` per run
 - **Checkpointing:** Every N steps (default 500), `resume_from` support
 
-## Test Results
+## Test Results (Dummy Data)
 
 - Baseline DPO: 20 steps, batch 2, 18 pairs → loss 0.30 → 0.00002
 - Budget-aware DPO: 20 steps, batch 2, 18 pairs → loss 0.38 → 0.006
@@ -33,4 +34,5 @@ python scripts/training/train_budget_aware_dpo.py --resume-from checkpoints/budg
 
 ## Next Steps
 
-- Phase 5: Evaluation on GSM8K/MATH, TPCA, vLLM latency
+- Phase 5: Evaluation code (run on dummy checkpoints)
+- Phase 8: Full training on real data

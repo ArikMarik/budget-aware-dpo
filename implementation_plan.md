@@ -1,3 +1,9 @@
+# Implementation Plan: Budget-Aware DPO
+
+**Data Strategy:** Phases 0–6 use **dummy data only** for debugging and sanity checks. Phases 7–11 use **real data** (GSM8K, MATH) for production training, evaluation, and the final report.
+
+# ---
+
 # **Phase 0: Virtual Environment and Cursor Configuration**
 
 **Goal:** Establish an isolated Python environment and configure the AI agent (Cursor) to enforce project-specific rules, formatting standards, and reporting requirements.
@@ -58,8 +64,8 @@
 
 3. **Dataset Statistics:** Compute and log dataset statistics (label distribution, average token lengths for Preferred vs. Rejected per complexity level).
 
-* **Testing Step:** Run the pipeline on the dummy data. Manually assert that an Easy problem with a long correct answer is correctly routed to the Rejected column.  
-* **Checkpointing:** Serialize the processed HuggingFace dataset to disk. Add logic to skip processing and load from disk if the processed dataset directory already exists.  
+* **Testing Step:** Run the pipeline on the **dummy** data. Manually assert that an Easy problem with a long correct answer is correctly routed to the Rejected column.  
+* **Checkpointing:** Serialize the processed dataset to disk. Add logic to skip processing and load from disk if the processed dataset directory already exists.  
 * **Git Action:** git add src/data/ && git commit \-m "feat: implement 4-way augmentation and complexity classification pipeline"
 
 **Senior Engineer Tips:**
@@ -117,51 +123,99 @@
 
 # ---
 
-**Phase 5: Evaluation & Benchmarking**
+**Phase 5: Evaluation & Benchmarking (Dummy Data — Pipeline Completeness)**
 
-**Goal:** Measure the Pareto frontier between mathematical accuracy and computational efficiency.
+**Goal:** Implement evaluation code and run on dummy data to validate the pipeline. Real evaluation in Phase 9.
 
-1. **Accuracy Evaluation:** Evaluate both the baseline and experimental models on the GSM8K and MATH test sets. Track the expected retention of \>95% accuracy on MATH Level 4-5.
+1. **Accuracy Evaluation:** Implement logic to evaluate baseline and budget-aware models. On dummy: run on processed test subset.
+2. **Efficiency Metrics (TPCA):** Implement Tokens Per Correct Answer calculation.
+3. **Latency Benchmarking:** Implement vLLM deployment and time-per-query measurement (optional on dummy).
 
-2. **Efficiency Metrics (TPCA):** Calculate the Tokens Per Correct Answer (TPCA) for all models. Verify the hypothesized 30-50% reduction in TPCA on GSM8K.
+* **Testing Step:** Run evaluation on dummy checkpoints; verify metric aggregation and decoding work.
+* **Checkpointing:** Save raw generations and metric dicts to JSON.
+* **Git Action:** git add src/evaluation/ && git commit \-m "feat: implement evaluation for accuracy, TPCA (dummy run)"
 
-3. **Latency Benchmarking:** Deploy the fine-tuned models using vLLM to measure real-world inference latency (time-per-query).
-
-* **Testing Step:** Run the evaluation script on a 5-shot subset of the test sets to ensure metric aggregations and generation decoding schemes do not throw errors.  
-* **Checkpointing:** Save raw model generations and computed metric dictionaries to JSON files before passing them to visualization scripts.  
-* **Git Action:** git add src/evaluation/ && git commit \-m "feat: implement evaluation for accuracy, TPCA, and vLLM latency"
-
-**Senior Engineer Tips:**
-
-* Always account for randomness during evaluation. Record the seed used and note the specific decoding scheme (e.g., greedy decoding vs. temperature sampling).
-
-* If you encounter negative results (e.g., accuracy drops significantly), ensure they are thoroughly analyzed in the final report, as well-analyzed negative results are valued if the methodology is sound.
+**Note:** Phases 0–5 use **dummy data only** for debugging and sanity checks.
 
 # ---
 
-**Phase 6: Visualization and Final Report**
+**Phase 6: Visualization (Dummy Data — Pipeline Completeness)**
 
-**Goal:** Generate publication-ready figures and draft the final project report in the required ACL format.
+**Goal:** Implement visualization code and run on dummy outputs. No final report yet (deferred to Phase 11).
 
-1. **Distribution Visualization:** Create histograms showing the response lengths for both models. Plot the expected bimodal distribution demonstrating "Learned Routing" (20-40 tokens for simple, 300+ tokens for complex).
+1. **Distribution Visualization:** Histograms of response lengths for both models.
+2. **Results Table:** Avg. Tokens (Easy/Hard), Reasoning Style comparison.
+3. **Figure Export:** PDF format, large fonts.
 
-2. **Results Formatting:** Construct a table comparing Avg. Tokens (Easy), Avg. Tokens (Hard), and Reasoning Style between the baseline and the Budget-Aware DPO model. Ensure results are given in an easy-to-understand format.
+* **Testing Step:** Generate figures from dummy evaluation outputs.
+* **Git Action:** git add src/visualization/ reports/figures_dummy/ && git commit \-m "feat: implement visualization (dummy run)"
 
-3. **Report Drafting:** Compile the report using the ACL template, remaining strictly under the 8-page limit. Include Introduction, Background, Method, Experimental Design, Results, and Discussion.
+**Note:** Final ACL report is **not** part of Phase 6; it is Phase 11 (real data).
 
-4. **Formatting Constraints:** Ensure all figures are added as PDF files (not JPEG/PNG) and use large enough fonts. Include an algorithm box outlining the method on the first or second page. Include full bibliography citations.
+# ---
 
-* **Testing Step:** Compile the document and strictly verify it does not exceed 8 pages (excluding bibliography and AI disclosure).
+**Phase 7: Real Data Preprocessing**
 
-* **Git Action:** git add reports/ && git commit \-m "docs: finalize data visualizations and compile ACL formatted report"
+**Goal:** Integrate real datasets (GSM8K, MATH, OpenMathInstruct-2) and preprocess for training.
 
-**Senior Engineer Tips:**
+1. **Data Loading:** Load GSM8K and MATH from HuggingFace (or equivalent). Load OpenMathInstruct-2 if used.
+2. **Format Conversion:** Convert to OpenMathInstruct-2 JSONL format (problem, generated_solution, problem_source, teacher_token_count, correctness_flag).
+3. **Train/Test Split:** Ensure no test-set leakage. Hold out GSM8K/MATH test sets for Phase 9 evaluation.
+4. **Preprocessing:** Run existing 4-way augmentation pipeline on real data. Output to `data/processed_dpo_dataset_real/`.
+5. **Config:** Add `USE_DUMMY_DATA=0` path routing; `get_input_path()` returns real dataset when not dummy.
 
-* Write the report as a white paper. Avoid exhaustive work logs (e.g., "We tried X but it failed..."); be concise and present the final effective methodology.
+* **Checkpointing:** Save processed real dataset to cluster storage.
+* **Git Action:** git add src/data/ scripts/load_real_data.py && git commit \-m "feat: integrate real data (GSM8K, MATH) preprocessing"
 
-* The appendix should not contain content critical to the flow of the paper, as it is assumed it will not be read unless specifically sought out.
+# ---
 
-* Host your code on GitHub and ensure a link is provided in the PDF. Ensure the paper is entirely self-contained.
+**Phase 8: Full Training on Real Data**
+
+**Goal:** Repeat Phase 4 training using real processed data.
+
+1. **Baseline DPO:** Train on real DPO pairs (no length penalty).
+2. **Budget-Aware DPO:** Train on real DPO pairs with R_budget loss.
+3. **Experiment Tracking:** Log hyperparameters, loss, validation. Reproducible configs.
+
+* **Checkpointing:** Save to `checkpoints/baseline_dpo_real/`, `checkpoints/budget_aware_dpo_real/`.
+* **Git Action:** git add scripts/training/ && git commit \-m "feat: full training on real data"
+
+# ---
+
+**Phase 9: Evaluation on Real Data**
+
+**Goal:** Repeat Phase 5 evaluation on GSM8K and MATH test sets using real-data checkpoints.
+
+1. **Accuracy:** Evaluate on GSM8K and MATH test sets. Track MATH Level 4–5 retention.
+2. **TPCA:** Tokens Per Correct Answer for all models.
+3. **Latency:** vLLM deployment, time-per-query.
+
+* **Checkpointing:** Save evaluation outputs to JSON.
+* **Git Action:** git add src/evaluation/ && git commit \-m "feat: evaluation on real data (GSM8K, MATH)"
+
+# ---
+
+**Phase 10: Visualization on Real Data**
+
+**Goal:** Generate publication-ready figures from real evaluation results.
+
+1. **Distribution Visualization:** Histograms from real model outputs.
+2. **Results Table:** Final comparison table.
+3. **Figure Export:** PDF, ACL-ready.
+
+* **Git Action:** git add reports/figures/ && git commit \-m "feat: visualization from real data"
+
+# ---
+
+**Phase 11: Final Report**
+
+**Goal:** Compile the final ACL-formatted project report using real-data results.
+
+1. **Report Drafting:** ACL template, ≤8 pages. Introduction, Background, Method, Experimental Design, Results, Discussion.
+2. **Formatting:** PDF figures, algorithm box, bibliography.
+3. **Self-Contained:** Code link, no critical content in appendix.
+
+* **Git Action:** git add reports/ && git commit \-m "docs: final ACL report (real data)"
 
 ---
 
@@ -171,10 +225,15 @@
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 0 | ✅ Complete | Virtual env, .cursorrules, cowsay test, feature report |
-| Phase 1 | ✅ Complete | Directory structure, requirements, dummy data (50 examples), model load check script, run_all_dummy.sh |
-| Phase 2 | ✅ Complete | 4-way augmentation, complexity classification, DPO pairs, dataset stats, checkpointing |
-| Phase 3 | ✅ Complete | Budget-aware DPO loss, LoRA r=128, sanity check run on GPU, inspection script added |
-| Phase 4 | ✅ Complete | Baseline + budget-aware DPO scripts, shared trainer, checkpointing |
-| Phase 5 | ⏳ Pending | Evaluation & benchmarking |
-| Phase 6 | ⏳ Pending | Visualization & final report |
+| Phase 0 | ✅ Complete | Virtual env, .cursorrules (dummy) |
+| Phase 1 | ✅ Complete | Dummy data (50 examples), run_all_dummy.sh |
+| Phase 2 | ✅ Complete | 4-way augmentation on **dummy** data |
+| Phase 3 | ✅ Complete | Budget-aware DPO, sanity check on **dummy** |
+| Phase 4 | ✅ Complete | Training scripts, run on **dummy** |
+| Phase 5 | ⏳ Pending | Evaluation code, run on **dummy** |
+| Phase 6 | ⏳ Pending | Visualization code, run on **dummy** (no final report) |
+| Phase 7 | ⏳ Pending | Real data preprocessing (GSM8K, MATH) |
+| Phase 8 | ⏳ Pending | Full training on **real** data |
+| Phase 9 | ⏳ Pending | Evaluation on **real** data |
+| Phase 10 | ⏳ Pending | Visualization from **real** data |
+| Phase 11 | ⏳ Pending | Final ACL report (**real** data) |

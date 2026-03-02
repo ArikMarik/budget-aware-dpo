@@ -1,7 +1,8 @@
-# Phase 3: Custom Loss Function & Sanity Check (Overfitting) — Report
+# Phase 3: Custom Loss Function & Sanity Check — Report (Dummy Data)
 
 **Date:** 2026-03-02  
-**Status:** Complete
+**Status:** Complete  
+**Data:** Dummy data only (30 pairs)
 
 ## Implementation Summary
 
@@ -12,7 +13,7 @@
 - **Sanity check script:** `scripts/train_sanity_check.py` — overfits on 30 dummy pairs, 3 epochs
 - **Inspection script:** `scripts/inspect_sanity_outputs.py` — loads checkpoint, generates on Easy/Hard prompts, reports token counts
 
-## Test Results
+## Test Results (Dummy Data)
 
 - **Training:** Ran on GPU (cuda). Checkpoint saved to `checkpoints/sanity_overfit/`
 - **Inspection:** Easy prompts → 60, 61, 256 tokens (first two compressed; third hit max_length)
@@ -27,4 +28,4 @@
 
 ## Next Steps
 
-- Phase 4: Full model training (baseline DPO + budget-aware DPO) and experiment tracking
+- Phase 4: Full model training (baseline DPO + budget-aware DPO) on dummy data

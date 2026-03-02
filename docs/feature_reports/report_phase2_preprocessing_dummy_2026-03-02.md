@@ -1,7 +1,8 @@
-# Phase 2: Data Preprocessing & 4-Way Augmentation Pipeline — Report
+# Phase 2: Data Preprocessing & 4-Way Augmentation — Report (Dummy Data)
 
 **Date:** 2026-03-02  
-**Status:** Complete
+**Status:** Complete  
+**Data:** Dummy data only
 
 ## Implementation Summary
 
@@ -14,7 +15,7 @@
 - **Dataset stats:** Logged (total pairs, easy/hard split, avg token lengths)
 - **Checkpointing:** Processed dataset saved to `data/processed_dpo_dataset/`; skips if exists
 
-## Test Results
+## Test Results (Dummy Data)
 
 - Pipeline run on dummy data: 18 DPO pairs (13 easy, 5 hard)
 - Avg preferred tokens: 7.0; avg rejected: 28.9
@@ -22,4 +23,4 @@
 
 ## Next Steps
 
-- Phase 3: Budget-aware DPO loss and sanity check (overfitting)
+- Phase 3: Budget-aware DPO loss and sanity check (overfitting on dummy)
