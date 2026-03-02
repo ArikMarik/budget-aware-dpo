@@ -174,9 +174,7 @@
 | Phase 0 | ✅ Complete | Virtual env, .cursorrules, cowsay test, feature report |
 | Phase 1 | ✅ Complete | Directory structure, requirements, dummy data (50 examples), model load check script, run_all_dummy.sh |
 | Phase 2 | ✅ Complete | 4-way augmentation, complexity classification, DPO pairs, dataset stats, checkpointing |
-| Phase 3 | 🔄 In Progress | Budget-aware DPO loss implemented; LoRA config in sanity script. **Sanity check (overfitting) not yet run** — will restart on GPU. |
+| Phase 3 | ✅ Complete | Budget-aware DPO loss, LoRA r=128, sanity check run on GPU, inspection script added |
 | Phase 4 | ⏳ Pending | Full training loops |
 | Phase 5 | ⏳ Pending | Evaluation & benchmarking |
 | Phase 6 | ⏳ Pending | Visualization & final report |
-
-**Current Blocker:** Sanity check was accidentally run on CPU; needs to be restarted on GPU.
