@@ -8,9 +8,9 @@ import re
 
 def extract_answer(text: str) -> str | None:
     """Extract final answer from model output. Returns None if not found."""
-    if not text or not text.strip():
-        return None
     text = text.strip()
+    if not text:
+        return None
     # "The answer is 8." or "The answer is 8"
     m = re.search(r"[Tt]he answer is\s*[:=]?\s*([^\s.,;]+)", text, re.IGNORECASE)
     if m:

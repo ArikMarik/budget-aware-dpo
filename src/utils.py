@@ -26,3 +26,8 @@ def set_seed(seed: int = 42) -> None:
         transformers.set_seed(seed)
     except (ImportError, AttributeError):
         pass
+
+
+def approx_tokens(text: str) -> int:
+    """Word count as proxy for token count."""
+    return max(1, len(str(text).split()))

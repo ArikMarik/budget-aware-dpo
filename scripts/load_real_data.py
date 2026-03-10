@@ -10,14 +10,21 @@ import re
 from pathlib import Path
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, REAL_DATASET_PATH
+from src.evaluation.answer_extraction import extract_answer, normalize_answer
 from src.utils import set_seed
+from src.utils import approx_tokens
 
 set_seed(42)
 
 
-def approx_tokens(text: str) -> int:
-    """Word count as proxy for token count."""
-    return max(1, len(str(text).split()))
+def verify_correctness(generated_solution: str, expected_answer: str) -> bool:
+    """Verify if generated_solution matches expected_answer. Returns False when expected_answer empty (cannot verify)."""
+    if not expected_answer or not str(expected_answer).strip():
+        return False  # No ground truth: cannot verify, treat as incorrect
+    pred = extract_answer(generated_solution)
+    if pred is None:
+        return False
+    return normalize_answer(pred) == normalize_answer(str(expected_answer))
 
 
 def extract_gsm8k_answer(answer: str) -> str:
@@ -29,13 +36,14 @@ def extract_gsm8k_answer(answer: str) -> str:
 def convert_openmathinstruct(item: dict) -> dict:
     """Convert OpenMathInstruct-2 item to our format."""
     solution = item.get("generated_solution", "")
+    expected = item.get("expected_answer", "")
     return {
         "problem": item["problem"],
         "generated_solution": solution,
-        "expected_answer": item.get("expected_answer", ""),
+        "expected_answer": expected,
         "problem_source": item.get("problem_source", "unknown"),
         "teacher_token_count": approx_tokens(solution),
-        "correctness_flag": True,  # Assume correct for training data
+        "correctness_flag": verify_correctness(solution, expected),
     }
 
 
