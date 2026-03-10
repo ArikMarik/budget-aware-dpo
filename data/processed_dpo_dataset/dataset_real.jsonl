@@ -16,17 +16,3 @@
 {"problem": "Solve the differential equation dy/dx = 2y with y(0)=1.", "chosen": "Separating variables: dy/y=2dx. Integrating: ln|y|=2x+C. y(0)=1 gives C=0. So y=e^(2x).", "rejected": "The answer is 42.", "complexity": 1, "rejection_reason": "correctness"}
 {"problem": "Prove sqrt(2) is irrational.", "chosen": "Assume sqrt(2)=p/q in lowest terms. Then 2q^2=p^2, so p^2 even, hence p even. Write p=2m. Then 2q^2=4m^2, so q^2 even, q even. Contradiction.", "rejected": "The answer is 42.", "complexity": 1, "rejection_reason": "correctness"}
 {"problem": "Evaluate the integral of x*e^x dx.", "chosen": "Integration by parts: u=x, dv=e^x dx. Result: x*e^x - e^x + C.", "rejected": "The answer is 42.", "complexity": 1, "rejection_reason": "correctness"}
-{"problem": "A store has 12 shirts. They sell 4. How many remain?", "chosen": "The answer is 8.", "rejected": "Let me think step by step. The answer is 8.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "There are 9 birds. 3 fly away. How many stay?", "chosen": "The answer is 6.", "rejected": "Let me think step by step. The answer is 6.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "A box has 15 pencils. 7 are used. How many left?", "chosen": "The answer is 8.", "rejected": "Let me think step by step. The answer is 8.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "There are 6 dogs. 4 more arrive. How many dogs?", "chosen": "The answer is 10.", "rejected": "Let me think step by step. The answer is 10.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "A garden has 11 flowers. 2 wilt. How many bloom?", "chosen": "The answer is 9.", "rejected": "Let me think step by step. The answer is 9.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "A class has 18 students. 6 are absent. Present?", "chosen": "The answer is 12.", "rejected": "Let me think step by step. The answer is 12.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "There are 16 balls. 9 are red. How many others?", "chosen": "The answer is 7.", "rejected": "Let me think step by step. The answer is 7.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "A farm has 13 chickens. 5 are sold. Left?", "chosen": "The answer is 8.", "rejected": "Let me think step by step. The answer is 8.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "There are 22 students. 9 leave. How many stay?", "chosen": "The answer is 13.", "rejected": "Let me think step by step. The answer is 13.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "A basket has 19 eggs. 7 break. Good eggs?", "chosen": "The answer is 12.", "rejected": "Let me think step by step. The answer is 12.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "There are 24 trees. 10 are oak. Others?", "chosen": "The answer is 14.", "rejected": "Let me think step by step. The answer is 14.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "A zoo has 21 monkeys. 6 move. How many stay?", "chosen": "The answer is 15.", "rejected": "Let me think step by step. The answer is 15.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "What is 2 + 2?", "chosen": "The answer is 4.", "rejected": "Let me think step by step. The answer is 4.", "complexity": 0, "rejection_reason": "length"}
-{"problem": "What is 2 + 2?", "chosen": "The answer is 4.", "rejected": "Let me think step by step. The answer is 4.", "complexity": 0, "rejection_reason": "length"}

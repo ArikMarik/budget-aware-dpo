@@ -9,6 +9,8 @@ Preference Labeling:
 - Easy-Correct: Short direct paths = Preferred; verbose redundant = Rejected
 - Hard-Correct: Detailed CoT = Preferred; oversimplified = Rejected
 - Incorrect: Logically flawed = Rejected (all levels)
+
+See docs/preprocessing_analysis_and_spec.md for full specification.
 """
 
 import json
@@ -16,6 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from src.evaluation.answer_extraction import extract_answer, normalize_answer
 from src.utils import approx_tokens, set_seed
 
 set_seed(42)
@@ -25,7 +28,17 @@ logger = logging.getLogger(__name__)
 # Thresholds for complexity classification
 EASY_TOKEN_THRESHOLD = 50  # Below = Easy
 HARD_TOKEN_THRESHOLD = 80  # Above = Hard (MATH-like)
-# Between: use problem_source (gsm8k -> Easy, math -> Hard)
+
+
+def _verify_correctness(example: dict) -> bool:
+    """Ensure correctness_flag is set. Compute from expected_answer if missing."""
+    if "correctness_flag" in example:
+        return bool(example["correctness_flag"])
+    expected = example.get("expected_answer", "")
+    if not expected or not str(expected).strip():
+        return False
+    pred = extract_answer(example.get("generated_solution", "")) # TODO - verify this
+    return pred is not None and normalize_answer(pred) == normalize_answer(str(expected))
 
 
 def classify_complexity(example: dict) -> int:
@@ -36,15 +49,9 @@ def classify_complexity(example: dict) -> int:
     source = str(example.get("problem_source", "")).lower()
     tokens = example.get("teacher_token_count", 0) or 0
 
-    # TODO - is this what we intended
     if "gsm" in source:
         return 0
     if "math" in source:
-        # TODO - not like it
-    #   if tokens < EASY_TOKEN_THRESHOLD:
-    #     return 0
-    #   if tokens >= HARD_TOKEN_THRESHOLD:
-    #     return 1
         return 1
     if tokens < EASY_TOKEN_THRESHOLD:
         return 0
@@ -53,86 +60,202 @@ def classify_complexity(example: dict) -> int:
     return 0  # Default to Easy for ambiguous
 
 
-# TODO - check that the real data has the key "correctness_flag" (it seems like only the dummy data does - PROBLEM is true)
 def label_preference(example: dict, complexity: int) -> str:
     """
     Returns "preferred" or "rejected" for this solution.
     """
-    correct = example.get("correctness_flag", True)
+    correct = _verify_correctness(example)
     tokens = example.get("teacher_token_count", 0) or 0
 
     if not correct:
         return "rejected"
 
     if complexity == 0:  # Easy
-        # Short direct = preferred; verbose = rejected
         if tokens <= EASY_TOKEN_THRESHOLD:
             return "preferred"
         return "rejected"
 
     # Hard
-    # Detailed CoT = preferred; oversimplified = rejected
     if tokens >= HARD_TOKEN_THRESHOLD:
         return "preferred"
     return "rejected"
 
 
-# TODO - maybe reattach the end of the solution, that may include the final solution (answer)
 def _make_short_answer(solution: str, expected: str = "") -> str:
-    """Create short answer string from solution or expected_answer."""
-    from src.evaluation.answer_extraction import extract_answer
-    ans = extract_answer(solution) or expected
+    """
+    Create short answer string. Use when solution is correct (or use expected for correct minimal).
+    Only call when we have a correct solution or expected_answer for synthesizing preferred.
+    """
+    ans = extract_answer(solution) or (expected.strip() if expected else "")
     if ans:
         return f"The answer is {ans}."
-    short_solution_length = 100 # TODO - maybe extract into a common constant (~EASY_TOKEN_THRESHOLD)
-    if len(solution) <= short_solution_length: 
+    short_solution_length = 100
+    if len(solution) <= short_solution_length:
         return solution
-    return solution[:short_solution_length//2] + " ... " + solution[-short_solution_length//2:]
+    return solution[: short_solution_length // 2] + " ... " + solution[-short_solution_length // 2 :]
 
 
-def build_dpo_pairs(raw_data: list[dict]) -> list[dict]:
+def _make_verbose_answer(short_solution: str) -> str:
+    """
+    Create verbose (redundant) version from short solution. For Easy: rejected = verbose.
+    Expands to 6-7 sentences with CoT indicators (first, then, later, therefore, etc.).
+    """
+    ans = extract_answer(short_solution) or ""
+    if not ans and short_solution.strip():
+        ans = short_solution.strip().rstrip(".")
+    if not ans:
+        return short_solution
+    return (
+        "Let me think step by step. "
+        "First, I need to understand the problem. "
+        "Then, I will work through the solution carefully. "
+        "Later, I will verify each step. "
+        "So we proceed methodically. "
+        "Therefore, after considering all the details, "
+        f"the answer is {ans}."
+    )
+
+
+def _make_long_reasoning(short_solution: str, expected: str, problem: str) -> str:
+    """
+    Synthesize long CoT-style reasoning from short answer. For Hard: preferred = long.
+    Template-based expansion with 6-7 sentences and CoT indicators.
+    """
+    ans = extract_answer(short_solution) or (expected.strip() if expected else "")
+    if not ans:
+        return short_solution
+    # Truncate problem for context if very long
+    prob_snippet = (problem[:200] + "...") if len(problem) > 200 else problem
+    return (
+        "Let me work through this step by step. "
+        f"First, we examine the problem: {prob_snippet} "
+        "Then, we identify the key quantities and relationships. "
+        "So we set up the necessary equations or reasoning. "
+        "Therefore, after applying the appropriate method, "
+        "we obtain the result. "
+        f"Thus, the answer is {ans}."
+    )
+
+
+def _rejection_reason(rejected_item: dict, expected: str) -> str:
+    """Determine why rejected: 'correctness' (wrong answer) or 'length' (correct but wrong length)."""
+    if not _verify_correctness(rejected_item):
+        return "correctness"
+    return "length"
+
+
+def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
     """
     Group by (problem, complexity) and build preferred/rejected pairs.
-    When natural pairs exist (multiple solutions per problem), use them.
-    Otherwise create synthetic pairs: Easy = short preferred / verbose rejected;
-    Hard = CoT preferred / oversimplified rejected.
+    Returns (real_pairs, synthesized_pairs, skipped_groups).
+    Each pair has: problem, chosen, rejected, complexity, rejection_reason.
     """
     from collections import defaultdict
-    groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
 
+    groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for ex in raw_data:
         c = classify_complexity(ex)
         label = label_preference(ex, c)
-        # TODO - maybe we should somehow add an id per problem instead of having the full problem text
         groups[(ex["problem"], c)].append({**ex, "complexity": c, "label": label})
 
-    pairs = []
+    real_pairs: list[dict] = []
+    synthesized_pairs: list[dict] = []
+    skipped_groups = 0
+
     for (problem, complexity), items in groups.items():
-        preferred = filter(lambda item: item['label'] == 'preferred', items)
-        rejected = filter(lambda item: item['label'] == 'rejected', items)
+        preferred = [x for x in items if x["label"] == "preferred"]
+        rejected = [x for x in items if x["label"] == "rejected"]
+        expected = items[0].get("expected_answer", "") if items else ""
+
+        # Natural pairs: both preferred and rejected exist
+        # If rejection reason is correctness, the pair teaches correctness not length — useless for our goal.
+        # Synthesize a length-based pair instead (complexity=0: short preferred, verbose rejected;
+        # complexity=1: long preferred, short rejected).
         if preferred and rejected:
             for pw in preferred:
                 for rj in rejected:
-                    pairs.append({
-                        "problem": problem,
-                        "chosen": pw["generated_solution"],
-                        "rejected": rj["generated_solution"],
-                        "complexity": complexity,
-                    })
-        # TODO - if there are enough examples, it might be better to skip these cases where there is only preferred/rejected
-        elif items:
-            # Synthetic pair: create short vs long from first item
-            # TODO - add more cases here
-            # assumes correct, but no short answer so generates a short answer
-            for ex in items:
+                    reason = _rejection_reason(rj, expected)
+                    if reason == "correctness":
+                        # Replace with synthesized length-based pair
+                        short = _make_short_answer(pw["generated_solution"], expected)
+                        if complexity == 0:
+                            synthesized_pairs.append({
+                                "problem": problem,
+                                "chosen": short,
+                                "rejected": _make_verbose_answer(short),
+                                "complexity": 0,
+                                "rejection_reason": "length",
+                            })
+                        else:
+                            # Hard: preferred = long (use actual preferred), rejected = short
+                            synthesized_pairs.append({
+                                "problem": problem,
+                                "chosen": pw["generated_solution"],
+                                "rejected": short,
+                                "complexity": 1,
+                                "rejection_reason": "length",
+                            })
+                    else:
+                        real_pairs.append({
+                            "problem": problem,
+                            "chosen": pw["generated_solution"],
+                            "rejected": rj["generated_solution"],
+                            "complexity": complexity,
+                            "rejection_reason": reason,
+                        })
+            continue
+
+        # Synthetic: preferred-only
+        if preferred and not rejected:
+            for ex in preferred:
                 sol = ex["generated_solution"]
-                expected = ex.get("expected_answer", "")
-                short = _make_short_answer(sol, expected)
-                if rejected and complexity == 0:  # Easy: short preferred, verbose rejected
-                        pairs.append({"problem": problem, "chosen": short, "rejected": sol, "complexity": 0})
-                elif preferred and complexity == 1:  # Hard: CoT preferred, oversimplified rejected
-                        pairs.append({"problem": problem, "chosen": sol, "rejected": short, "complexity": 1})
-    return pairs
+                exp = ex.get("expected_answer", expected)
+                if not _verify_correctness(ex):
+                    continue  # Should not happen for preferred
+                if complexity == 0:
+                    # Easy: short preferred, synthesize verbose rejected
+                    short = _make_short_answer(sol, exp)
+                    verbose = _make_verbose_answer(short)
+                    synthesized_pairs.append({
+                        "problem": problem,
+                        "chosen": short,
+                        "rejected": verbose,
+                        "complexity": 0,
+                        "rejection_reason": "length",
+                    })
+                else:
+                    # Hard: long preferred, synthesize short rejected
+                    short = _make_short_answer(sol, exp)
+                    synthesized_pairs.append({
+                        "problem": problem,
+                        "chosen": sol,
+                        "rejected": short,
+                        "complexity": 1,
+                        "rejection_reason": "length",
+                    })
+            continue
+
+        # Synthetic: rejected-only — synthesize minimal correct as preferred
+        # Complexity=0: preferred = short; complexity=1: preferred = long (synthesize CoT)
+        if rejected and not preferred:
+            if not expected or not str(expected).strip():
+                skipped_groups += 1
+                continue
+            if complexity == 0:
+                preferred_synth = _make_short_answer("", expected)
+            else:
+                preferred_synth = _make_long_reasoning("", expected, problem)
+            for rj in rejected:
+                synthesized_pairs.append({
+                    "problem": problem,
+                    "chosen": preferred_synth,
+                    "rejected": rj["generated_solution"],
+                    "complexity": complexity,
+                    "rejection_reason": "correctness",
+                })
+            continue
+
+    return real_pairs, synthesized_pairs, skipped_groups
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -146,28 +269,58 @@ def load_jsonl(path: Path) -> list[dict]:
     return data
 
 
-def compute_statistics(pairs: list[dict]) -> dict[str, Any]:
-    """Compute and log dataset statistics."""
-    if len(pairs) == 0:
-        return {}
+def compute_statistics(
+    real_pairs: list[dict],
+    synthesized_pairs: list[dict],
+    skipped_groups: int,
+) -> dict[str, Any]:
+    """Compute full statistics per spec (Section 4)."""
+    all_pairs = real_pairs + synthesized_pairs
+    total = len(all_pairs)
 
-    preferred_lens, rejected_lens, complexities, easy, hard = [], [], [], 0, 0
-    for pair in pairs:
-        preferred_lens.append(approx_tokens(pair["chosen"]))
-        rejected_lens.append(approx_tokens(pair["rejected"]))
-        complexities.append(pair["complexity"])
-        easy += pair["complexity"] == 0
-        hard += pair["complexity"] == 1
+    if total == 0:
+        return {
+            "total_real_pairs": 0,
+            "total_synthesized_pairs": 0,
+            "total_pairs": 0,
+            "skipped_groups": skipped_groups,
+        }
 
-    stats = {
-        "total_pairs": len(pairs),
+    # Rejection reason counts
+    rej_correctness = sum(1 for p in all_pairs if p.get("rejection_reason") == "correctness")
+    rej_length = sum(1 for p in all_pairs if p.get("rejection_reason") == "length")
+    rej_correctness_real = sum(1 for p in real_pairs if p.get("rejection_reason") == "correctness")
+    rej_correctness_synth = sum(1 for p in synthesized_pairs if p.get("rejection_reason") == "correctness")
+    rej_length_real = sum(1 for p in real_pairs if p.get("rejection_reason") == "length")
+    rej_length_synth = sum(1 for p in synthesized_pairs if p.get("rejection_reason") == "length")
+
+    # Complexity
+    easy = sum(1 for p in all_pairs if p["complexity"] == 0)
+    hard = sum(1 for p in all_pairs if p["complexity"] == 1)
+
+    # Token stats
+    preferred_lens = [approx_tokens(p["chosen"]) for p in all_pairs]
+    rejected_lens = [approx_tokens(p["rejected"]) for p in all_pairs]
+
+    return {
+        "total_real_pairs": len(real_pairs),
+        "total_synthesized_pairs": len(synthesized_pairs),
+        "total_pairs": total,
+        "real_pairs_pct": round(100 * len(real_pairs) / total, 2),
+        "synthesized_pairs_pct": round(100 * len(synthesized_pairs) / total, 2),
+        "rejected_by_correctness": rej_correctness,
+        "rejected_by_length": rej_length,
+        "rejected_by_correctness_pct": round(100 * rej_correctness / total, 2),
+        "rejected_by_length_pct": round(100 * rej_length / total, 2),
+        "rejected_by_correctness_real": rej_correctness_real,
+        "rejected_by_correctness_synthesized": rej_correctness_synth,
+        "rejected_by_length_real": rej_length_real,
+        "rejected_by_length_synthesized": rej_length_synth,
         "easy_pairs": easy,
         "hard_pairs": hard,
-        "avg_preferred_tokens": sum(preferred_lens) / len(preferred_lens),
-        "avg_rejected_tokens": sum(rejected_lens) / len(rejected_lens),
-        "preferred_by_complexity": {
-            0: sum(preferred_lens[i] for i in range(len(pairs)) if complexities[i] == 0) / max(1, easy),
-            1: sum(preferred_lens[i] for i in range(len(pairs)) if complexities[i] == 1) / max(1, hard),
-        },
+        "easy_pairs_pct": round(100 * easy / total, 2),
+        "hard_pairs_pct": round(100 * hard / total, 2),
+        "avg_preferred_tokens": round(sum(preferred_lens) / len(preferred_lens), 2),
+        "avg_rejected_tokens": round(sum(rejected_lens) / len(rejected_lens), 2),
+        "skipped_groups": skipped_groups,
     }
-    return stats

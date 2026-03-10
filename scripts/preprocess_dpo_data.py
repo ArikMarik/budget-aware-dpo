@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Data preprocessing: 4-way augmentation, complexity classification, DPO pair creation.
-Skips processing and loads from disk if processed dataset already exists.
+Saves real_pairs and synthesized_pairs separately for analysis; combines into dataset.jsonl for training.
+Skips processing if all output files already exist.
 """
 
 import json
@@ -37,13 +38,22 @@ def get_output_path() -> Path:
     return PROCESSED_DATASET_PATH_REAL
 
 
+def _write_jsonl(path: Path, pairs: list[dict]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for p in pairs:
+            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+
+
 def main():
     output_dir = get_output_path()
     output_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = output_dir / "metadata.json"
-    dataset_path = output_dir / "dataset.jsonl"
 
-    if meta_path.exists() and dataset_path.exists():
+    dataset_path = output_dir / "dataset.jsonl"
+    real_path = output_dir / "dataset_real.jsonl"
+    synthesized_path = output_dir / "dataset_synthesized.jsonl"
+    meta_path = output_dir / "metadata.json"
+
+    if all(p.exists() for p in (dataset_path, real_path, synthesized_path, meta_path)):
         logger.info("Processed dataset exists at %s. Loading from disk.", output_dir)
         with open(meta_path) as f:
             stats = json.load(f)
@@ -61,19 +71,29 @@ def main():
         )
 
     raw_data = load_jsonl(input_path)
-    pairs = build_dpo_pairs(raw_data)
-    stats = compute_statistics(pairs)
+    real_pairs, synthesized_pairs, skipped_groups = build_dpo_pairs(raw_data)
+    all_pairs = real_pairs + synthesized_pairs
+    stats = compute_statistics(real_pairs, synthesized_pairs, skipped_groups)
 
     logger.info("Dataset statistics: %s", stats)
 
-    # Serialize
-    with open(dataset_path, "w", encoding="utf-8") as f:
-        for p in pairs:
-            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+    # Save separated (for analysis)
+    _write_jsonl(real_path, real_pairs)
+    _write_jsonl(synthesized_path, synthesized_pairs)
+
+    # Save combined (for training)
+    _write_jsonl(dataset_path, all_pairs)
+
     with open(meta_path, "w") as f:
         json.dump(stats, f, indent=2)
 
-    logger.info("Saved processed dataset to %s", output_dir)
+    logger.info(
+        "Saved to %s: dataset.jsonl (%d), dataset_real.jsonl (%d), dataset_synthesized.jsonl (%d)",
+        output_dir,
+        len(all_pairs),
+        len(real_pairs),
+        len(synthesized_pairs),
+    )
 
 
 if __name__ == "__main__":
