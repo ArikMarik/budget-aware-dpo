@@ -29,5 +29,12 @@ def set_seed(seed: int = 42) -> None:
 
 
 def approx_tokens(text: str) -> int:
-    """Word count as proxy for token count."""
+    """Word count as proxy for token count. Deprecated: prefer count_tokens_tiktoken for preprocessing."""
     return max(1, len(str(text).split()))
+
+
+def count_tokens_tiktoken(text: str) -> int:
+    """Token count using tiktoken cl100k_base (GPT-4/Claude compatible)."""
+    import tiktoken
+    enc = tiktoken.get_encoding("cl100k_base")
+    return len(enc.encode(str(text) if text else ""))

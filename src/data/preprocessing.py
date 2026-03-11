@@ -2,32 +2,46 @@
 4-Way Augmentation Pipeline: Complexity classification and DPO preference labeling.
 
 Complexity Flag C:
-- C=0 (Easy): GSM8K origin or low token count
-- C=1 (Hard): MATH origin or high token count
+- C=0 (Easy): GSM8K (always), MATH level 1-2, or low token count
+- C=1 (Hard): MATH level 4-5 or high token count
+
+GSM8K invariant: Always C=0; never affected by level or token heuristics.
 
 Preference Labeling:
 - Easy-Correct: Short direct paths = Preferred; verbose redundant = Rejected
 - Hard-Correct: Detailed CoT = Preferred; oversimplified = Rejected
 - Incorrect: Logically flawed = Rejected (all levels)
 
-See docs/preprocessing_analysis_and_spec.md for full specification.
+See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessing_and_wandb.md.
 """
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 from src.evaluation.answer_extraction import extract_answer, normalize_answer
-from src.utils import approx_tokens, set_seed
+from src.utils import count_tokens_tiktoken, set_seed
 
 set_seed(42)
 
 logger = logging.getLogger(__name__)
 
-# Thresholds for complexity classification
-EASY_TOKEN_THRESHOLD = 50  # Below = Easy
-HARD_TOKEN_THRESHOLD = 80  # Above = Hard (MATH-like)
+# Configurable thresholds (env or defaults); tiktoken cl100k_base
+EASY_TOKEN_THRESHOLD = int(os.environ.get("EASY_TOKEN_THRESHOLD", "70"))
+HARD_TOKEN_THRESHOLD = int(os.environ.get("HARD_TOKEN_THRESHOLD", "130"))
+
+_VALID_MATH_LEVELS = {"1", "2", "3", "4", "5"}
+
+
+def _get_teacher_token_count(example: dict) -> int:
+    """Get teacher token count; compute from generated_solution if missing."""
+    tc = example.get("teacher_token_count")
+    if tc is not None and tc != 0:
+        return int(tc)
+    sol = example.get("generated_solution", "") or ""
+    return count_tokens_tiktoken(sol)
 
 
 def _verify_correctness(example: dict) -> bool:
@@ -43,29 +57,51 @@ def _verify_correctness(example: dict) -> bool:
 
 def classify_complexity(example: dict) -> int:
     """
-    C=0 Easy: GSM8K or low teacher token count.
-    C=1 Hard: MATH or high teacher token count.
+    Canonical decision flow (PRD §3.1):
+    1. GSM8K: always C=0 (immediate; no further heuristics)
+    2. MATH: level heuristic when available; else token fallback
+    3. Unknown source: token heuristic only; default Easy if ambiguous
     """
     source = str(example.get("problem_source", "")).lower()
-    tokens = example.get("teacher_token_count", 0) or 0
 
-    if "gsm" in source:
+    # 1. SOURCE CHECK (GSM8K) — invariant: always Easy
+    if "gsm" in source or "gsm8k" in source:
         return 0
+
+    # 2. SOURCE CHECK (MATH)
     if "math" in source:
-        return 1
+        level = example.get("level")
+        level_str = str(level).strip() if level is not None else ""
+        if level_str in _VALID_MATH_LEVELS:
+            if level_str in ("1", "2"):
+                return 0
+            if level_str in ("4", "5"):
+                return 1
+            # Level 3: fall through to token fallback
+        # Level missing or invalid: use token fallback
+        tokens = _get_teacher_token_count(example)
+        if tokens < EASY_TOKEN_THRESHOLD:
+            return 0
+        if tokens > HARD_TOKEN_THRESHOLD:
+            return 1
+        return 0  # Ambiguous medium → default Easy
+
+    # 3. UNKNOWN SOURCE — token heuristic only
+    tokens = _get_teacher_token_count(example)
     if tokens < EASY_TOKEN_THRESHOLD:
         return 0
-    if tokens >= HARD_TOKEN_THRESHOLD:
+    if tokens > HARD_TOKEN_THRESHOLD:
         return 1
-    return 0  # Default to Easy for ambiguous
+    return 0  # Default Easy if ambiguous
 
 
 def label_preference(example: dict, complexity: int) -> str:
     """
     Returns "preferred" or "rejected" for this solution.
+    Uses tiktoken and same thresholds (70/130) as classify_complexity.
     """
     correct = _verify_correctness(example)
-    tokens = example.get("teacher_token_count", 0) or 0
+    tokens = _get_teacher_token_count(example)
 
     if not correct:
         return "rejected"
@@ -280,6 +316,8 @@ def compute_statistics(
 
     if total == 0:
         return {
+            "easy_token_threshold": EASY_TOKEN_THRESHOLD,
+            "hard_token_threshold": HARD_TOKEN_THRESHOLD,
             "total_real_pairs": 0,
             "total_synthesized_pairs": 0,
             "total_pairs": 0,
@@ -298,11 +336,13 @@ def compute_statistics(
     easy = sum(1 for p in all_pairs if p["complexity"] == 0)
     hard = sum(1 for p in all_pairs if p["complexity"] == 1)
 
-    # Token stats
-    preferred_lens = [approx_tokens(p["chosen"]) for p in all_pairs]
-    rejected_lens = [approx_tokens(p["rejected"]) for p in all_pairs]
+    # Token stats (tiktoken for consistency)
+    preferred_lens = [count_tokens_tiktoken(p["chosen"]) for p in all_pairs]
+    rejected_lens = [count_tokens_tiktoken(p["rejected"]) for p in all_pairs]
 
     return {
+        "easy_token_threshold": EASY_TOKEN_THRESHOLD,
+        "hard_token_threshold": HARD_TOKEN_THRESHOLD,
         "total_real_pairs": len(real_pairs),
         "total_synthesized_pairs": len(synthesized_pairs),
         "total_pairs": total,

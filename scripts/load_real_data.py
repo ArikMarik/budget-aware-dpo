@@ -11,8 +11,7 @@ from pathlib import Path
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, REAL_DATASET_PATH
 from src.evaluation.answer_extraction import extract_answer, normalize_answer
-from src.utils import set_seed
-from src.utils import approx_tokens
+from src.utils import count_tokens_tiktoken, set_seed
 
 set_seed(42)
 
@@ -54,7 +53,7 @@ def convert_openmathinstruct(item: dict, problem_to_level: dict | None = None) -
         "generated_solution": solution,
         "expected_answer": expected,
         "problem_source": item.get("problem_source", "unknown"),
-        "teacher_token_count": approx_tokens(solution),
+        "teacher_token_count": count_tokens_tiktoken(solution),
         "correctness_flag": verify_correctness(solution, expected),
     }
     problem = item.get("problem", "")
