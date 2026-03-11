@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--data-limit", type=int, default=None, help="Limit samples (for dummy)")
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir or str(get_budget_aware_output_dir()))
@@ -35,6 +36,7 @@ def main():
         data_limit=args.data_limit,
         resume_from=args.resume_from,
         seed=args.seed,
+        use_wandb=args.wandb,
     )
 
 

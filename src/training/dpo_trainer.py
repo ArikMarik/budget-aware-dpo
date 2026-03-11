@@ -87,6 +87,7 @@ def train_dpo(
     data_limit: Optional[int] = None,
     resume_from: Optional[str] = None,
     seed: int = 42,
+    use_wandb: bool = False,
 ) -> dict:
     """
     Train DPO (baseline or budget-aware). Returns metrics dict.
@@ -166,6 +167,19 @@ def train_dpo(
     with open(output_dir / "training_config.json", "w") as f:
         json.dump(config, f, indent=2)
 
+    # W&B init (only when use_wandb=True)
+    wandb_run = None
+    if use_wandb:
+        import wandb
+        wandb_mode = os.environ.get("WANDB_MODE", "online")
+        wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "budget-aware-dpo"),
+            name=os.environ.get("WANDB_RUN_NAME"),
+            config=config,
+            mode=wandb_mode,
+        )
+        wandb_run = wandb.run
+
     metrics_log = []
     step = 0
     epoch = 0
@@ -193,6 +207,8 @@ def train_dpo(
             pad_id = tokenizer.pad_token_id or 0
             chosen_lens_t = (chosen_tok["input_ids"] != pad_id).sum(dim=-1).float()
             rejected_lens_t = (rejected_tok["input_ids"] != pad_id).sum(dim=-1).float()
+            avg_chosen_tokens = chosen_lens_t.mean().item()
+            avg_rejected_tokens = rejected_lens_t.mean().item()
 
             loss, extra = loss_fn(
                 policy_chosen_lp,
@@ -217,6 +233,21 @@ def train_dpo(
                     entry.update(extra)
                 metrics_log.append(entry)
                 print(f"Step {step} loss: {loss.item():.4f}")
+
+                # W&B logging
+                if use_wandb and wandb_run:
+                    log_dict = {
+                        "train/loss": loss.item(),
+                        "train/step": step,
+                        "train/avg_chosen_tokens": avg_chosen_tokens,
+                        "train/avg_rejected_tokens": avg_rejected_tokens,
+                        "train/token_diff": avg_chosen_tokens - avg_rejected_tokens,
+                        "train/learning_rate": optimizer.param_groups[0]["lr"],
+                    }
+                    if extra and "length_penalty" in extra:
+                        log_dict["train/length_penalty"] = extra["length_penalty"]
+                    import wandb
+                    wandb.log(log_dict, step=step)
 
             if step % checkpoint_every == 0:
                 ckpt_path = output_dir / f"checkpoint-{step}"
