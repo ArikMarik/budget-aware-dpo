@@ -16,6 +16,18 @@ from src.utils import approx_tokens
 
 set_seed(42)
 
+MATH_CONFIGS = [
+    "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
+    "number_theory", "prealgebra", "precalculus",
+]
+
+
+def normalize_problem(text: str) -> str:
+    """Normalize problem text for matching: collapse whitespace, strip. Improves level lookup for MATH-origin problems."""
+    if not text:
+        return ""
+    return " ".join(str(text).split())
+
 
 def verify_correctness(generated_solution: str, expected_answer: str) -> bool:
     """Verify if generated_solution matches expected_answer. Returns False when expected_answer empty (cannot verify)."""
@@ -33,11 +45,11 @@ def extract_gsm8k_answer(answer: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def convert_openmathinstruct(item: dict) -> dict:
-    """Convert OpenMathInstruct-2 item to our format."""
+def convert_openmathinstruct(item: dict, problem_to_level: dict | None = None) -> dict:
+    """Convert OpenMathInstruct-2 item to our format. Add level when problem_source has math and problem matches MATH train."""
     solution = item.get("generated_solution", "")
     expected = item.get("expected_answer", "")
-    return {
+    out = {
         "problem": item["problem"],
         "generated_solution": solution,
         "expected_answer": expected,
@@ -45,18 +57,53 @@ def convert_openmathinstruct(item: dict) -> dict:
         "teacher_token_count": approx_tokens(solution),
         "correctness_flag": verify_correctness(solution, expected),
     }
+    problem = item.get("problem", "")
+    source = str(item.get("problem_source", "")).lower()
+    if problem_to_level and "math" in source and problem:
+        out["level"] = problem_to_level.get(normalize_problem(problem), "")
+    else:
+        out["level"] = ""
+    return out
+
+
+def load_math_problem_to_level() -> dict[str, str]:
+    """Load MATH train split and build problem text -> level mapping. Used to enrich OpenMathInstruct-2 with levels."""
+    from datasets import load_dataset, concatenate_datasets
+
+    try:
+        parts = [
+            load_dataset("EleutherAI/hendrycks_math", cfg, split="train", trust_remote_code=False)
+            for cfg in MATH_CONFIGS
+        ]
+        ds = concatenate_datasets(parts)
+    except Exception:
+        try:
+            ds = load_dataset("hendrycks/competition_math", split="train")
+        except Exception:
+            ds = load_dataset("lighteval/MATH", split="train")
+    mapping = {}
+    for item in ds:
+        problem = item.get("problem", item.get("question", ""))
+        level = item.get("level", "")
+        if problem and level:
+            mapping[normalize_problem(problem)] = str(level)
+    return mapping
 
 
 def load_openmathinstruct(split: str = "train_1M", limit: int | None = None) -> list[dict]:
-    """Load OpenMathInstruct-2 from HuggingFace."""
+    """Load OpenMathInstruct-2 from HuggingFace. Enriches MATH-origin problems with level from MATH train."""
     from datasets import load_dataset
+
+    print("Loading MATH train for level mapping...")
+    problem_to_level = load_math_problem_to_level()
+    print(f"Built level map for {len(problem_to_level):,} MATH problems")
 
     dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split)
     examples = []
     for i, item in enumerate(dataset):
         if limit and i >= limit:
             break
-        examples.append(convert_openmathinstruct(dict(item)))
+        examples.append(convert_openmathinstruct(dict(item), problem_to_level))
     return examples
 
 
@@ -74,12 +121,6 @@ def load_gsm8k_test() -> list[dict]:
             "problem_source": "gsm8k",
         })
     return examples
-
-
-MATH_CONFIGS = [
-    "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
-    "number_theory", "prealgebra", "precalculus",
-]
 
 
 def load_math_test() -> list[dict]:
@@ -118,7 +159,7 @@ def load_math_test() -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", default="train_1M", help="OpenMathInstruct split: train_1M, train_2M, train_5M, train")
+    parser.add_argument("--split", default="train", help="OpenMathInstruct split: train_1M, train_2M, train_5M, train")
     parser.add_argument("--limit", type=int, default=None, help="Limit training examples (for quick test)")
     parser.add_argument("--skip-test-sets", action="store_true", help="Skip loading GSM8K/MATH test (faster)")
     parser.add_argument("--test-sets-only", action="store_true", help="Load only GSM8K/MATH test (for Phase 9 evaluation)")

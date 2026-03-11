@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""
+Enrich existing real_openmathinstruct.jsonl with MATH levels.
+Loads MATH train split, builds problem->level map, adds level to each row where problem_source has math.
+Use when you have existing JSONL and don't want to re-download from HuggingFace.
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from src.config import REAL_DATASET_PATH
+from src.utils import set_seed
+
+set_seed(42)
+
+MATH_CONFIGS = [
+    "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
+    "number_theory", "prealgebra", "precalculus",
+]
+
+
+def load_math_problem_to_level() -> dict[str, str]:
+    """Load MATH train and build problem -> level mapping."""
+    from datasets import load_dataset, concatenate_datasets
+
+    try:
+        parts = [
+            load_dataset("EleutherAI/hendrycks_math", cfg, split="train", trust_remote_code=False)
+            for cfg in MATH_CONFIGS
+        ]
+        ds = concatenate_datasets(parts)
+    except Exception:
+        try:
+            ds = load_dataset("hendrycks/competition_math", split="train")
+        except Exception:
+            ds = load_dataset("lighteval/MATH", split="train")
+    mapping = {}
+    for item in ds:
+        problem = item.get("problem", item.get("question", ""))
+        level = item.get("level", "")
+        if problem and level:
+            mapping[problem] = str(level)
+    return mapping
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=Path, default=REAL_DATASET_PATH)
+    parser.add_argument("--output", type=Path, default=None, help="Default: overwrite input")
+    parser.add_argument("--limit", type=int, default=None)
+    args = parser.parse_args()
+
+    if not args.input.exists():
+        print(f"Input not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = args.output or args.input
+    if output_path == args.input and args.limit:
+        print("ERROR: Cannot overwrite input when --limit is used. Specify --output.", file=sys.stderr)
+        sys.exit(1)
+
+    print("Loading MATH train for level mapping...")
+    problem_to_level = load_math_problem_to_level()
+    print(f"Built level map for {len(problem_to_level):,} MATH problems")
+
+    if output_path == args.input:
+        tmp_path = args.input.with_suffix(".jsonl.tmp")
+        out_f = open(tmp_path, "w", encoding="utf-8")
+    else:
+        out_f = open(output_path, "w", encoding="utf-8")
+
+    matched = 0
+    total_math = 0
+    n = 0
+    with open(args.input, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if args.limit and i >= args.limit:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            problem = item.get("problem", "")
+            source = str(item.get("problem_source", "")).lower()
+            if "math" in source:
+                total_math += 1
+                level = problem_to_level.get(problem, "")
+                item["level"] = level
+                if level:
+                    matched += 1
+            else:
+                item["level"] = ""
+            out_f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            n += 1
+            if (n + 1) % 100000 == 0:
+                print(f"  Processed {n + 1:,} lines...", flush=True)
+
+    out_f.close()
+    if tmp_path is not None:
+        tmp_path.replace(args.input)
+    print(f"Done. Processed {n:,} examples. MATH items: {total_math:,}, with level: {matched:,}")
+
+
+if __name__ == "__main__":
+    main()
