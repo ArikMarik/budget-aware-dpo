@@ -73,20 +73,11 @@ def main():
     raw_data = load_jsonl(input_path)
     real_pairs, synthesized_pairs, skipped_groups = build_dpo_pairs(raw_data)
     all_pairs = real_pairs + synthesized_pairs
-    stats = compute_statistics(real_pairs, synthesized_pairs, skipped_groups)
 
-    logger.info("Dataset statistics: %s", stats)
-
-    # Save separated (for analysis)
+    # Save data first (before compute_statistics) so data is persisted if stats crash
     _write_jsonl(real_path, real_pairs)
     _write_jsonl(synthesized_path, synthesized_pairs)
-
-    # Save combined (for training)
     _write_jsonl(dataset_path, all_pairs)
-
-    with open(meta_path, "w") as f:
-        json.dump(stats, f, indent=2)
-
     logger.info(
         "Saved to %s: dataset.jsonl (%d), dataset_real.jsonl (%d), dataset_synthesized.jsonl (%d)",
         output_dir,
@@ -94,6 +85,11 @@ def main():
         len(real_pairs),
         len(synthesized_pairs),
     )
+
+    stats = compute_statistics(real_pairs, synthesized_pairs, skipped_groups)
+    logger.info("Dataset statistics: %s", stats)
+    with open(meta_path, "w") as f:
+        json.dump(stats, f, indent=2)
 
 
 if __name__ == "__main__":

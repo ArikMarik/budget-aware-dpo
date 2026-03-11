@@ -9,7 +9,9 @@ export PYTHONPATH="$(pwd)"
 
 mkdir -p logs
 
-nohup python scripts/analyze_complexity_heuristics.py --no-training \
+nohup env PYTHONUNBUFFERED=1 python scripts/analyze_complexity_heuristics.py \
+  --training-only \
+  --training data/real_openmathinstruct.jsonl \
   -o docs/feature_reports/report_complexity_heuristics_analysis.md \
   > logs/analyze_complexity_heuristics.log 2>&1 &
 

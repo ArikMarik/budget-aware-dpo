@@ -188,8 +188,14 @@ def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
     """
     from collections import defaultdict
 
+    try:
+        from tqdm import tqdm
+        raw_iter = tqdm(raw_data, desc="Classifying & labeling", unit=" examples")
+    except ImportError:
+        raw_iter = raw_data
+
     groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
-    for ex in raw_data:
+    for ex in raw_iter:
         c = classify_complexity(ex)
         label = label_preference(ex, c)
         groups[(ex["problem"], c)].append({**ex, "complexity": c, "label": label})
@@ -295,9 +301,15 @@ def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
 
 
 def load_jsonl(path: Path) -> list[dict]:
+    try:
+        from tqdm import tqdm
+        iterator = lambda f: tqdm(f, desc="Loading JSONL", unit=" lines")
+    except ImportError:
+        iterator = lambda f: f
+
     data = []
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line in iterator(f):
             line = line.strip()
             if not line:
                 continue
@@ -324,21 +336,36 @@ def compute_statistics(
             "skipped_groups": skipped_groups,
         }
 
-    # Rejection reason counts
-    rej_correctness = sum(1 for p in all_pairs if p.get("rejection_reason") == "correctness")
-    rej_length = sum(1 for p in all_pairs if p.get("rejection_reason") == "length")
+    # Single pass over all_pairs with tqdm
+    try:
+        from tqdm import tqdm
+        pairs_iter = tqdm(all_pairs, desc="Computing statistics", unit=" pairs")
+    except ImportError:
+        pairs_iter = all_pairs
+
+    rej_correctness = 0
+    rej_length = 0
+    easy = 0
+    hard = 0
+    for p in pairs_iter:
+        rr = p.get("rejection_reason")
+        if rr == "correctness":
+            rej_correctness += 1
+        elif rr == "length":
+            rej_length += 1
+        c = p.get("complexity", 0)
+        if c == 0:
+            easy += 1
+        else:
+            hard += 1
+
     rej_correctness_real = sum(1 for p in real_pairs if p.get("rejection_reason") == "correctness")
     rej_correctness_synth = sum(1 for p in synthesized_pairs if p.get("rejection_reason") == "correctness")
     rej_length_real = sum(1 for p in real_pairs if p.get("rejection_reason") == "length")
     rej_length_synth = sum(1 for p in synthesized_pairs if p.get("rejection_reason") == "length")
 
-    # Complexity
-    easy = sum(1 for p in all_pairs if p["complexity"] == 0)
-    hard = sum(1 for p in all_pairs if p["complexity"] == 1)
-
-    # Token stats (tiktoken for consistency)
-    preferred_lens = [count_tokens_tiktoken(p["chosen"]) for p in all_pairs]
-    rejected_lens = [count_tokens_tiktoken(p["rejected"]) for p in all_pairs]
+    # Token stats (avg_preferred_tokens, avg_rejected_tokens) skipped for speed.
+    # Run separately in parallel with training if needed.
 
     return {
         "easy_token_threshold": EASY_TOKEN_THRESHOLD,
@@ -360,7 +387,5 @@ def compute_statistics(
         "hard_pairs": hard,
         "easy_pairs_pct": round(100 * easy / total, 2),
         "hard_pairs_pct": round(100 * hard / total, 2),
-        "avg_preferred_tokens": round(sum(preferred_lens) / len(preferred_lens), 2),
-        "avg_rejected_tokens": round(sum(rejected_lens) / len(rejected_lens), 2),
         "skipped_groups": skipped_groups,
     }
