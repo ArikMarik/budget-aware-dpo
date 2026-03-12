@@ -4,34 +4,149 @@ Shared DPO training logic: data loading, forward pass, checkpointing.
 
 import json
 import os
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
+import numpy as np
 import torch
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
+import wandb
 
 from src.config import CHECKPOINT_DIR, MODEL_NAME, get_processed_dataset_path
 from src.utils import set_seed
 
 
+@dataclass
+class TrainingConfig:
+    use_budget_aware: bool
+    max_steps: int
+    batch_size: int
+    lr: float
+    seed: int
+    data_limit: Optional[int]
+    num_pairs: int
+    num_train_pairs: int
+    num_val_pairs: int
+    val_split: float
+    early_stopping_patience: int
+    early_stopping_threshold: float
+    dpo_beta: float
+    lambda_easy: float
+    lambda_hard: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class EarlyStopping:
+    def __init__(self, patience: int = 5, threshold: float = 0.0, threshold_mode: str = "rel"):
+        self.patience = patience
+        self.threshold = threshold
+        self.threshold_mode = threshold_mode
+        self.counter = 0
+        self.best_score: Optional[float] = None
+        self.early_stop = False
+
+    def __call__(self, val_loss: float) -> bool:
+        score = -val_loss
+
+        if self.best_score is None:
+            self.best_score = score
+            return False
+
+        if self.threshold_mode == "rel":
+            improved = score > self.best_score * (1 + self.threshold)
+        else:
+            improved = score > self.best_score + self.threshold
+
+        if improved:
+            self.best_score = score
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+                return True
+        return False
+
+
+def stratified_split(pairs: list[dict], val_split: float, seed: int) -> tuple[list[dict], list[dict]]:
+    complexities = np.array([p["complexity"] for p in pairs])
+    train_idx, val_idx = train_test_split(
+        np.arange(len(pairs)),
+        test_size=val_split,
+        stratify=complexities,
+        random_state=seed,
+    )
+    pairs_array = np.array(pairs, dtype=object)
+    return pairs_array[train_idx].tolist(), pairs_array[val_idx].tolist()
+
+
 def log_prob(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
-    """Compute sum of log probs for the sequence."""
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = input_ids[..., 1:].contiguous()
     log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
     return torch.gather(log_probs, -1, shift_labels.unsqueeze(-1)).squeeze(-1).sum(-1)
 
 
+def compute_batch_loss(
+    model: torch.nn.Module,
+    ref_model: torch.nn.Module,
+    batch: tuple,
+    tokenizer: AutoTokenizer,
+    loss_fn: callable,
+    device: str,
+) -> tuple[torch.Tensor, dict[str, Any], dict[str, float]]:
+    chosen_tok, rejected_tok, complexities = batch
+    chosen_tok = {k: v.to(device) for k, v in chosen_tok.items()}
+    rejected_tok = {k: v.to(device) for k, v in rejected_tok.items()}
+    complexities = complexities.to(device)
+
+    with torch.no_grad():
+        ref_chosen = ref_model(**chosen_tok).logits
+        ref_rejected = ref_model(**rejected_tok).logits
+    policy_chosen = model(**chosen_tok).logits
+    policy_rejected = model(**rejected_tok).logits
+
+    policy_chosen_lp = log_prob(policy_chosen, chosen_tok["input_ids"])
+    policy_rejected_lp = log_prob(policy_rejected, rejected_tok["input_ids"])
+    ref_chosen_lp = log_prob(ref_chosen, chosen_tok["input_ids"])
+    ref_rejected_lp = log_prob(ref_rejected, rejected_tok["input_ids"])
+
+    pad_id = tokenizer.pad_token_id or 0
+    chosen_lens_t = (chosen_tok["input_ids"] != pad_id).sum(dim=-1).float()
+    rejected_lens_t = (rejected_tok["input_ids"] != pad_id).sum(dim=-1).float()
+
+    loss, extra = loss_fn(
+        policy_chosen_lp,
+        policy_rejected_lp,
+        ref_chosen_lp,
+        ref_rejected_lp,
+        chosen_lens_t,
+        rejected_lens_t,
+        complexities,
+    )
+
+    token_stats = {
+        "avg_chosen_tokens": chosen_lens_t.mean().item(),
+        "avg_rejected_tokens": rejected_lens_t.mean().item(),
+    }
+
+    return loss, extra, token_stats
+
+
 class DPODataset(Dataset):
     def __init__(self, pairs: list[dict]):
         self.pairs = pairs
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.pairs)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict:
         return self.pairs[idx]
 
 
@@ -46,8 +161,7 @@ def load_pairs(limit: Optional[int] = None) -> list[dict]:
     return pairs
 
 
-def collate_fn(batch: list[dict], tokenizer, max_length: int = 512):
-    """Collate batch: prompt, chosen, rejected, complexity."""
+def collate_fn(batch: list[dict], tokenizer: AutoTokenizer, max_length: int = 512):
     prompts, chosens, rejecteds, complexities = [], [], [], []
     for p in batch:
         prompt = f"Problem: {p['problem']}\nSolution:"
@@ -75,6 +189,126 @@ def collate_fn(batch: list[dict], tokenizer, max_length: int = 512):
     return chosen_tok, rejected_tok, complexities_t
 
 
+def create_model(
+    model_name: str,
+    device: str,
+    lora_config: Optional[LoraConfig] = None,
+    resume_from: Optional[str] = None,
+) -> tuple[torch.nn.Module, AutoTokenizer]:
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        device_map="auto" if device == "cuda" else None,
+    )
+    if device == "cpu":
+        model = model.to(device)
+
+    if lora_config is not None:
+        model = get_peft_model(model, lora_config)
+
+    if resume_from:
+        model = PeftModel.from_pretrained(model, resume_from, is_trainable=True)
+
+    model.train()
+
+    for p in model.parameters():
+        p.requires_grad = True
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    return model, tokenizer
+
+
+def create_ref_model(model_name: str, device: str) -> torch.nn.Module:
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        device_map="auto" if device == "cuda" else None,
+    )
+    if device == "cpu":
+        model = model.to(device)
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad = False
+    return model
+
+
+def evaluate(
+    model: torch.nn.Module,
+    ref_model: torch.nn.Module,
+    val_loader: DataLoader,
+    tokenizer: AutoTokenizer,
+    loss_fn: callable,
+    device: str,
+    use_budget_aware: bool,
+) -> float:
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+
+    with torch.inference_mode():
+        for batch in val_loader:
+            loss, _, _ = compute_batch_loss(
+                model, ref_model, batch, tokenizer, loss_fn, device
+            )
+            total_loss += loss.item()
+            num_batches += 1
+
+    model.train()
+    return total_loss / num_batches if num_batches > 0 else 0.0
+
+
+def log_metrics(
+    step: int,
+    train_loss: float,
+    val_loss: Optional[float],
+    avg_chosen_tokens: float,
+    avg_rejected_tokens: float,
+    learning_rate: float,
+    extra: Optional[dict] = None,
+) -> None:
+    log_dict = {
+        "train/loss": train_loss,
+        "train/step": step,
+        "train/avg_chosen_tokens": avg_chosen_tokens,
+        "train/avg_rejected_tokens": avg_rejected_tokens,
+        "train/token_diff": avg_chosen_tokens - avg_rejected_tokens,
+        "train/learning_rate": learning_rate,
+    }
+    if val_loss is not None:
+        log_dict["val/loss"] = val_loss
+    if extra and "length_penalty" in extra:
+        log_dict["train/length_penalty"] = extra["length_penalty"]
+    wandb.log(log_dict, step=step)
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    output_dir: Path,
+    step: int,
+    metrics_log: list,
+) -> None:
+    ckpt_path = output_dir / f"checkpoint-{step}"
+    ckpt_path.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(ckpt_path)
+    tokenizer.save_pretrained(ckpt_path)
+    with open(output_dir / "metrics.json", "w") as f:
+        json.dump(metrics_log, f, indent=2)
+
+
+def save_best_model(
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    output_dir: Path,
+    best_val_loss: float,
+) -> None:
+    best_model_path = output_dir / "best-model"
+    best_model_path.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(best_model_path)
+    tokenizer.save_pretrained(best_model_path)
+    print(f"Saved best model to {best_model_path} (val_loss: {best_val_loss:.4f})")
+
+
 def train_dpo(
     *,
     use_budget_aware: bool,
@@ -88,25 +322,19 @@ def train_dpo(
     resume_from: Optional[str] = None,
     seed: int = 42,
     use_wandb: bool = False,
+    val_split: float = 0.2,
+    early_stopping_patience: int = 5,
+    early_stopping_threshold: float = 0.0,
+    dpo_beta: float = 0.1,
+    lambda_easy: float = 0.05,
+    lambda_hard: float = 0.001,
 ) -> dict:
-    """
-    Train DPO (baseline or budget-aware). Returns metrics dict.
-    """
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     pairs = load_pairs(limit=data_limit)
     if not pairs:
         raise RuntimeError("No DPO pairs found. Run preprocess_dpo_data.py first.")
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
-        device_map="auto" if device == "cuda" else None,
-    )
-    if device == "cpu":
-        model = model.to(device)
 
     lora_config = LoraConfig(
         r=128,
@@ -116,108 +344,95 @@ def train_dpo(
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
-    model = get_peft_model(model, lora_config)
 
-    if resume_from:
-        model = PeftModel.from_pretrained(model, resume_from, is_trainable=True)
-
-    model.train()
-
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
-        device_map="auto" if device == "cuda" else None,
+    model, tokenizer = create_model(
+        MODEL_NAME, device, lora_config=lora_config, resume_from=resume_from
     )
-    if device == "cpu":
-        ref_model = ref_model.to(device)
-    ref_model.eval()
-    for p in ref_model.parameters():
-        p.requires_grad = False
+    ref_model = create_ref_model(MODEL_NAME, device)
 
-    dataset = DPODataset(pairs)
-    dataloader = DataLoader(
-        dataset,
+    train_pairs, val_pairs = stratified_split(pairs, val_split, seed)
+    print(f"Data split: Train={len(train_pairs)}, Val={len(val_pairs)}")
+
+    train_dataset = DPODataset(train_pairs)
+    val_dataset = DPODataset(val_pairs)
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
+        collate_fn=lambda b: collate_fn(b, tokenizer),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
         collate_fn=lambda b: collate_fn(b, tokenizer),
     )
 
     if use_budget_aware:
         from src.models.budget_aware_dpo_loss import budget_aware_dpo_loss
-        def loss_fn(pc, pr, rc, rr, cl, rl, c):
-            return budget_aware_dpo_loss(pc, pr, rc, rr, cl, rl, c, beta=0.1, lambda_easy=0.05, lambda_hard=0.001)
+        loss_fn = lambda pc, pr, rc, rr, cl, rl, c: budget_aware_dpo_loss(
+            pc, pr, rc, rr, cl, rl, c, beta=dpo_beta, lambda_easy=lambda_easy, lambda_hard=lambda_hard
+        )
     else:
         from src.models.standard_dpo_loss import standard_dpo_loss
-        def loss_fn(pc, pr, rc, rr, cl, rl, c):
-            return standard_dpo_loss(pc, pr, rc, rr, beta=0.1)
+        loss_fn = lambda pc, pr, rc, rr, cl, rl, c: standard_dpo_loss(
+            pc, pr, rc, rr, beta=dpo_beta
+        )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    config = {
-        "use_budget_aware": use_budget_aware,
-        "max_steps": max_steps,
-        "batch_size": batch_size,
-        "lr": lr,
-        "seed": seed,
-        "data_limit": data_limit,
-        "num_pairs": len(pairs),
-    }
+    config = TrainingConfig(
+        use_budget_aware=use_budget_aware,
+        max_steps=max_steps,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed,
+        data_limit=data_limit,
+        num_pairs=len(pairs),
+        num_train_pairs=len(train_pairs),
+        num_val_pairs=len(val_pairs),
+        val_split=val_split,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_threshold=early_stopping_threshold,
+        dpo_beta=dpo_beta,
+        lambda_easy=lambda_easy,
+        lambda_hard=lambda_hard,
+    )
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "training_config.json", "w") as f:
-        json.dump(config, f, indent=2)
+        json.dump(config.to_dict(), f, indent=2)
 
-    # W&B init (only when use_wandb=True)
-    wandb_run = None
     if use_wandb:
-        import wandb
         wandb_mode = os.environ.get("WANDB_MODE", "online")
         wandb.init(
             project=os.environ.get("WANDB_PROJECT", "budget-aware-dpo"),
             name=os.environ.get("WANDB_RUN_NAME"),
-            config=config,
+            config=config.to_dict(),
             mode=wandb_mode,
         )
-        wandb_run = wandb.run
 
     metrics_log = []
     step = 0
     epoch = 0
+    best_val_loss = float("inf")
+    early_stopping = EarlyStopping(
+        patience=early_stopping_patience,
+        threshold=early_stopping_threshold,
+        threshold_mode="rel",
+    )
+    best_model_state = None
+
     while step < max_steps:
         epoch_loss = 0.0
-        for batch in dataloader:
+        for batch in train_loader:
             if step >= max_steps:
                 break
-            chosen_tok, rejected_tok, complexities = batch
-            chosen_tok = {k: v.to(device) for k, v in chosen_tok.items()}
-            rejected_tok = {k: v.to(device) for k, v in rejected_tok.items()}
-            complexities = complexities.to(device)
 
-            with torch.no_grad():
-                ref_chosen = ref_model(**chosen_tok).logits
-                ref_rejected = ref_model(**rejected_tok).logits
-            policy_chosen = model(**chosen_tok).logits
-            policy_rejected = model(**rejected_tok).logits
-
-            policy_chosen_lp = log_prob(policy_chosen, chosen_tok["input_ids"])
-            policy_rejected_lp = log_prob(policy_rejected, rejected_tok["input_ids"])
-            ref_chosen_lp = log_prob(ref_chosen, chosen_tok["input_ids"])
-            ref_rejected_lp = log_prob(ref_rejected, rejected_tok["input_ids"])
-
-            pad_id = tokenizer.pad_token_id or 0
-            chosen_lens_t = (chosen_tok["input_ids"] != pad_id).sum(dim=-1).float()
-            rejected_lens_t = (rejected_tok["input_ids"] != pad_id).sum(dim=-1).float()
-            avg_chosen_tokens = chosen_lens_t.mean().item()
-            avg_rejected_tokens = rejected_lens_t.mean().item()
-
-            loss, extra = loss_fn(
-                policy_chosen_lp,
-                policy_rejected_lp,
-                ref_chosen_lp,
-                ref_rejected_lp,
-                chosen_lens_t,
-                rejected_lens_t,
-                complexities,
+            loss, extra, token_stats = compute_batch_loss(
+                model, ref_model, batch, tokenizer, loss_fn, device
             )
 
             optimizer.zero_grad()
@@ -234,37 +449,54 @@ def train_dpo(
                 metrics_log.append(entry)
                 print(f"Step {step} loss: {loss.item():.4f}")
 
-                # W&B logging
-                if use_wandb and wandb_run:
-                    log_dict = {
-                        "train/loss": loss.item(),
-                        "train/step": step,
-                        "train/avg_chosen_tokens": avg_chosen_tokens,
-                        "train/avg_rejected_tokens": avg_rejected_tokens,
-                        "train/token_diff": avg_chosen_tokens - avg_rejected_tokens,
-                        "train/learning_rate": optimizer.param_groups[0]["lr"],
-                    }
-                    if extra and "length_penalty" in extra:
-                        log_dict["train/length_penalty"] = extra["length_penalty"]
-                    import wandb
-                    wandb.log(log_dict, step=step)
+                val_loss = evaluate(
+                    model, ref_model, val_loader, tokenizer, loss_fn, device, use_budget_aware
+                )
+                entry["val_loss"] = val_loss
+                metrics_log[-1] = entry
+                print(f"Step {step} val_loss: {val_loss:.4f}")
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                    print(f"Step {step} new best val_loss: {best_val_loss:.4f}")
+
+                if early_stopping(val_loss):
+                    print(f"Early stopping triggered at step {step}")
+                    break
+
+                if use_wandb:
+                    log_metrics(
+                        step=step,
+                        train_loss=loss.item(),
+                        val_loss=val_loss,
+                        avg_chosen_tokens=token_stats["avg_chosen_tokens"],
+                        avg_rejected_tokens=token_stats["avg_rejected_tokens"],
+                        learning_rate=optimizer.param_groups[0]["lr"],
+                        extra=extra,
+                    )
 
             if step % checkpoint_every == 0:
-                ckpt_path = output_dir / f"checkpoint-{step}"
-                ckpt_path.mkdir(parents=True, exist_ok=True)
-                model.save_pretrained(ckpt_path)
-                tokenizer.save_pretrained(ckpt_path)
-                with open(output_dir / "metrics.json", "w") as f:
-                    json.dump(metrics_log, f, indent=2)
-                print(f"Saved checkpoint to {ckpt_path}")
+                save_checkpoint(
+                    model, tokenizer, output_dir, step, metrics_log
+                )
+                print(f"Saved checkpoint to {output_dir / f'checkpoint-{step}'}")
 
         epoch += 1
-        avg = epoch_loss / len(dataloader)
+        avg = epoch_loss / len(train_loader)
         print(f"Epoch {epoch} avg loss: {avg:.4f}")
+
+        if early_stopping.early_stop:
+            break
+
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        model.to(device)
+        save_best_model(model, tokenizer, output_dir, best_val_loss)
 
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics_log, f, indent=2)
     print(f"Training complete. Saved to {output_dir}")
-    return {"metrics": metrics_log, "config": config}
+    return {"metrics": metrics_log, "config": config.to_dict(), "best_val_loss": best_val_loss}
