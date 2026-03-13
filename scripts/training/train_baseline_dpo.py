@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--checkpoint-every", type=int, default=500)
     parser.add_argument("--eval-every", type=int, default=100)
+    parser.add_argument("--log-every", type=int, default=50, help="Log metrics every N steps (default: 50)")
     parser.add_argument("--data-limit", type=int, default=None, help="Limit samples (for dummy)")
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -37,6 +38,7 @@ def main():
         lr=args.lr,
         checkpoint_every=args.checkpoint_every,
         eval_every=args.eval_every,
+        log_every=args.log_every,
         data_limit=args.data_limit,
         resume_from=args.resume_from,
         seed=args.seed,

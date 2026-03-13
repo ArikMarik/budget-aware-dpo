@@ -59,7 +59,6 @@ def budget_aware_dpo_loss(
     # DPO loss: -log(sigma(reward_diff))
     loss = -F.logsigmoid(reward_diff).mean()
 
-    # Log length penalty for monitoring
-    length_penalty_mean = length_penalty.detach().mean().item()
+    length_penalty_mean = length_penalty.detach().mean()
 
     return loss, {"length_penalty": length_penalty_mean}

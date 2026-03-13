@@ -135,7 +135,7 @@ def main():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
+            total_loss += loss
 
         print(f"Epoch {epoch+1} loss: {total_loss/len(pairs):.4f}")
 
