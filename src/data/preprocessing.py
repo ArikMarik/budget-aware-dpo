@@ -21,6 +21,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from tqdm import tqdm
+
 from src.evaluation.answer_extraction import extract_answer, normalize_answer
 from src.utils import count_tokens_tiktoken, set_seed
 
@@ -188,11 +190,8 @@ def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
     """
     from collections import defaultdict
 
-    try:
-        from tqdm import tqdm
-        raw_iter = tqdm(raw_data, desc="Classifying & labeling", unit=" examples")
-    except ImportError:
-        raw_iter = raw_data
+    raw_iter = tqdm(raw_data, desc="Classifying & labeling", unit=" examples")
+    raw_iter = raw_data
 
     groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for ex in raw_iter:
@@ -204,7 +203,9 @@ def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
     synthesized_pairs: list[dict] = []
     skipped_groups = 0
 
-    for (problem, complexity), items in groups.items():
+    groups_iter = tqdm(groups.items(), desc="Building pairs from groups", unit=" groups")
+
+    for (problem, complexity), items in groups_iter:
         preferred = [x for x in items if x["label"] == "preferred"]
         rejected = [x for x in items if x["label"] == "rejected"]
         expected = items[0].get("expected_answer", "") if items else ""
@@ -301,11 +302,7 @@ def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
 
 
 def load_jsonl(path: Path) -> list[dict]:
-    try:
-        from tqdm import tqdm
-        iterator = lambda f: tqdm(f, desc="Loading JSONL", unit=" lines")
-    except ImportError:
-        iterator = lambda f: f
+    iterator = lambda f: tqdm(f, desc="Loading JSONL", unit=" lines")
 
     data = []
     with open(path, "r", encoding="utf-8") as f:
@@ -337,11 +334,7 @@ def compute_statistics(
         }
 
     # Single pass over all_pairs with tqdm
-    try:
-        from tqdm import tqdm
-        pairs_iter = tqdm(all_pairs, desc="Computing statistics", unit=" pairs")
-    except ImportError:
-        pairs_iter = all_pairs
+    pairs_iter = tqdm(all_pairs, desc="Computing statistics", unit=" pairs")
 
     rej_correctness = 0
     rej_length = 0

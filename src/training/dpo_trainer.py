@@ -8,6 +8,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Any
 
+from tqdm import tqdm
+
 import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
@@ -100,7 +102,8 @@ def compute_batch_loss(
     tokenizer: AutoTokenizer,
     loss_fn: callable,
     device: str,
-) -> tuple[torch.Tensor, dict[str, Any], dict[str, float]]:
+    dpo_beta: float = 0.1,
+) -> tuple[torch.Tensor, dict[str, Any], dict[str, float], dict[str, float]]:
     chosen_tok, rejected_tok, complexities = batch
     chosen_tok = {k: v.to(device) for k, v in chosen_tok.items()}
     rejected_tok = {k: v.to(device) for k, v in rejected_tok.items()}
@@ -131,12 +134,40 @@ def compute_batch_loss(
         complexities,
     )
 
-    token_stats = {
-        "avg_chosen_tokens": chosen_lens_t.mean().item(),
-        "avg_rejected_tokens": rejected_lens_t.mean().item(),
+    logps = {
+        "policy_chosen_lp": policy_chosen_lp.mean().item(),
+        "policy_rejected_lp": policy_rejected_lp.mean().item(),
     }
 
-    return loss, extra, token_stats
+    reward_diff = dpo_beta * (
+        (policy_chosen_lp - ref_chosen_lp) - (policy_rejected_lp - ref_rejected_lp)
+    ).mean().item()
+    logps["reward_diff"] = reward_diff
+
+    reward_diff_per_sample = dpo_beta * (
+        (policy_chosen_lp - ref_chosen_lp) - (policy_rejected_lp - ref_rejected_lp)
+    )
+    per_sample_loss = -torch.nn.functional.logsigmoid(reward_diff_per_sample)
+
+    mask_easy = (complexities == 0).float()
+    mask_hard = (complexities == 1).float()
+
+    if mask_easy.sum() > 0:
+        logps["complexity_0_loss"] = (per_sample_loss * mask_easy).sum() / mask_easy.sum()
+    else:
+        logps["complexity_0_loss"] = 0.0
+
+    if mask_hard.sum() > 0:
+        logps["complexity_1_loss"] = (per_sample_loss * mask_hard).sum() / mask_hard.sum()
+    else:
+        logps["complexity_1_loss"] = 0.0
+
+    token_stats = {
+        "avg_chosen_tokens": chosen_lens_t.mean(),
+        "avg_rejected_tokens": rejected_lens_t.mean(),
+    }
+
+    return loss, extra, token_stats, logps
 
 
 class DPODataset(Dataset):
@@ -197,7 +228,7 @@ def create_model(
 ) -> tuple[torch.nn.Module, AutoTokenizer]:
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         device_map="auto" if device == "cuda" else None,
     )
     if device == "cpu":
@@ -221,7 +252,7 @@ def create_model(
 def create_ref_model(model_name: str, device: str) -> torch.nn.Module:
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         device_map="auto" if device == "cuda" else None,
     )
     if device == "cpu":
@@ -240,21 +271,43 @@ def evaluate(
     loss_fn: callable,
     device: str,
     use_budget_aware: bool,
-) -> float:
+    dpo_beta: float = 0.1,
+) -> tuple[float, dict]:
     model.eval()
-    total_loss = 0.0
+    total_loss = torch.tensor(0.0, device=device)
+    total_reward_diff = 0.0
+    total_complexity_0_loss = 0.0
+    total_complexity_1_loss = 0.0
+    num_complexity_0 = 0
+    num_complexity_1 = 0
     num_batches = 0
 
     with torch.inference_mode():
         for batch in val_loader:
-            loss, _, _ = compute_batch_loss(
-                model, ref_model, batch, tokenizer, loss_fn, device
+            loss, extra, token_stats, logps = compute_batch_loss(
+                model, ref_model, batch, tokenizer, loss_fn, device, dpo_beta
             )
-            total_loss += loss.item()
+            total_loss += loss.detach()
+            total_reward_diff += logps["reward_diff"]
+            if isinstance(logps["complexity_0_loss"], torch.Tensor):
+                total_complexity_0_loss += logps["complexity_0_loss"].item()
+            else:
+                total_complexity_0_loss += logps["complexity_0_loss"]
+            if isinstance(logps["complexity_1_loss"], torch.Tensor):
+                total_complexity_1_loss += logps["complexity_1_loss"].item()
+            else:
+                total_complexity_1_loss += logps["complexity_1_loss"]
             num_batches += 1
 
     model.train()
-    return total_loss / num_batches if num_batches > 0 else 0.0
+
+    avg_loss = (total_loss / num_batches).item() if num_batches > 0 else 0.0
+    metrics = {
+        "val/reward_diff": total_reward_diff / num_batches if num_batches > 0 else 0.0,
+        "val/complexity_0_loss": total_complexity_0_loss / num_batches if num_batches > 0 else 0.0,
+        "val/complexity_1_loss": total_complexity_1_loss / num_batches if num_batches > 0 else 0.0,
+    }
+    return avg_loss, metrics
 
 
 def log_metrics(
@@ -265,19 +318,40 @@ def log_metrics(
     avg_rejected_tokens: float,
     learning_rate: float,
     extra: Optional[dict] = None,
+    reward_diff: Optional[float] = None,
+    policy_chosen_logps: Optional[float] = None,
+    policy_rejected_logps: Optional[float] = None,
+    gradient_norm: Optional[float] = None,
+    epoch: int = 0,
+    complexity_0_loss: Optional[float] = None,
+    complexity_1_loss: Optional[float] = None,
 ) -> None:
     log_dict = {
         "train/loss": train_loss,
         "train/step": step,
+        "train/epoch": epoch,
         "train/avg_chosen_tokens": avg_chosen_tokens,
         "train/avg_rejected_tokens": avg_rejected_tokens,
         "train/token_diff": avg_chosen_tokens - avg_rejected_tokens,
         "train/learning_rate": learning_rate,
     }
+    if reward_diff is not None:
+        log_dict["train/reward_diff"] = reward_diff
+    if policy_chosen_logps is not None:
+        log_dict["train/policy_chosen_logps"] = policy_chosen_logps
+    if policy_rejected_logps is not None:
+        log_dict["train/policy_rejected_logps"] = policy_rejected_logps
+    if gradient_norm is not None:
+        log_dict["train/gradient_norm"] = gradient_norm
+    if complexity_0_loss is not None:
+        log_dict["train/complexity_0_loss"] = complexity_0_loss
+    if complexity_1_loss is not None:
+        log_dict["train/complexity_1_loss"] = complexity_1_loss
     if val_loss is not None:
         log_dict["val/loss"] = val_loss
     if extra and "length_penalty" in extra:
-        log_dict["train/length_penalty"] = extra["length_penalty"]
+        lp = extra["length_penalty"]
+        log_dict["train/length_penalty"] = lp.item() if isinstance(lp, torch.Tensor) else lp
     wandb.log(log_dict, step=step)
 
 
@@ -318,6 +392,7 @@ def train_dpo(
     lr: float = 1e-5,
     checkpoint_every: int = 500,
     eval_every: int = 100,
+    log_every: int = 50,
     data_limit: Optional[int] = None,
     resume_from: Optional[str] = None,
     seed: int = 42,
@@ -425,34 +500,67 @@ def train_dpo(
     )
     best_model_state = None
 
+    pbar = tqdm(total=max_steps, desc="Training", mininterval=1.0)
+
     while step < max_steps:
-        epoch_loss = 0.0
+        epoch_loss = torch.tensor(0.0, device=device)
         for batch in train_loader:
             if step >= max_steps:
                 break
 
-            loss, extra, token_stats = compute_batch_loss(
-                model, ref_model, batch, tokenizer, loss_fn, device
+            loss, extra, token_stats, logps = compute_batch_loss(
+                model, ref_model, batch, tokenizer, loss_fn, device, dpo_beta
             )
 
             optimizer.zero_grad()
             loss.backward()
+
+            grad_norm = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    grad_norm += p.grad.data.norm(2).item() ** 2
+            grad_norm = grad_norm ** 0.5
+
             optimizer.step()
 
-            epoch_loss += loss.item()
+            epoch_loss += loss.detach()
             step += 1
+            pbar.update(1)
+            pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{optimizer.param_groups[0]['lr']:.2e}"})
+
+            if step % log_every == 0 and use_wandb:
+                log_metrics(
+                    step=step,
+                    train_loss=loss.item(),
+                    val_loss=None,
+                    avg_chosen_tokens=token_stats["avg_chosen_tokens"].item(),
+                    avg_rejected_tokens=token_stats["avg_rejected_tokens"].item(),
+                    learning_rate=optimizer.param_groups[0]["lr"],
+                    extra=extra,
+                    reward_diff=logps["reward_diff"],
+                    policy_chosen_logps=logps["policy_chosen_lp"],
+                    policy_rejected_logps=logps["policy_rejected_lp"],
+                    gradient_norm=grad_norm,
+                    epoch=epoch,
+                    complexity_0_loss=logps["complexity_0_loss"].item() if isinstance(logps["complexity_0_loss"], torch.Tensor) else logps["complexity_0_loss"],
+                    complexity_1_loss=logps["complexity_1_loss"].item() if isinstance(logps["complexity_1_loss"], torch.Tensor) else logps["complexity_1_loss"],
+                )
 
             if step % eval_every == 0:
-                entry = {"step": step, "loss": loss.item()}
+                loss_val = loss.item()
+                entry = {"step": step, "loss": loss_val}
                 if extra:
                     entry.update(extra)
                 metrics_log.append(entry)
-                print(f"Step {step} loss: {loss.item():.4f}")
+                print(f"Step {step} loss: {loss_val:.4f}")
 
-                val_loss = evaluate(
-                    model, ref_model, val_loader, tokenizer, loss_fn, device, use_budget_aware
+                val_loss, val_metrics = evaluate(
+                    model, ref_model, val_loader, tokenizer, loss_fn, device, use_budget_aware, dpo_beta
                 )
                 entry["val_loss"] = val_loss
+                entry["val_reward_diff"] = val_metrics["val/reward_diff"]
+                entry["val_complexity_0_loss"] = val_metrics["val/complexity_0_loss"]
+                entry["val_complexity_1_loss"] = val_metrics["val/complexity_1_loss"]
                 metrics_log[-1] = entry
                 print(f"Step {step} val_loss: {val_loss:.4f}")
 
@@ -463,18 +571,32 @@ def train_dpo(
 
                 if early_stopping(val_loss):
                     print(f"Early stopping triggered at step {step}")
+                    pbar.close()
                     break
 
                 if use_wandb:
-                    log_metrics(
-                        step=step,
-                        train_loss=loss.item(),
-                        val_loss=val_loss,
-                        avg_chosen_tokens=token_stats["avg_chosen_tokens"],
-                        avg_rejected_tokens=token_stats["avg_rejected_tokens"],
-                        learning_rate=optimizer.param_groups[0]["lr"],
-                        extra=extra,
-                    )
+                    log_dict = {
+                        "step": step,
+                        "train_loss": loss_val,
+                        "val_loss": val_loss,
+                        "avg_chosen_tokens": token_stats["avg_chosen_tokens"].item(),
+                        "avg_rejected_tokens": token_stats["avg_rejected_tokens"].item(),
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                        "reward_diff": logps["reward_diff"],
+                        "policy_chosen_logps": logps["policy_chosen_lp"],
+                        "policy_rejected_logps": logps["policy_rejected_lp"],
+                        "gradient_norm": grad_norm,
+                        "epoch": epoch,
+                        "complexity_0_loss": logps["complexity_0_loss"].item() if isinstance(logps["complexity_0_loss"], torch.Tensor) else logps["complexity_0_loss"],
+                        "complexity_1_loss": logps["complexity_1_loss"].item() if isinstance(logps["complexity_1_loss"], torch.Tensor) else logps["complexity_1_loss"],
+                        "val/reward_diff": val_metrics["val/reward_diff"],
+                        "val/complexity_0_loss": val_metrics["val/complexity_0_loss"],
+                        "val/complexity_1_loss": val_metrics["val/complexity_1_loss"],
+                    }
+                    if extra and "length_penalty" in extra:
+                        lp = extra["length_penalty"]
+                        log_dict["train/length_penalty"] = lp.item() if isinstance(lp, torch.Tensor) else lp
+                    wandb.log(log_dict, step=step)
 
             if step % checkpoint_every == 0:
                 save_checkpoint(
@@ -483,11 +605,13 @@ def train_dpo(
                 print(f"Saved checkpoint to {output_dir / f'checkpoint-{step}'}")
 
         epoch += 1
-        avg = epoch_loss / len(train_loader)
+        avg = (epoch_loss / len(train_loader)).item()
         print(f"Epoch {epoch} avg loss: {avg:.4f}")
 
         if early_stopping.early_stop:
             break
+
+    pbar.close()
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)

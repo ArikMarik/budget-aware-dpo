@@ -7,7 +7,10 @@ Skips processing if all output files already exist.
 
 import json
 import logging
+import sys
 from pathlib import Path
+
+from tqdm import tqdm
 
 from src.config import (
     DUMMY_DATASET_PATH,
@@ -38,9 +41,11 @@ def get_output_path() -> Path:
     return PROCESSED_DATASET_PATH_REAL
 
 
-def _write_jsonl(path: Path, pairs: list[dict]) -> None:
+def _write_jsonl(path: Path, pairs: list[dict], desc: str = "Saving") -> None:
+    pairs_iter = tqdm(pairs, desc=desc, unit=" pairs", file=sys.stdout)
+    pairs_iter = pairs
     with open(path, "w", encoding="utf-8") as f:
-        for p in pairs:
+        for p in pairs_iter:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
 
 
@@ -70,26 +75,29 @@ def main():
             f"Input data not found: {input_path}. Run load_real_data.py first."
         )
 
+    print("[1/5] Loading input data...", flush=True)
     raw_data = load_jsonl(input_path)
+    print(f"      Loaded {len(raw_data):,} examples", flush=True)
+
+    print("[2/5] Building DPO pairs (classify, label, group)...", flush=True)
     real_pairs, synthesized_pairs, skipped_groups = build_dpo_pairs(raw_data)
     all_pairs = real_pairs + synthesized_pairs
+    print(f"      Built {len(real_pairs):,} real + {len(synthesized_pairs):,} synthesized = {len(all_pairs):,} total pairs", flush=True)
 
-    # Save data first (before compute_statistics) so data is persisted if stats crash
-    _write_jsonl(real_path, real_pairs)
-    _write_jsonl(synthesized_path, synthesized_pairs)
-    _write_jsonl(dataset_path, all_pairs)
-    logger.info(
-        "Saved to %s: dataset.jsonl (%d), dataset_real.jsonl (%d), dataset_synthesized.jsonl (%d)",
-        output_dir,
-        len(all_pairs),
-        len(real_pairs),
-        len(synthesized_pairs),
-    )
+    print("[3/5] Saving data to disk...", flush=True)
+    _write_jsonl(real_path, real_pairs, desc="Saving dataset_real.jsonl")
+    _write_jsonl(synthesized_path, synthesized_pairs, desc="Saving dataset_synthesized.jsonl")
+    _write_jsonl(dataset_path, all_pairs, desc="Saving dataset.jsonl")
+    print(f"      Saved to {output_dir}", flush=True)
 
+    print("[4/5] Computing statistics...", flush=True)
     stats = compute_statistics(real_pairs, synthesized_pairs, skipped_groups)
     logger.info("Dataset statistics: %s", stats)
+
+    print("[5/5] Saving metadata...", flush=True)
     with open(meta_path, "w") as f:
         json.dump(stats, f, indent=2)
+    print("Done.", flush=True)
 
 
 if __name__ == "__main__":
