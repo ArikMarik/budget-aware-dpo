@@ -30,6 +30,27 @@ def get_processed_dataset_path() -> Path:
     """Return processed dataset path based on USE_DUMMY_DATA."""
     return PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH_REAL
 
+
+def get_tokenized_train_path() -> Path:
+    """Return path to pre-tokenized training data."""
+    return get_processed_dataset_path() / "train_tokens.pt"
+
+
+def get_tokenized_val_path() -> Path:
+    """Return path to pre-tokenized validation data."""
+    return get_processed_dataset_path() / "val_tokens.pt"
+
+
+def get_train_pairs_path() -> Path:
+    """Return path to training pairs JSONL."""
+    return get_processed_dataset_path() / "train.jsonl"
+
+
+def get_val_pairs_path() -> Path:
+    """Return path to validation pairs JSONL."""
+    return get_processed_dataset_path() / "val.jsonl"
+
+
 # Checkpoints
 CHECKPOINT_DIR = Path(os.environ.get("CHECKPOINT_DIR", PROJECT_ROOT / "checkpoints"))
 

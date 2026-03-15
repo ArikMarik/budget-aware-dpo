@@ -23,7 +23,6 @@ def main():
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
-    parser.add_argument("--val-split", type=float, default=0.2, help="Validation split ratio (default: 0.2)")
     parser.add_argument("--early-stopping-patience", type=int, default=5, help="Early stopping patience (default: 5)")
     parser.add_argument("--early-stopping-threshold", type=float, default=0.0, help="Early stopping threshold (default: 0.0)")
     parser.add_argument("--dpo-beta", type=float, default=0.1, help="DPO beta parameter (default: 0.1)")
@@ -43,7 +42,6 @@ def main():
         resume_from=args.resume_from,
         seed=args.seed,
         use_wandb=args.wandb,
-        val_split=args.val_split,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_threshold=args.early_stopping_threshold,
         dpo_beta=args.dpo_beta,

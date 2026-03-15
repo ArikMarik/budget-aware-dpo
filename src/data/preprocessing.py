@@ -80,21 +80,14 @@ def classify_complexity(example: dict) -> int:
             if level_str in ("4", "5"):
                 return 1
             # Level 3: fall through to token fallback
-        # Level missing or invalid: use token fallback
-        tokens = _get_teacher_token_count(example)
-        if tokens < EASY_TOKEN_THRESHOLD:
-            return 0
-        if tokens > HARD_TOKEN_THRESHOLD:
-            return 1
-        return 0  # Ambiguous medium → default Easy
 
-    # 3. UNKNOWN SOURCE — token heuristic only
+    # Level missing or invalid: use token fallback / UNKNOWN SOURCE — token heuristic only
     tokens = _get_teacher_token_count(example)
     if tokens < EASY_TOKEN_THRESHOLD:
         return 0
     if tokens > HARD_TOKEN_THRESHOLD:
         return 1
-    return 0  # Default Easy if ambiguous
+    return 0  # Ambiguous medium → default Easy
 
 
 def label_preference(example: dict, complexity: int) -> str:
@@ -312,6 +305,52 @@ def load_jsonl(path: Path) -> list[dict]:
                 continue
             data.append(json.loads(line))
     return data
+
+
+def split_pairs_by_problem(
+    pairs: list[dict],
+    val_split: float,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Split pairs into train/val by unique problem to prevent data leakage.
+    Ensures the same problem doesn't appear in both sets.
+
+    Stratifies by problem-level complexity (majority complexity among pairs for each problem).
+    """
+    from collections import defaultdict
+    import numpy as np
+    from sklearn.model_selection import train_test_split
+
+    set_seed(seed)
+
+    problem_to_pairs: dict[str, list[dict]] = defaultdict(list)
+    for p in pairs:
+        problem_to_pairs[p["problem"]].append(p)
+
+    unique_problems = list(problem_to_pairs.keys())
+    problem_complexities = []
+    for prob in unique_problems:
+        prob_pairs = problem_to_pairs[prob]
+        comps = [p.get("complexity", 0) for p in prob_pairs]
+        problem_complexities.append(max(set(comps), key=comps.count) if comps else 0)
+
+    problem_complexities = np.array(problem_complexities)
+
+    train_problems, val_problems = train_test_split(
+        unique_problems,
+        test_size=val_split,
+        stratify=problem_complexities,
+        random_state=seed,
+    )
+
+    train_problems_set = set(train_problems)
+    val_problems_set = set(val_problems)
+
+    train_pairs = [p for p in pairs if p["problem"] in train_problems_set]
+    val_pairs = [p for p in pairs if p["problem"] in val_problems_set]
+
+    return train_pairs, val_pairs
 
 
 def compute_statistics(

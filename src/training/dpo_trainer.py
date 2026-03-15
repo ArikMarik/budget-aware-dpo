@@ -10,15 +10,19 @@ from typing import Optional, Any
 
 from tqdm import tqdm
 
-import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 import wandb
 
-from src.config import CHECKPOINT_DIR, MODEL_NAME, get_processed_dataset_path
+from src.config import (
+    CHECKPOINT_DIR,
+    MODEL_NAME,
+    get_processed_dataset_path,
+    get_tokenized_train_path,
+    get_tokenized_val_path,
+)
 from src.utils import set_seed
 
 
@@ -33,12 +37,12 @@ class TrainingConfig:
     num_pairs: int
     num_train_pairs: int
     num_val_pairs: int
-    val_split: float
-    early_stopping_patience: int
-    early_stopping_threshold: float
-    dpo_beta: float
-    lambda_easy: float
-    lambda_hard: float
+    val_split: float = 0.2
+    early_stopping_patience: int = 5
+    early_stopping_threshold: float = 0.0
+    dpo_beta: float = 0.1
+    lambda_easy: float = 0.05
+    lambda_hard: float = 0.001
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -74,18 +78,6 @@ class EarlyStopping:
                 self.early_stop = True
                 return True
         return False
-
-
-def stratified_split(pairs: list[dict], val_split: float, seed: int) -> tuple[list[dict], list[dict]]:
-    complexities = np.array([p["complexity"] for p in pairs])
-    train_idx, val_idx = train_test_split(
-        np.arange(len(pairs)),
-        test_size=val_split,
-        stratify=complexities,
-        random_state=seed,
-    )
-    pairs_array = np.array(pairs, dtype=object)
-    return pairs_array[train_idx].tolist(), pairs_array[val_idx].tolist()
 
 
 def log_prob(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
@@ -181,6 +173,33 @@ class DPODataset(Dataset):
         return self.pairs[idx]
 
 
+class TokenizedDPODataset(Dataset):
+    def __init__(self, tokens_path: Path):
+        self.data = torch.load(tokens_path)
+        self.length = self.data["chosen_input_ids"].shape[0]
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, idx: int):
+        return {
+            "chosen_input_ids": self.data["chosen_input_ids"][idx],
+            "chosen_attention_mask": self.data["chosen_attention_mask"][idx],
+            "rejected_input_ids": self.data["rejected_input_ids"][idx],
+            "rejected_attention_mask": self.data["rejected_attention_mask"][idx],
+            "complexity": self.data["complexities"][idx],
+        }
+
+
+def load_tokenized_dataset(tokens_path: Path) -> TokenizedDPODataset:
+    if not tokens_path.exists():
+        raise FileNotFoundError(
+            f"Tokenized dataset not found at {tokens_path}. "
+            "Run preprocess_dpo_data.py first."
+        )
+    return TokenizedDPODataset(tokens_path)
+
+
 def load_pairs(limit: Optional[int] = None) -> list[dict]:
     pairs = []
     path = get_processed_dataset_path() / "dataset.jsonl"
@@ -192,7 +211,20 @@ def load_pairs(limit: Optional[int] = None) -> list[dict]:
     return pairs
 
 
-def collate_fn(batch: list[dict], tokenizer: AutoTokenizer, max_length: int = 512):
+def collate_fn_tokenized(batch):
+    chosen_input_ids = torch.stack([item["chosen_input_ids"] for item in batch])
+    chosen_attention_mask = torch.stack([item["chosen_attention_mask"] for item in batch])
+    rejected_input_ids = torch.stack([item["rejected_input_ids"] for item in batch])
+    rejected_attention_mask = torch.stack([item["rejected_attention_mask"] for item in batch])
+    complexities = torch.stack([item["complexity"] for item in batch])
+
+    chosen_tok = {"input_ids": chosen_input_ids, "attention_mask": chosen_attention_mask}
+    rejected_tok = {"input_ids": rejected_input_ids, "attention_mask": rejected_attention_mask}
+    return chosen_tok, rejected_tok, complexities
+
+
+def collate_fn_raw(batch: list[dict], tokenizer: AutoTokenizer, max_length: int = 512):
+    """Legacy collate function for non-tokenized data."""
     prompts, chosens, rejecteds, complexities = [], [], [], []
     for p in batch:
         prompt = f"Problem: {p['problem']}\nSolution:"
@@ -397,7 +429,6 @@ def train_dpo(
     resume_from: Optional[str] = None,
     seed: int = 42,
     use_wandb: bool = False,
-    val_split: float = 0.2,
     early_stopping_patience: int = 5,
     early_stopping_threshold: float = 0.0,
     dpo_beta: float = 0.1,
@@ -407,9 +438,27 @@ def train_dpo(
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    pairs = load_pairs(limit=data_limit)
-    if not pairs:
-        raise RuntimeError("No DPO pairs found. Run preprocess_dpo_data.py first.")
+    processed_path = get_processed_dataset_path()
+    meta_path = processed_path / "metadata.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            metadata = json.load(f)
+        val_split = metadata.get("val_split", 0.2)
+        num_train_pairs = metadata.get("num_train_pairs", 0)
+        num_val_pairs = metadata.get("num_val_pairs", 0)
+    else:
+        val_split = 0.2
+        num_train_pairs = 0
+        num_val_pairs = 0
+
+    train_tokens_path = get_tokenized_train_path()
+    val_tokens_path = get_tokenized_val_path()
+
+    if not train_tokens_path.exists() or not val_tokens_path.exists():
+        raise FileNotFoundError(
+            f"Tokenized datasets not found. Run preprocess_dpo_data.py first.\n"
+            f"Expected: {train_tokens_path}, {val_tokens_path}"
+        )
 
     lora_config = LoraConfig(
         r=128,
@@ -425,23 +474,23 @@ def train_dpo(
     )
     ref_model = create_ref_model(MODEL_NAME, device)
 
-    train_pairs, val_pairs = stratified_split(pairs, val_split, seed)
-    print(f"Data split: Train={len(train_pairs)}, Val={len(val_pairs)}")
-
-    train_dataset = DPODataset(train_pairs)
-    val_dataset = DPODataset(val_pairs)
+    train_dataset = load_tokenized_dataset(train_tokens_path)
+    val_dataset = load_tokenized_dataset(val_tokens_path)
+    num_train = len(train_dataset)
+    num_val = len(val_dataset)
+    print(f"Data split: Train={num_train}, Val={num_val}")
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=lambda b: collate_fn(b, tokenizer),
+        collate_fn=collate_fn_tokenized,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=lambda b: collate_fn(b, tokenizer),
+        collate_fn=collate_fn_tokenized,
     )
 
     if use_budget_aware:
@@ -464,9 +513,9 @@ def train_dpo(
         lr=lr,
         seed=seed,
         data_limit=data_limit,
-        num_pairs=len(pairs),
-        num_train_pairs=len(train_pairs),
-        num_val_pairs=len(val_pairs),
+        num_pairs=num_train + num_val,
+        num_train_pairs=num_train,
+        num_val_pairs=num_val,
         val_split=val_split,
         early_stopping_patience=early_stopping_patience,
         early_stopping_threshold=early_stopping_threshold,

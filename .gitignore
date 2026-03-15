@@ -16,3 +16,4 @@ data/processed_dpo_dataset_real/
 data/gsm8k_test.jsonl
 data/math_test.jsonl
 data/processed_dpo_dataset/*.jsonl
+*.pt
