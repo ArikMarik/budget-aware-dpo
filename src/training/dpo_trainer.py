@@ -23,7 +23,9 @@ from src.config import (
     get_tokenized_train_path,
     get_tokenized_val_path,
 )
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -412,7 +414,7 @@ def save_best_model(
     best_model_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(best_model_path)
     tokenizer.save_pretrained(best_model_path)
-    print(f"Saved best model to {best_model_path} (val_loss: {best_val_loss:.4f})")
+    logger.info("Saved best model to %s (val_loss: %.4f)", best_model_path, best_val_loss)
 
 
 def train_dpo(
@@ -478,7 +480,7 @@ def train_dpo(
     val_dataset = load_tokenized_dataset(val_tokens_path)
     num_train = len(train_dataset)
     num_val = len(val_dataset)
-    print(f"Data split: Train={num_train}, Val={num_val}")
+    logger.info("Data split: Train=%s, Val=%s", num_train, num_val)
 
     train_loader = DataLoader(
         train_dataset,
@@ -601,7 +603,7 @@ def train_dpo(
                 if extra:
                     entry.update(extra)
                 metrics_log.append(entry)
-                print(f"Step {step} loss: {loss_val:.4f}")
+                logger.info("Step %s loss: %.4f", step, loss_val)
 
                 val_loss, val_metrics = evaluate(
                     model, ref_model, val_loader, tokenizer, loss_fn, device, use_budget_aware, dpo_beta
@@ -611,15 +613,15 @@ def train_dpo(
                 entry["val_complexity_0_loss"] = val_metrics["val/complexity_0_loss"]
                 entry["val_complexity_1_loss"] = val_metrics["val/complexity_1_loss"]
                 metrics_log[-1] = entry
-                print(f"Step {step} val_loss: {val_loss:.4f}")
+                logger.info("Step %s val_loss: %.4f", step, val_loss)
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                    print(f"Step {step} new best val_loss: {best_val_loss:.4f}")
+                    logger.info("Step %s new best val_loss: %.4f", step, best_val_loss)
 
                 if early_stopping(val_loss):
-                    print(f"Early stopping triggered at step {step}")
+                    logger.info("Early stopping triggered at step %s", step)
                     pbar.close()
                     break
 
@@ -651,11 +653,11 @@ def train_dpo(
                 save_checkpoint(
                     model, tokenizer, output_dir, step, metrics_log
                 )
-                print(f"Saved checkpoint to {output_dir / f'checkpoint-{step}'}")
+                logger.info("Saved checkpoint to %s", output_dir / f"checkpoint-{step}")
 
         epoch += 1
         avg = (epoch_loss / len(train_loader)).item()
-        print(f"Epoch {epoch} avg loss: {avg:.4f}")
+        logger.info("Epoch %s avg loss: %.4f", epoch, avg)
 
         if early_stopping.early_stop:
             break
@@ -671,5 +673,5 @@ def train_dpo(
     tokenizer.save_pretrained(output_dir)
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics_log, f, indent=2)
-    print(f"Training complete. Saved to {output_dir}")
+    logger.info("Training complete. Saved to %s", output_dir)
     return {"metrics": metrics_log, "config": config.to_dict(), "best_val_loss": best_val_loss}

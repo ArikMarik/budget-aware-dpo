@@ -7,7 +7,6 @@ Skips processing if all output files already exist.
 """
 
 import json
-import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -30,10 +29,9 @@ from src.data.preprocessing import (
     load_jsonl,
     split_pairs_by_problem,
 )
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 VAL_SPLIT = 0.2
 SEED = 42
@@ -153,46 +151,46 @@ def main():
             f"Input data not found: {input_path}. Run load_real_data.py first."
         )
 
-    print("[1/7] Loading input data...", flush=True)
+    logger.info("[1/7] Loading input data...")
     raw_data = load_jsonl(input_path)
-    print(f"      Loaded {len(raw_data):,} examples", flush=True)
+    logger.info("      Loaded %s examples", f"{len(raw_data):,}")
 
-    print("[2/7] Building DPO pairs (classify, label, group)...", flush=True)
+    logger.info("[2/7] Building DPO pairs (classify, label, group)...")
     real_pairs, synthesized_pairs, skipped_groups = build_dpo_pairs(raw_data)
     all_pairs = real_pairs + synthesized_pairs
-    print(f"      Built {len(real_pairs):,} real + {len(synthesized_pairs):,} synthesized = {len(all_pairs):,} total pairs", flush=True)
+    logger.info("      Built %s real + %s synthesized = %s total pairs", f"{len(real_pairs):,}", f"{len(synthesized_pairs):,}", f"{len(all_pairs):,}")
 
-    print("[3/7] Splitting by problem (train/val)...", flush=True)
+    logger.info("[3/7] Splitting by problem (train/val)...")
     train_pairs, val_pairs = split_pairs_by_problem(all_pairs, VAL_SPLIT, SEED)
-    print(f"      Split: {len(train_pairs):,} train pairs, {len(val_pairs):,} val pairs")
+    logger.info("      Split: %s train pairs, %s val pairs", f"{len(train_pairs):,}", f"{len(val_pairs):,}")
 
     train_problems = set(p["problem"] for p in train_pairs)
     val_problems = set(p["problem"] for p in val_pairs)
     overlap = train_problems & val_problems
     if overlap:
-        print(f"      WARNING: {len(overlap)} problems in both sets!")
+        logger.warning("      WARNING: %s problems in both sets!", len(overlap))
     else:
-        print(f"      No problem overlap (good - no data leakage)")
+        logger.info("      No problem overlap (good - no data leakage)")
 
-    print("[4/7] Saving split datasets...", flush=True)
+    logger.info("[4/7] Saving split datasets...")
     _write_jsonl(real_path, real_pairs, desc="Saving dataset_real.jsonl")
     _write_jsonl(synthesized_path, synthesized_pairs, desc="Saving dataset_synthesized.jsonl")
     _write_jsonl(dataset_path, all_pairs, desc="Saving dataset.jsonl")
     _write_jsonl(train_path, train_pairs, desc="Saving train.jsonl")
     _write_jsonl(val_path, val_pairs, desc="Saving val.jsonl")
-    print(f"      Saved to {output_dir}", flush=True)
+    logger.info("      Saved to %s", output_dir)
 
-    print("[5/7] Loading tokenizer...", flush=True)
+    logger.info("[5/7] Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print("[6/7] Tokenizing and saving...", flush=True)
+    logger.info("[6/7] Tokenizing and saving...")
     train_tokens_path = tokenize_and_save(train_pairs, output_dir, tokenizer, "train_tokens.pt")
     val_tokens_path = tokenize_and_save(val_pairs, output_dir, tokenizer, "val_tokens.pt")
-    print(f"      Saved tokens to {output_dir}", flush=True)
+    logger.info("      Saved tokens to %s", output_dir)
 
-    print("[7/7] Computing and saving statistics...", flush=True)
+    logger.info("[7/7] Computing and saving statistics...")
     stats = compute_statistics(real_pairs, synthesized_pairs, skipped_groups)
     stats["val_split"] = VAL_SPLIT
     stats["seed"] = SEED
@@ -204,7 +202,7 @@ def main():
 
     with open(meta_path, "w") as f:
         json.dump(stats, f, indent=2)
-    print("Done.", flush=True)
+    logger.info("Done.")
 
 
 if __name__ == "__main__":

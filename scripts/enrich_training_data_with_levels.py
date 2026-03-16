@@ -11,7 +11,9 @@ import sys
 from pathlib import Path
 
 from src.config import REAL_DATASET_PATH
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -53,17 +55,17 @@ def main():
     args = parser.parse_args()
 
     if not args.input.exists():
-        print(f"Input not found: {args.input}", file=sys.stderr)
+        logger.error("Input not found: %s", args.input)
         sys.exit(1)
 
     output_path = args.output or args.input
     if output_path == args.input and args.limit:
-        print("ERROR: Cannot overwrite input when --limit is used. Specify --output.", file=sys.stderr)
+        logger.error("ERROR: Cannot overwrite input when --limit is used. Specify --output.")
         sys.exit(1)
 
-    print("Loading MATH train for level mapping...")
+    logger.info("Loading MATH train for level mapping...")
     problem_to_level = load_math_problem_to_level()
-    print(f"Built level map for {len(problem_to_level):,} MATH problems")
+    logger.info("Built level map for %s MATH problems", f"{len(problem_to_level):,}")
 
     if output_path == args.input:
         tmp_path = args.input.with_suffix(".jsonl.tmp")
@@ -95,12 +97,12 @@ def main():
             out_f.write(json.dumps(item, ensure_ascii=False) + "\n")
             n += 1
             if (n + 1) % 100000 == 0:
-                print(f"  Processed {n + 1:,} lines...", flush=True)
+                logger.info("  Processed %s lines...", f"{n + 1:,}")
 
     out_f.close()
     if tmp_path is not None:
         tmp_path.replace(args.input)
-    print(f"Done. Processed {n:,} examples. MATH items: {total_math:,}, with level: {matched:,}")
+    logger.info("Done. Processed %s examples. MATH items: %s, with level: %s", f"{n:,}", f"{total_math:,}", f"{matched:,}")
 
 
 if __name__ == "__main__":

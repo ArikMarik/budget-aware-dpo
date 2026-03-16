@@ -11,7 +11,9 @@ from pathlib import Path
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, REAL_DATASET_PATH
 from src.evaluation.answer_extraction import extract_answer, normalize_answer
-from src.utils import count_tokens_tiktoken, set_seed
+from src.utils import count_tokens, get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -53,7 +55,7 @@ def convert_openmathinstruct(item: dict, problem_to_level: dict | None = None) -
         "generated_solution": solution,
         "expected_answer": expected,
         "problem_source": item.get("problem_source", "unknown"),
-        "teacher_token_count": count_tokens_tiktoken(solution),
+        "teacher_token_count": count_tokens(solution),
         "correctness_flag": verify_correctness(solution, expected),
     }
     problem = item.get("problem", "")
@@ -93,9 +95,9 @@ def load_openmathinstruct(split: str = "train_1M", limit: int | None = None) -> 
     """Load OpenMathInstruct-2 from HuggingFace. Enriches MATH-origin problems with level from MATH train."""
     from datasets import load_dataset
 
-    print("Loading MATH train for level mapping...")
+    logger.info("Loading MATH train for level mapping...")
     problem_to_level = load_math_problem_to_level()
-    print(f"Built level map for {len(problem_to_level):,} MATH problems")
+    logger.info("Built level map for %s MATH problems", f"{len(problem_to_level):,}")
 
     dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split)
     examples = []
@@ -167,36 +169,36 @@ def main():
     DATA_PATH.mkdir(parents=True, exist_ok=True)
 
     if not args.test_sets_only:
-        print("Loading OpenMathInstruct-2...")
+        logger.info("Loading OpenMathInstruct-2...")
         train_data = load_openmathinstruct(split=args.split, limit=args.limit)
-        print(f"Loaded {len(train_data)} training examples")
+        logger.info("Loaded %s training examples", len(train_data))
 
         REAL_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(REAL_DATASET_PATH, "w", encoding="utf-8") as f:
             for ex in train_data:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-        print(f"Saved to {REAL_DATASET_PATH}")
+        logger.info("Saved to %s", REAL_DATASET_PATH)
 
     if args.test_sets_only or not args.skip_test_sets:
-        print("Loading GSM8K test...")
+        logger.info("Loading GSM8K test...")
         gsm8k = load_gsm8k_test()
         GSM8K_TEST_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(GSM8K_TEST_PATH, "w", encoding="utf-8") as f:
             for ex in gsm8k:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-        print(f"Saved {len(gsm8k)} GSM8K test to {GSM8K_TEST_PATH}")
+        logger.info("Saved %s GSM8K test to %s", len(gsm8k), GSM8K_TEST_PATH)
 
-        print("Loading MATH test...")
+        logger.info("Loading MATH test...")
         math_test = load_math_test()
         with open(MATH_TEST_PATH, "w", encoding="utf-8") as f:
             for ex in math_test:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-        print(f"Saved {len(math_test)} MATH test to {MATH_TEST_PATH}")
+        logger.info("Saved %s MATH test to %s", len(math_test), MATH_TEST_PATH)
 
     if args.test_sets_only:
-        print("Done. Run: USE_DUMMY_DATA=0 python scripts/run_evaluation.py")
+        logger.info("Done. Run: USE_DUMMY_DATA=0 python scripts/run_evaluation.py")
     else:
-        print("Done. Run preprocess_dpo_data.py with USE_DUMMY_DATA=0 to process.")
+        logger.info("Done. Run preprocess_dpo_data.py with USE_DUMMY_DATA=0 to process.")
 
 
 if __name__ == "__main__":

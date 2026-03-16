@@ -9,7 +9,9 @@ import os
 from pathlib import Path
 
 from src.config import CHECKPOINT_DIR, MODEL_NAME, PROCESSED_DATASET_PATH
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -35,11 +37,11 @@ def main():
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import LoraConfig, get_peft_model, TaskType
     except ImportError as e:
-        print(f"Missing dependency: {e}. Install: pip install torch transformers peft")
+        logger.error("Missing dependency: %s. Install: pip install torch transformers peft", e)
         return
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    logger.info("Using device: %s", device)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
@@ -137,14 +139,14 @@ def main():
             optimizer.step()
             total_loss += loss
 
-        print(f"Epoch {epoch+1} loss: {total_loss/len(pairs):.4f}")
+        logger.info("Epoch %s loss: %.4f", epoch + 1, total_loss / len(pairs))
 
     # Save checkpoint
     out_dir = CHECKPOINT_DIR / "sanity_overfit"
     out_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(out_dir)
     tokenizer.save_pretrained(out_dir)
-    print(f"Saved sanity check checkpoint to {out_dir}")
+    logger.info("Saved sanity check checkpoint to %s", out_dir)
 
 
 if __name__ == "__main__":

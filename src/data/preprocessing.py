@@ -16,7 +16,6 @@ See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessin
 """
 
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -24,13 +23,13 @@ from typing import Any
 from tqdm import tqdm
 
 from src.evaluation.answer_extraction import extract_answer, normalize_answer
-from src.utils import count_tokens_tiktoken, set_seed
+from src.utils import count_tokens, get_logger, set_seed
 
 set_seed(42)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
-# Configurable thresholds (env or defaults); tiktoken cl100k_base
+# Configurable thresholds (env or defaults); Qwen tokenizer
 EASY_TOKEN_THRESHOLD = int(os.environ.get("EASY_TOKEN_THRESHOLD", "70"))
 HARD_TOKEN_THRESHOLD = int(os.environ.get("HARD_TOKEN_THRESHOLD", "130"))
 
@@ -43,7 +42,7 @@ def _get_teacher_token_count(example: dict) -> int:
     if tc is not None and tc != 0:
         return int(tc)
     sol = example.get("generated_solution", "") or ""
-    return count_tokens_tiktoken(sol)
+    return count_tokens(sol)
 
 
 def _verify_correctness(example: dict) -> bool:
@@ -93,7 +92,7 @@ def classify_complexity(example: dict) -> int:
 def label_preference(example: dict, complexity: int) -> str:
     """
     Returns "preferred" or "rejected" for this solution.
-    Uses tiktoken and same thresholds (70/130) as classify_complexity.
+    Uses Qwen tokenizer and same thresholds (70/130) as classify_complexity.
     """
     correct = _verify_correctness(example)
     tokens = _get_teacher_token_count(example)

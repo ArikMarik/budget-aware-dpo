@@ -21,7 +21,9 @@ from src.evaluation.run_evaluation import (
     evaluate_checkpoint,
     load_eval_problems,
 )
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -54,7 +56,7 @@ def main():
 
     # Baseline
     if baseline_path.exists():
-        print(f"Evaluating {baseline_path.name}...")
+        logger.info("Evaluating %s...", baseline_path.name)
         m = evaluate_checkpoint(
             baseline_path,
             problems,
@@ -64,11 +66,11 @@ def main():
         line = f"  Accuracy: {m['accuracy']:.2%} | TPCA: {m['tpca']:.1f} | Avg Easy: {m['avg_tokens_easy']:.1f} | Avg Hard: {m['avg_tokens_hard']:.1f}"
         if "math_level_4_5_accuracy" in m:
             line += f" | MATH L4-5: {m['math_level_4_5_accuracy']:.2%}"
-        print(line)
+        logger.info(line)
 
     # Budget-aware
     if budget_path.exists():
-        print(f"Evaluating {budget_path.name}...")
+        logger.info("Evaluating %s...", budget_path.name)
         m = evaluate_checkpoint(
             budget_path,
             problems,
@@ -78,23 +80,23 @@ def main():
         line = f"  Accuracy: {m['accuracy']:.2%} | TPCA: {m['tpca']:.1f} | Avg Easy: {m['avg_tokens_easy']:.1f} | Avg Hard: {m['avg_tokens_hard']:.1f}"
         if "math_level_4_5_accuracy" in m:
             line += f" | MATH L4-5: {m['math_level_4_5_accuracy']:.2%}"
-        print(line)
+        logger.info(line)
 
     # Sanity (optional)
     sanity_path = CHECKPOINT_DIR / "sanity_overfit"
     if sanity_path.exists() and not all_metrics:
-        print("Evaluating sanity_overfit (no baseline/budget checkpoints yet)...")
+        logger.info("Evaluating sanity_overfit (no baseline/budget checkpoints yet)...")
         m = evaluate_checkpoint(
             sanity_path,
             problems,
             output_path=output_dir / f"sanity_eval{suffix}.json",
         )
         all_metrics["sanity_overfit"] = m
-        print(f"  Accuracy: {m['accuracy']:.2%} | TPCA: {m['tpca']:.1f}")
+        logger.info("  Accuracy: %.2f | TPCA: %.1f", m['accuracy'], m['tpca'])
 
     with open(results_path, "w") as f:
         json.dump({"metrics": all_metrics, "num_problems": len(problems)}, f, indent=2)
-    print(f"Results saved to {results_path}")
+    logger.info("Results saved to %s", results_path)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,9 @@ from src.config import (
     PROJECT_ROOT,
     REAL_DATASET_PATH,
 )
-from src.utils import set_seed
+from src.utils import count_tokens, get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -40,20 +42,6 @@ COT_PATTERNS = [
     r"\bin\s+summary\b",
     r"\bconsequently\b",
 ]
-
-
-def get_tokenizer():
-    """Get tiktoken cl100k_base tokenizer (GPT-4/Claude compatible)."""
-    try:
-        import tiktoken
-        return tiktoken.get_encoding("cl100k_base")
-    except ImportError:
-        raise ImportError("tiktoken required. Install with: pip install tiktoken")
-
-
-def count_tokens(text: str, enc) -> int:
-    """Count tokens using tiktoken."""
-    return len(enc.encode(str(text) if text else ""))
 
 
 def count_sentences(text: str) -> int:
@@ -125,11 +113,11 @@ def get_solution_text(item: dict, source: str) -> str:
     return item.get("generated_solution", "")
 
 
-def analyze_test_sets(math_path: Path, gsm8k_path: Path, enc) -> dict:
+def analyze_test_sets(math_path: Path, gsm8k_path: Path) -> dict:
     """Analyze MATH and GSM8k test sets."""
-    print("  Loading MATH test...", flush=True)
+    logger.info("  Loading MATH test...")
     math_data = load_jsonl(math_path) if math_path.exists() else []
-    print("  Loading GSM8k test...", flush=True)
+    logger.info("  Loading GSM8k test...")
     gsm8k_data = load_jsonl(gsm8k_path) if gsm8k_path.exists() else []
 
     # 1. MATH vs GSM8k counts
@@ -152,14 +140,14 @@ def analyze_test_sets(math_path: Path, gsm8k_path: Path, enc) -> dict:
 
     for item in math_data:
         sol = get_solution_text(item, "test")
-        n = count_tokens(sol, enc)
+        n = count_tokens(sol)
         math_tokens.append(n)
         level = item.get("level", "Unknown")
         level_tokens.setdefault(level, []).append(n)
 
     for item in gsm8k_data:
         sol = get_solution_text(item, "test")
-        n = count_tokens(sol, enc)
+        n = count_tokens(sol)
         gsm8k_tokens.append(n)
 
     # 4. Percentiles
@@ -238,21 +226,21 @@ def analyze_test_sets(math_path: Path, gsm8k_path: Path, enc) -> dict:
     }
 
 
-def analyze_training_data(path: Path, limit: int, enc) -> dict | None:
+def analyze_training_data(path: Path, limit: int) -> dict | None:
     """Analyze training data with full pipeline (sections 1-8): tokens, percentiles, CoT, sentences, per-level when level present."""
     from tqdm import tqdm
 
     if not path.exists():
         return None
-    print(f"Loading up to {limit:,} examples...", flush=True)
+    logger.info("Loading up to %s examples...", f"{limit:,}")
     data = load_jsonl(path, limit=limit, show_progress=True)
     if not data:
         return None
-    print(f"Loaded {len(data):,} examples. Classifying by source...", flush=True)
+    logger.info("Loaded %s examples. Classifying by source...", f"{len(data):,}")
 
     math_items = [x for x in data if "math" in str(x.get("problem_source", "")).lower()]
     gsm8k_items = [x for x in data if "gsm" in str(x.get("problem_source", "")).lower()]
-    print(f"MATH: {len(math_items):,}, GSM8k: {len(gsm8k_items):,}", flush=True)
+    logger.info("MATH: %s, GSM8k: %s", f"{len(math_items):,}", f"{len(gsm8k_items):,}")
 
     def percentiles(arr: list[int], ps: list[int] = [10, 25, 50, 75, 90]) -> dict[int, float]:
         if not arr:
@@ -268,15 +256,15 @@ def analyze_training_data(path: Path, limit: int, enc) -> dict | None:
     level_sentences: dict[str, list[int]] = {}
     math_items_with_level = [x for x in math_items if x.get("level") and str(x.get("level", "")).strip()]
     if math_items_with_level:
-        print(f"MATH items with level: {len(math_items_with_level):,}", flush=True)
+        logger.info("MATH items with level: %s", f"{len(math_items_with_level):,}")
 
-    print("Analyzing MATH solutions (tokens, CoT, sentences)...", flush=True)
+    logger.info("Analyzing MATH solutions (tokens, CoT, sentences)...")
     math_tokens = []
     math_cot = []
     math_sentences = []
     for x in tqdm(math_items, desc="MATH", unit=" ex"):
         sol = get_solution_text(x, "train")
-        n_tok = count_tokens(sol, enc)
+        n_tok = count_tokens(sol)
         n_cot = count_cot_indicators(sol)
         n_sent = count_sentences(sol)
         math_tokens.append(n_tok)
@@ -289,13 +277,13 @@ def analyze_training_data(path: Path, limit: int, enc) -> dict | None:
             level_cot_counts.setdefault(level, []).append(n_cot)
             level_sentences.setdefault(level, []).append(n_sent)
 
-    print("Analyzing GSM8k solutions (tokens, CoT, sentences)...", flush=True)
+    logger.info("Analyzing GSM8k solutions (tokens, CoT, sentences)...")
     gsm8k_tokens = []
     gsm8k_cot = []
     gsm8k_sentences = []
     for x in tqdm(gsm8k_items, desc="GSM8k", unit=" ex"):
         sol = get_solution_text(x, "train")
-        gsm8k_tokens.append(count_tokens(sol, enc))
+        gsm8k_tokens.append(count_tokens(sol))
         gsm8k_cot.append(count_cot_indicators(sol))
         gsm8k_sentences.append(count_sentences(sol))
 
@@ -776,8 +764,6 @@ def main():
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output report path")
     args = parser.parse_args()
 
-    enc = get_tokenizer()
-
     from src.config import DUMMY_DATASET_PATH, USE_DUMMY_DATA
 
     training_path = args.training or (
@@ -791,22 +777,22 @@ def main():
         # Skip test sets; analyze only training data
         if not training_path.exists():
             raise FileNotFoundError(f"Training data not found: {training_path}")
-        print(f"Analyzing training data only (limit={args.training_limit:,})...", flush=True)
-        training_stats = analyze_training_data(training_path, args.training_limit, enc)
+        logger.info("Analyzing training data only (limit=%s)...", f"{args.training_limit:,}")
+        training_stats = analyze_training_data(training_path, args.training_limit)
         if training_stats:
-            print(f"Done: {training_stats['total']:,} total, MATH={training_stats['math_count']:,}, GSM8k={training_stats['gsm8k_count']:,}", flush=True)
+            logger.info("Done: %s total, MATH=%s, GSM8k=%s", f"{training_stats['total']:,}", f"{training_stats['math_count']:,}", f"{training_stats['gsm8k_count']:,}")
     else:
-        print("Analyzing test sets (MATH + GSM8k)...", flush=True)
-        stats = analyze_test_sets(args.math, args.gsm8k, enc)
-        print(f"Test sets done: MATH={stats['counts']['math_total']:,}, GSM8k={stats['counts']['gsm8k_total']:,}", flush=True)
+        logger.info("Analyzing test sets (MATH + GSM8k)...")
+        stats = analyze_test_sets(args.math, args.gsm8k)
+        logger.info("Test sets done: MATH=%s, GSM8k=%s", f"{stats['counts']['math_total']:,}", f"{stats['counts']['gsm8k_total']:,}")
 
         if not args.no_training and training_path.exists():
-            print(f"Analyzing training data (limit={args.training_limit:,})...", flush=True)
-            training_stats = analyze_training_data(training_path, args.training_limit, enc)
+            logger.info("Analyzing training data (limit=%s)...", f"{args.training_limit:,}")
+            training_stats = analyze_training_data(training_path, args.training_limit)
             if training_stats:
-                print(f"Training done: {training_stats['total']:,} total, MATH={training_stats['math_count']:,}, GSM8k={training_stats['gsm8k_count']:,}", flush=True)
+                logger.info("Training done: %s total, MATH=%s, GSM8k=%s", f"{training_stats['total']:,}", f"{training_stats['math_count']:,}", f"{training_stats['gsm8k_count']:,}")
         else:
-            print("Skipping training data (--no-training or file not found).", flush=True)
+            logger.info("Skipping training data (--no-training or file not found).")
 
     if not stats and not training_stats:
         raise RuntimeError("No data analyzed. Provide --training with valid path or run without --training-only.")
@@ -814,9 +800,9 @@ def main():
     output_path = args.output or (
         PROJECT_ROOT / "docs" / "feature_reports" / "report_complexity_heuristics_analysis.md"
     )
-    print("Writing report...", flush=True)
+    logger.info("Writing report...")
     write_report(stats, training_stats, output_path)
-    print(f"Report written to {output_path}", flush=True)
+    logger.info("Report written to %s", output_path)
 
 
 if __name__ == "__main__":

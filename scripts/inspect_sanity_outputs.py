@@ -8,7 +8,9 @@ import json
 from pathlib import Path
 
 from src.config import CHECKPOINT_DIR, MODEL_NAME, PROCESSED_DATASET_PATH
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -34,8 +36,8 @@ def load_sample_pairs(limit_easy: int = 3, limit_hard: int = 3):
 def main():
     checkpoint_dir = CHECKPOINT_DIR / "sanity_overfit"
     if not checkpoint_dir.exists():
-        print(f"Checkpoint not found: {checkpoint_dir}")
-        print("Run train_sanity_check.py first.")
+        logger.error("Checkpoint not found: %s", checkpoint_dir)
+        logger.error("Run train_sanity_check.py first.")
         return
 
     try:
@@ -43,11 +45,11 @@ def main():
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import PeftModel
     except ImportError as e:
-        print(f"Missing dependency: {e}")
+        logger.error("Missing dependency: %s", e)
         return
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    logger.info("Using device: %s", device)
 
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir), trust_remote_code=True)
     base = AutoModelForCausalLM.from_pretrained(
@@ -75,27 +77,27 @@ def main():
         num_tokens = out.shape[1] - inputs["input_ids"].shape[1]
         return response.strip(), num_tokens
 
-    print("\n--- Easy prompts (expected: compressed, ~20-40 tokens) ---")
+    logger.info("\n--- Easy prompts (expected: compressed, ~20-40 tokens) ---")
     for p in easy_pairs:
         resp, n = generate(p["problem"], 0)
         results["easy"].append({"problem": p["problem"][:80] + "...", "tokens": n, "response": resp[:200]})
-        print(f"  Tokens: {n} | Response: {resp[:120]}...")
+        logger.info("  Tokens: %s | Response: %s...", n, resp[:120])
 
-    print("\n--- Hard prompts (expected: full CoT, 100+ tokens) ---")
+    logger.info("\n--- Hard prompts (expected: full CoT, 100+ tokens) ---")
     for p in hard_pairs:
         resp, n = generate(p["problem"], 1)
         results["hard"].append({"problem": p["problem"][:80] + "...", "tokens": n, "response": resp[:200]})
-        print(f"  Tokens: {n} | Response: {resp[:120]}...")
+        logger.info("  Tokens: %s | Response: %s...", n, resp[:120])
 
     avg_easy = sum(r["tokens"] for r in results["easy"]) / max(len(results["easy"]), 1)
     avg_hard = sum(r["tokens"] for r in results["hard"]) / max(len(results["hard"]), 1)
-    print(f"\nAvg tokens Easy: {avg_easy:.1f} | Avg tokens Hard: {avg_hard:.1f}")
+    logger.info("\nAvg tokens Easy: %.1f | Avg tokens Hard: %.1f", avg_easy, avg_hard)
 
     out_path = CHECKPOINT_DIR / "sanity_inspection_results.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"Results saved to {out_path}")
+    logger.info("Results saved to %s", out_path)
 
 
 if __name__ == "__main__":
