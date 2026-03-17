@@ -17,12 +17,14 @@ See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessin
 
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
-from src.evaluation.answer_extraction import extract_answer, normalize_answer
+from src.evaluation.answer_extraction import extract_answer, normalize_answer, verify_correctness
+from src.evaluation.math_grader import verify_answer
 from src.utils import count_tokens, get_logger, set_seed
 
 set_seed(42)
@@ -41,19 +43,25 @@ def _get_teacher_token_count(example: dict) -> int:
     tc = example.get("teacher_token_count")
     if tc is not None and tc != 0:
         return int(tc)
-    sol = example.get("generated_solution", "") or ""
+    sol = example.get("generated_solution", "")
     return count_tokens(sol)
 
 
 def _verify_correctness(example: dict) -> bool:
-    """Ensure correctness_flag is set. Compute from expected_answer if missing."""
-    if "correctness_flag" in example:
-        return bool(example["correctness_flag"])
-    expected = example.get("expected_answer", "")
-    if not expected or not str(expected).strip():
-        return False
-    pred = extract_answer(example.get("generated_solution", "")) # TODO - verify this
-    return pred is not None and normalize_answer(pred) == normalize_answer(str(expected))
+    """Return precalculated correctness_flag. However if missing,
+    Verify if generated_solution matches expected_answer using tiered checking."""
+    if example.get('correctness_flag') is not None:
+        return example['correctness_flag']
+
+    generated_solution = example["generated_solution"]
+    expected_answer = example["expected_answer"]
+    problem = example["problem"]
+
+    return verify_correctness(
+        generated_solution,
+        expected_answer,
+        problem,
+    )
 
 
 def classify_complexity(example: dict) -> int:
@@ -89,26 +97,26 @@ def classify_complexity(example: dict) -> int:
     return 0  # Ambiguous medium → default Easy
 
 
-def label_preference(example: dict, complexity: int) -> str:
+def label_preference(example: dict, complexity: int) -> tuple[str, str | None]:
     """
-    Returns "preferred" or "rejected" for this solution.
+    Returns "preferred" or "rejected" (witt rejection reason) for this solution.
     Uses Qwen tokenizer and same thresholds (70/130) as classify_complexity.
     """
     correct = _verify_correctness(example)
     tokens = _get_teacher_token_count(example)
 
     if not correct:
-        return "rejected"
+        return "rejected", "incorrect"
 
     if complexity == 0:  # Easy
         if tokens <= EASY_TOKEN_THRESHOLD:
-            return "preferred"
-        return "rejected"
+            return "preferred", None
+        return "rejected", "length"
 
     # Hard
     if tokens >= HARD_TOKEN_THRESHOLD:
-        return "preferred"
-    return "rejected"
+        return "preferred", None
+    return "rejected", "length"
 
 
 def _make_short_answer(solution: str, expected: str = "") -> str:
@@ -167,37 +175,23 @@ def _make_long_reasoning(short_solution: str, expected: str, problem: str) -> st
     )
 
 
-def _rejection_reason(rejected_item: dict, expected: str) -> str:
-    """Determine why rejected: 'correctness' (wrong answer) or 'length' (correct but wrong length)."""
-    if not _verify_correctness(rejected_item):
-        return "correctness"
-    return "length"
-
-
 def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
     """
     Group by (problem, complexity) and build preferred/rejected pairs.
     Returns (real_pairs, synthesized_pairs, skipped_groups).
     Each pair has: problem, chosen, rejected, complexity, rejection_reason.
     """
-    from collections import defaultdict
-
-    raw_iter = tqdm(raw_data, desc="Classifying & labeling", unit=" examples")
-    raw_iter = raw_data
-
     groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
-    for ex in raw_iter:
+    for ex in tqdm(raw_data, desc="Classifying & labeling", unit=" examples"):
         c = classify_complexity(ex)
-        label = label_preference(ex, c)
-        groups[(ex["problem"], c)].append({**ex, "complexity": c, "label": label})
+        label, rejection_reason = label_preference(ex, c)
+        groups[(ex["problem"], c)].append({**ex, "complexity": c, "label": label, "rejection_reason": rejection_reason})
 
     real_pairs: list[dict] = []
     synthesized_pairs: list[dict] = []
     skipped_groups = 0
 
-    groups_iter = tqdm(groups.items(), desc="Building pairs from groups", unit=" groups")
-
-    for (problem, complexity), items in groups_iter:
+    for (problem, complexity), items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
         preferred = [x for x in items if x["label"] == "preferred"]
         rejected = [x for x in items if x["label"] == "rejected"]
         expected = items[0].get("expected_answer", "") if items else ""
@@ -209,86 +203,70 @@ def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
         if preferred and rejected:
             for pw in preferred:
                 for rj in rejected:
-                    reason = _rejection_reason(rj, expected)
-                    if reason == "correctness":
-                        # Replace with synthesized length-based pair
-                        short = _make_short_answer(pw["generated_solution"], expected)
-                        if complexity == 0:
-                            synthesized_pairs.append({
-                                "problem": problem,
-                                "chosen": short,
-                                "rejected": _make_verbose_answer(short),
-                                "complexity": 0,
-                                "rejection_reason": "length",
-                            })
-                        else:
-                            # Hard: preferred = long (use actual preferred), rejected = short
-                            synthesized_pairs.append({
-                                "problem": problem,
-                                "chosen": pw["generated_solution"],
-                                "rejected": short,
-                                "complexity": 1,
-                                "rejection_reason": "length",
-                            })
-                    else:
-                        real_pairs.append({
-                            "problem": problem,
-                            "chosen": pw["generated_solution"],
-                            "rejected": rj["generated_solution"],
-                            "complexity": complexity,
-                            "rejection_reason": reason,
-                        })
-            continue
+                    # if rj["rejection_reason"] == "incorrect":
+                    #     logger.info(f'{"Encountered an INCORRECT answer":#^100}')
+                    #     expected = rj.get("expected_answer", "").strip()
+                    #     pred = extract_answer(rj.get("generated_solution", "")) # TODO - verify this
+                    #     logger.info(f'Prediction: {normalize_answer(pred)}\n Expected: {normalize_answer(expected)}')
 
-        # Synthetic: preferred-only
-        if preferred and not rejected:
-            for ex in preferred:
-                sol = ex["generated_solution"]
-                exp = ex.get("expected_answer", expected)
-                if not _verify_correctness(ex):
-                    continue  # Should not happen for preferred
-                if complexity == 0:
-                    # Easy: short preferred, synthesize verbose rejected
-                    short = _make_short_answer(sol, exp)
-                    verbose = _make_verbose_answer(short)
-                    synthesized_pairs.append({
+                    #     logger.info(f'{"Encountered an INCORRECT answer":#^100}')
+                    #     # Replace with synthesized length-based pair
+                    #     short = _make_short_answer(pw["generated_solution"], expected)
+                    
+                    #     synthesized_pairs.append({
+                    #         "problem": problem,
+                    #         "chosen": short if complexity == 0 else pw["generated_solution"],
+                    #         "rejected": short if complexity == 1 else _make_verbose_answer(short),
+                    #         "complexity": complexity,
+                    #         "rejection_reason": rj["rejection_reason"],
+                    #     })
+                    # else:
+                    
+                    real_pairs.append({
                         "problem": problem,
-                        "chosen": short,
-                        "rejected": verbose,
-                        "complexity": 0,
-                        "rejection_reason": "length",
-                    })
-                else:
-                    # Hard: long preferred, synthesize short rejected
-                    short = _make_short_answer(sol, exp)
-                    synthesized_pairs.append({
-                        "problem": problem,
-                        "chosen": sol,
-                        "rejected": short,
-                        "complexity": 1,
-                        "rejection_reason": "length",
+                        "chosen": pw["generated_solution"],
+                        "rejected": rj["generated_solution"],
+                        "complexity": complexity,
+                        "rejection_reason": rj["rejection_reason"],
                     })
             continue
+        
+        # # TODO - add this if we dont have enough real pairs
+        # # Synthetic: preferred-only
+        # if preferred and not rejected:
+        #     for ex in preferred:
+        #         sol = ex["generated_solution"] # TODO - this isn't the solution per answer - FIX IT!!!
+        #         exp = ex.get("expected_answer", expected)
+        #         synthesized_pairs.append({
+        #             "problem": problem,
+        #             "chosen": sol,
+        #             "rejected": _make_verbose_answer(sol) if complexity == 0 else _make_short_answer(sol, exp),
+        #             "complexity": complexity,
+        #             "rejection_reason": "length",
+        #         })
 
         # Synthetic: rejected-only — synthesize minimal correct as preferred
         # Complexity=0: preferred = short; complexity=1: preferred = long (synthesize CoT)
-        if rejected and not preferred:
-            if not expected or not str(expected).strip():
-                skipped_groups += 1
-                continue
-            if complexity == 0:
-                preferred_synth = _make_short_answer("", expected)
-            else:
-                preferred_synth = _make_long_reasoning("", expected, problem)
-            for rj in rejected:
-                synthesized_pairs.append({
-                    "problem": problem,
-                    "chosen": preferred_synth,
-                    "rejected": rj["generated_solution"],
-                    "complexity": complexity,
-                    "rejection_reason": "correctness",
-                })
-            continue
+        # TODO - add this if we dont have enough real pairs
+        # if rejected and not preferred:
+        #     if not expected or not str(expected).strip():
+        #         skipped_groups += 1
+        #         continue
+        #     for rj in rejected:
+        #         if complexity == 0:
+        #             preferred_synth = _make_short_answer("", expected)
+        #         else:
+        #             preferred_synth = _make_long_reasoning("", expected, problem)
+        #         synthesized_pairs.append({
+        #             "problem": problem,
+        #             "chosen": preferred_synth,
+        #             "rejected": rj["generated_solution"],
+        #             "complexity": complexity,
+        #             "rejection_reason": "correctness",
+        #         })
+
+
+    logger.info(f'{("Created a total of " + str(len(synthesized_pairs)) + " synthesized pairs"):#^100}')
 
     return real_pairs, synthesized_pairs, skipped_groups
 
@@ -317,7 +295,6 @@ def split_pairs_by_problem(
 
     Stratifies by problem-level complexity (majority complexity among pairs for each problem).
     """
-    from collections import defaultdict
     import numpy as np
     from sklearn.model_selection import train_test_split
 
@@ -335,7 +312,7 @@ def split_pairs_by_problem(
         problem_complexities.append(max(set(comps), key=comps.count) if comps else 0)
 
     problem_complexities = np.array(problem_complexities)
-
+    # TODO - make sure problems are balanced enough
     train_problems, val_problems = train_test_split(
         unique_problems,
         test_size=val_split,
