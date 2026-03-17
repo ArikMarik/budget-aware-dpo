@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from src.config import (
     DUMMY_DATASET_PATH,
@@ -73,7 +73,7 @@ def _format_rejected(problem: str, rejected: str) -> str:
 def tokenize_and_save(
     pairs: list[dict],
     output_dir: Path,
-    tokenizer: AutoTokenizer,
+    tokenizer: PreTrainedTokenizer,
     filename: str = "tokens.pt",
     max_length: int = MAX_LENGTH,
 ) -> Path:

@@ -18,7 +18,6 @@ import re
 from pathlib import Path
 
 from src.config import (
-    DATA_PATH,
     GSM8K_TEST_PATH,
     MATH_TEST_PATH,
     PROJECT_ROOT,
@@ -374,7 +373,7 @@ def write_report(stats: dict | None, training_stats: dict | None, output_path: P
             pct = 100 * cnt / max(1, total_math)
             lines.append(f"| {level} | {cnt:,} | {pct:.1f}% |")
         lines.extend(["", "---", ""])
-    elif tr_has_levels:
+    elif training_stats and tr_has_levels:
         total_math = sum(training_stats["level_counts"].values())
         lines.extend([
             "## 2. MATH Level Distribution (Training Data)",
@@ -434,7 +433,7 @@ def write_report(stats: dict | None, training_stats: dict | None, output_path: P
             avg = stats["level_tokens_avg"][level]
             cnt = len(stats["level_tokens"].get(level, []))
             lines.append(f"| {level} | {avg:.1f} | {cnt:,} |")
-    elif tr_has_levels:
+    elif training_stats and tr_has_levels:
         lines.extend([
             "",
             "### 3.3 Training Data: Average Tokens per MATH Level",
