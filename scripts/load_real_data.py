@@ -6,11 +6,9 @@ Saves training data for DPO preprocessing; holds out test sets for Phase 9 evalu
 
 import argparse
 import json
-import re
-from pathlib import Path
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, REAL_DATASET_PATH
-from src.evaluation.answer_extraction import extract_answer, normalize_answer
+from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer, verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
 
 logger = get_logger(__name__)
@@ -30,36 +28,20 @@ def normalize_problem(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def verify_correctness(generated_solution: str, expected_answer: str) -> bool:
-    """Verify if generated_solution matches expected_answer. Returns False when expected_answer empty (cannot verify)."""
-    if not expected_answer or not str(expected_answer).strip():
-        return False  # No ground truth: cannot verify, treat as incorrect
-    pred = extract_answer(generated_solution)
-    if pred is None:
-        return False
-    return normalize_answer(pred) == normalize_answer(str(expected_answer))
-
-
-def extract_gsm8k_answer(answer: str) -> str:
-    """Extract final answer from GSM8K format (#### N)."""
-    m = re.search(r"####\s*(\S+)", answer)
-    return m.group(1).strip() if m else ""
-
-
-def convert_openmathinstruct(item: dict, problem_to_level: dict | None = None) -> dict:
+def convert_openmath_instruct(item: dict, problem_to_level: dict | None = None) -> dict:
     """Convert OpenMathInstruct-2 item to our format. Add level when problem_source has math and problem matches MATH train."""
-    solution = item.get("generated_solution", "")
-    expected = item.get("expected_answer", "")
+    solution = item["generated_solution"]
+    expected = item["expected_answer"]
+    problem = item["problem"]
+    source = item["problem_source"].lower()
     out = {
-        "problem": item["problem"],
+        "problem": problem,
         "generated_solution": solution,
         "expected_answer": expected,
-        "problem_source": item.get("problem_source", "unknown"),
+        "problem_source": source,
         "teacher_token_count": count_tokens(solution),
-        "correctness_flag": verify_correctness(solution, expected),
+        "correctness_flag": verify_correctness(solution, expected, problem=problem),
     }
-    problem = item.get("problem", "")
-    source = str(item.get("problem_source", "")).lower()
     if problem_to_level and "math" in source and problem:
         out["level"] = problem_to_level.get(normalize_problem(problem), "")
     else:
@@ -91,7 +73,7 @@ def load_math_problem_to_level() -> dict[str, str]:
     return mapping
 
 
-def load_openmathinstruct(split: str = "train_1M", limit: int | None = None) -> list[dict]:
+def load_openmath_instruct(split: str = "train_1M", limit: int | None = None) -> list[dict]:
     """Load OpenMathInstruct-2 from HuggingFace. Enriches MATH-origin problems with level from MATH train."""
     from datasets import load_dataset
 
@@ -99,12 +81,12 @@ def load_openmathinstruct(split: str = "train_1M", limit: int | None = None) -> 
     problem_to_level = load_math_problem_to_level()
     logger.info("Built level map for %s MATH problems", f"{len(problem_to_level):,}")
 
-    dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split)
+    dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split, streaming=True)
     examples = []
     for i, item in enumerate(dataset):
         if limit and i >= limit:
             break
-        examples.append(convert_openmathinstruct(dict(item), problem_to_level))
+        examples.append(convert_openmath_instruct(dict(item), problem_to_level))
     return examples
 
 
@@ -146,8 +128,7 @@ def load_math_test() -> list[dict]:
         solution = item.get("solution", item.get("answer", ""))
         expected = item.get("answer", "")
         if not expected and solution and "\\boxed{" in str(solution):
-            m = re.search(r"\\boxed\{([^}]+)\}", str(solution))
-            expected = m.group(1).strip() if m else ""
+            expected = extract_answer(str(solution)) or ""
         examples.append({
             "problem": problem,
             "answer": solution,
@@ -170,7 +151,7 @@ def main():
 
     if not args.test_sets_only:
         logger.info("Loading OpenMathInstruct-2...")
-        train_data = load_openmathinstruct(split=args.split, limit=args.limit)
+        train_data = load_openmath_instruct(split=args.split, limit=args.limit)
         logger.info("Loaded %s training examples", len(train_data))
 
         REAL_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
