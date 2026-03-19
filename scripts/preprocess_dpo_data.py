@@ -20,8 +20,10 @@ from src.config import (
     PROCESSED_DATASET_PATH,
     PROCESSED_DATASET_PATH_REAL,
     REAL_DATASET_PATH,
+    REAL_DATASET_PATH_LIMITED,
     USE_DUMMY_DATA,
     MODEL_NAME,
+    PROCESSED_DATASET_PATH_LIMITED,
 )
 from src.data.preprocessing import (
     build_dpo_pairs,
@@ -48,6 +50,7 @@ def get_output_path() -> Path:
     if USE_DUMMY_DATA:
         return PROCESSED_DATASET_PATH
     return PROCESSED_DATASET_PATH_REAL
+
 
 
 def _write_jsonl(path: Path, pairs: list[dict], desc: str = "Saving") -> None:
@@ -157,7 +160,7 @@ def main():
 
     logger.info("[2/7] Building DPO pairs (classify, label, group)...")
     real_pairs, synthesized_pairs, skipped_groups = build_dpo_pairs(raw_data)
-    all_pairs = real_pairs + synthesized_pairs
+    a = real_pairs + synthesized_pairs
     logger.info("      Built %s real + %s synthesized = %s total pairs", f"{len(real_pairs):,}", f"{len(synthesized_pairs):,}", f"{len(all_pairs):,}")
 
     logger.info("[3/7] Splitting by problem (train/val)...")

@@ -82,11 +82,15 @@ class EarlyStopping:
         return False
 
 
-def log_prob(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+def log_prob(logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = input_ids[..., 1:].contiguous()
+    shift_mask = attention_mask[..., 1:].contiguous().float()
     log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
-    return torch.gather(log_probs, -1, shift_labels.unsqueeze(-1)).squeeze(-1).sum(-1)
+    token_log_probs = torch.gather(log_probs, -1, shift_labels.unsqueeze(-1)).squeeze(-1)
+    # Zero out padding positions, sum, then normalize by real token count.
+    # This keeps log-ratios O(1) regardless of sequence length and prevents sigmoid saturation.
+    return (token_log_probs * shift_mask).sum(-1) / shift_mask.sum(-1).clamp(min=1)
 
 
 def compute_batch_loss(
@@ -109,10 +113,10 @@ def compute_batch_loss(
     policy_chosen = model(**chosen_tok).logits
     policy_rejected = model(**rejected_tok).logits
 
-    policy_chosen_lp = log_prob(policy_chosen, chosen_tok["input_ids"])
-    policy_rejected_lp = log_prob(policy_rejected, rejected_tok["input_ids"])
-    ref_chosen_lp = log_prob(ref_chosen, chosen_tok["input_ids"])
-    ref_rejected_lp = log_prob(ref_rejected, rejected_tok["input_ids"])
+    policy_chosen_lp = log_prob(policy_chosen, chosen_tok["input_ids"], chosen_tok["attention_mask"])
+    policy_rejected_lp = log_prob(policy_rejected, rejected_tok["input_ids"], rejected_tok["attention_mask"])
+    ref_chosen_lp = log_prob(ref_chosen, chosen_tok["input_ids"], chosen_tok["attention_mask"])
+    ref_rejected_lp = log_prob(ref_rejected, rejected_tok["input_ids"], rejected_tok["attention_mask"])
 
     pad_id = tokenizer.pad_token_id or 0
     chosen_lens_t = (chosen_tok["input_ids"] != pad_id).sum(dim=-1).float()
@@ -566,11 +570,7 @@ def train_dpo(
             optimizer.zero_grad()
             loss.backward()
 
-            grad_norm = 0.0
-            for p in model.parameters():
-                if p.grad is not None:
-                    grad_norm += p.grad.data.norm(2).item() ** 2
-            grad_norm = grad_norm ** 0.5
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0).item()
 
             optimizer.step()
 

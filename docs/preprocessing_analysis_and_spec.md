@@ -155,7 +155,23 @@ Loss: \(-\log \sigma(\Delta R)\).
 
 ---
 
-## 8. Summary of Code Changes (To Implement)
+## 8. Real Dataset Reprocessing
+
+**Do you need to load from scratch?** No. Raw data (`real_openmathinstruct.jsonl`) is produced by `load_real_data.py` and stays on disk.
+
+**To regenerate processed data with the new format** (rejection_reason, real/synthesized split, full stats):
+
+```bash
+USE_DUMMY_DATA=0 python scripts/preprocess_dpo_data.py
+```
+
+**Prerequisite:** `data/real_openmathinstruct.jsonl` must exist. Create it with `python scripts/load_real_data.py` if missing.
+
+The script will overwrite `data/processed_dpo_dataset_real/` with the new outputs. The skip logic requires all four files (`dataset.jsonl`, `dataset_real.jsonl`, `dataset_synthesized.jsonl`, `metadata.json`); the old format had only two, so the first run reprocesses automatically.
+
+---
+
+## 9. Summary of Code Changes (To Implement)
 
 1. **load_real_data.py:** Compute `correctness_flag` by comparing `extract_answer(generated_solution)` with `expected_answer`. Skip or flag when `expected_answer` is missing.
 

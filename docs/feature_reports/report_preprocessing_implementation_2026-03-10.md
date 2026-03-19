@@ -64,4 +64,29 @@ Training pipeline loads `dataset.jsonl` successfully; extra keys ignored.
 ## Appendix: Problems Encountered and Solutions
 
 - **Import time**: First run can be slow due to torch/transformers. No functional impact.
-- **Real dataset**: Uses old format without `rejection_reason`. Reprocess with `USE_DUMMY_DATA=0` to regenerate full stats.
+- **Real dataset**: See below.
+
+---
+
+## Real Dataset Reprocessing: What to Run
+
+**Do you need to load the dataset from scratch?** No. The raw training data (`real_openmathinstruct.jsonl`) is produced by `load_real_data.py` and is already on disk. You only need to **reprocess** it with the new preprocessing pipeline.
+
+**When to run `load_real_data.py`:** Only if you want fresh data from HuggingFace (e.g. different split, limit, or if the file is missing/corrupt).
+
+**What to run to get the new format (rejection_reason, real/synthesized split, full stats):**
+
+```bash
+USE_DUMMY_DATA=0 python scripts/preprocess_dpo_data.py
+```
+
+**Prerequisites:**
+- `data/real_openmathinstruct.jsonl` must exist (create it with `python scripts/load_real_data.py` if missing).
+
+**What happens:** The script reads `real_openmathinstruct.jsonl`, runs the new `build_dpo_pairs()`, and writes:
+- `data/processed_dpo_dataset_real/dataset_real.jsonl`
+- `data/processed_dpo_dataset_real/dataset_synthesized.jsonl`
+- `data/processed_dpo_dataset_real/dataset.jsonl`
+- `data/processed_dpo_dataset_real/metadata.json`
+
+The skip logic requires all four files to exist; the old format had only `dataset.jsonl` and `metadata.json`, so the first run with the new code will reprocess automatically.

@@ -47,9 +47,10 @@ def budget_aware_dpo_loss(
         torch.full_like(complexities, lambda_hard, dtype=torch.float32),
     ).to(policy_chosen_logps.device)
 
-    # Length penalty term: penalize (chosen_len - rejected_len)
-    # If chosen is shorter, this term is negative -> adds to reward difference (good)
-    length_diff = chosen_lengths.float() - rejected_lengths.float()
+    # Length penalty term: penalize (chosen_len - rejected_len), normalized by average
+    # sequence length so the penalty is O(1) and commensurate with the DPO log-ratio term.
+    avg_len = (chosen_lengths.float() + rejected_lengths.float()) / 2.0
+    length_diff = (chosen_lengths.float() - rejected_lengths.float()) / avg_len.clamp(min=1)
     length_penalty = lambdas * length_diff
 
     # DPO implicit reward difference
@@ -59,6 +60,6 @@ def budget_aware_dpo_loss(
     # DPO loss: -log(sigma(reward_diff))
     loss = -F.logsigmoid(reward_diff).mean()
 
-    length_penalty_mean = length_penalty.detach().mean()
+    length_penalty_mean = length_penalty.detach().mean().item()
 
     return loss, {"length_penalty": length_penalty_mean}

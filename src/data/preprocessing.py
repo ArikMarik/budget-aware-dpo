@@ -231,8 +231,8 @@ def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
                     })
             continue
         
-        # # TODO - add this if we dont have enough real pairs
-        # # Synthetic: preferred-only
+        # TODO - add this if we dont have enough real pairs
+        # Synthetic: preferred-only
         # if preferred and not rejected:
         #     for ex in preferred:
         #         sol = ex["generated_solution"] # TODO - this isn't the solution per answer - FIX IT!!!
