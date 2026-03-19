@@ -15,6 +15,7 @@ import functools
 import os
 import re
 
+from math_verify import parse, verify
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -24,7 +25,27 @@ logger = get_logger(__name__)
 
 # Configurable via env; defaults to the instruct variant of the project model
 LLM_JUDGE_MODEL = os.environ.get("LLM_JUDGE_MODEL", "Qwen/Qwen2.5-Math-7B-Instruct")
+# Max solution chars fed to the LLM (avoid runaway prompt length)
+_MAX_SOLUTION_CHARS = 4000
 
+
+# ---------------------------------------------------------------------------
+# Tier 0: exact equality
+# ---------------------------------------------------------------------------
+def is_trivially_equal(pred: str, expected: str) -> bool:
+    # 1. Strip formatting and compare directly
+    p_clean = pred.replace("\\text{", "").replace("}", "").replace(" ", "").replace(",", "").replace("\\$", "")
+    e_clean = expected.replace(" ", "").replace(",", "").replace("\\$", "")
+    if p_clean.lower() == e_clean.lower():
+        return True
+        
+    # 2. Try checking if they are just unequal numbers (handles 3.50 vs 350)
+    try:
+        return abs(float(p_clean) - float(e_clean)) < 1e-6
+    except ValueError:
+        pass
+        
+    return False
 
 # ---------------------------------------------------------------------------
 # Tier 1: symbolic via math-verify
@@ -41,9 +62,7 @@ def _verify_symbolic(pred: str, expected: str) -> bool | None:
     or times out (caller should fall through to Tier 2).
     """
     try:
-        from math_verify import parse, verify  # type: ignore[import]
-        result = verify(parse(_wrap(expected)), parse(_wrap(pred)))
-        return bool(result)
+        return verify(parse(_wrap(expected)), parse(_wrap(pred)))
     except Exception as exc:
         logger.debug("math-verify inconclusive for %r vs %r: %s", pred, expected, exc)
         return None
@@ -78,43 +97,42 @@ def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
     """
     model, tokenizer = _load_llm_judge()
 
-    # 1. System Prompt: Explain rules and mandate Chain-of-Thought format
-    system_prompt = (
-        "You are an expert, strict math grader. Your task is to determine if a student's answer "
-        "is mathematically equivalent to the expected answer.\n\n"
+    # Truncate strings to keep prompt manageable
+    if len(solution) > _MAX_SOLUTION_CHARS:
+        half = _MAX_SOLUTION_CHARS // 2
+        solution = solution[:half] + "\n...[truncated]...\n" + solution[-half:]
+        
+    # System Instructions
+    system_content = (
+        "You are an expert math grading judge. Your ONLY task is to compare a student's extracted final answer against the expected correct answer and determine if they are mathematically equivalent.\n"
+        "DO NOT grade or correct the student's step-by-step solution. The student's solution is ONLY provided so you can understand their notation, base, or units if their final answer is ambiguous.\n\n"
         "Rules for equivalence:\n"
-        "1. STRICT NUMERICAL MATCH: Values must match exactly digit-for-digit. 3.50 is NOT 350. 99,999 is NOT 99997.\n"
+        "1. STRICT NUMERICAL MATCH: Values must match exactly digit-for-digit. 3.50 is NOT 350.\n"
         "2. ALGEBRAIC EQUIVALENCE: Expressions that simplify to the exact same value are equal (e.g. 1 - \\cos^2t equals \\sin^2t).\n"
-        "3. COMPLEX NUMBERS & FRACTIONS: Different forms of the same value are equal (e.g. \\frac{-1 - 5i}{13} equals -\\frac{1}{13}-\\frac{5}{13}i).\n"
-        "4. IGNORE FORMATTING: LaTeX tags like \\text{}, spaces, commas, and formatting do not matter.\n\n"
-        "You MUST think step-by-step first. Then, on a new line, end your response with EXACTLY 'VERDICT: yes' or 'VERDICT: no'."
+        "3. DECIMAL APPROXIMATIONS: If the student provides a correct decimal approximation of an exact expected value (e.g. 10.196 is equivalent to 3\\sqrt{3}+5), mark them as equivalent.\n"
+        "4. IGNORE FORMATTING: LaTeX tags like \\text{}, spaces, commas, and currency symbols do not matter.\n\n"
+        "You MUST think step-by-step for 1-2 sentences. Then, on a new line, end your response with EXACTLY 'VERDICT: yes' or 'VERDICT: no'."
     )
 
-    # 2. Few-Shot Chain-of-Thought Examples
-    # We teach the model exactly how to reason through the edge cases it is failing on.
+    # Strict Few-Shot Flow
     messages =[
-        {"role": "system", "content": system_prompt},
-        
-        {"role": "user", "content": "Student: 306958.05\nExpected: 306,956.63\nAre they equivalent?"},
-        {"role": "assistant", "content": "The student has 306958.05. The expected is 306956.63. Comparing the digits, 958 is not equal to 956. They are mathematically different numbers.\nVERDICT: no"},
-        
-        {"role": "user", "content": "Student: 3.50\nExpected: 350\nAre they equivalent?"},
-        {"role": "assistant", "content": "The student's answer is 3.50, which is a small decimal. The expected answer is 350, which is three hundred and fifty. 3.5 is not equal to 350.\nVERDICT: no"},
-        
-        {"role": "user", "content": "Student: \\text{Softball, Kickball, Picnic}\nExpected: Softball,Kickball,Picnic\nAre they equivalent?"},
-        {"role": "assistant", "content": "The student's answer is wrapped in a \\text{} LaTeX tag and contains spaces. If we ignore the formatting and spaces, the lists are identical: Softball, Kickball, Picnic.\nVERDICT: yes"},
-        
-        {"role": "user", "content": "Student: 1 - \\cos^2t\nExpected: \\sin^2t\nAre they equivalent?"},
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": "Student's Final Answer: 306958.05\nExpected Answer: 306,956.63\n\nAre they equivalent?"},
+        {"role": "assistant", "content": "Comparing the digits, 306958.05 is not equal to 306956.63. They are mathematically different numbers.\nVERDICT: no"},
+        {"role": "user", "content": "Student's Final Answer: \\text{Softball, Kickball, Picnic}\nExpected Answer: Softball,Kickball,Picnic\n\nAre they equivalent?"},
+        {"role": "assistant", "content": "The student's answer is wrapped in a \\text{} LaTeX tag and contains spaces. Ignoring the formatting and spaces, the lists are identical.\nVERDICT: yes"},
+        {"role": "user", "content": "Student's Final Answer: 1 - \\cos^2t\nExpected Answer: \\sin^2t\n\nAre they equivalent?"},
         {"role": "assistant", "content": "According to the Pythagorean trigonometric identity, 1 - \\cos^2t is algebraically identical to \\sin^2t. They represent the exact same value.\nVERDICT: yes"},
+        {"role": "user", "content": "Student's Final Answer: 10.196\nExpected Answer: 3\\sqrt{3}+5\n\nAre they equivalent?"},
+        {"role": "assistant", "content": "The expected answer is 3\\sqrt{3}+5. Since \\sqrt{3} is approximately 1.732, 3(1.732) + 5 = 5.196 + 5 = 10.196. The student's decimal correctly approximates the expected exact value.\nVERDICT: yes"},
         
-        {"role": "user", "content": "Student: \\frac{-1 - 5i}{13}\nExpected: -\\frac{1}{13}-\\frac{5}{13}i\nAre they equivalent?"},
-        {"role": "assistant", "content": "The student's fraction can be split into two parts: -1/13 and -5i/13. This exactly matches the expected expanded complex number form.\nVERDICT: yes"},
-        
+        # Final Query: Context clearly labeled as "Student's Full Solution" and isolated.
         {"role": "user", "content": (
-            f"Problem context:\n{problem}\n\n"
-            f"Student: {pred}\n"
-            f"Expected: {expected}\n"
-            "Are they equivalent?"
+            f"<context>\nProblem:\n{problem}\n\n"
+            f"Student's Full Solution (for notation reference only):\n{solution}\n</context>\n\n"
+            f"Student's Final Answer: {pred}\n"
+            f"Expected Answer: {expected}\n\n"
+            "Are they equivalent? DO NOT evaluate the student's full solution for correctness. ONLY compare the Student's Final Answer to the Expected Answer. Evaluate the equivalence step-by-step."
         )}
     ]
 
@@ -127,7 +145,7 @@ def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
     with torch.no_grad():
         output = model.generate(
             **inputs,
-            max_new_tokens=150, # Give the model room to "think"
+            max_new_tokens=500, # Give the model room to "think"
             temperature=0.0,   # Ensure strict greedy decoding
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
@@ -137,12 +155,17 @@ def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
     new_tokens = output[0][inputs["input_ids"].shape[1]:]
     response = tokenizer.decode(new_tokens, skip_special_tokens=True).strip().lower()
     
-    # Strip any stray punctuation before checking if it starts with 'yes'
-    clean_response = re.sub(r'[^a-z]', '', response)
-    is_correct = clean_response.startswith("yes")
+    # Robust Regex parsing to catch "Verdict: yes", "Verdiction: yes", "verdical: yes"
+    match = re.search(r"(?i)verd[a-z]*:\s*(yes|no)", response)
+    if match:
+        is_correct = match.group(1).lower() == "yes"
+    else:
+        # Extreme Fallback: find the very last occurrence of 'yes' or 'no'
+        words = re.findall(r"\b(yes|no)\b", response.lower())
+        is_correct = (words[-1] == "yes") if words else False
     
     logger.info(
-        "LLM judge: pred=%r expected=%r → %r (correct=%s)", pred, expected, response, is_correct
+        "LLM judge: pred=%r expected=%r\n → %r\n(correct=%s)", pred, expected, response, is_correct
     )
     return is_correct
 
@@ -177,16 +200,14 @@ def verify_answer(
     if not expected or not str(expected).strip():
         logger.info(f"Expected answer is empty: {expected}")
         return False
-
-    # Tier 1
-    symbolic_result = _verify_symbolic(pred, expected)
-    if symbolic_result is True:
+    
+    # Tier 0
+    if is_trivially_equal(pred, expected):
         return True
 
-    # Tier 2 (handles False AND None from Tier 1)
-    logger.info(
-        "Tier 1 result=%s for pred=%r vs expected=%r — invoking LLM judge",
-        symbolic_result, pred, expected,
-    )
-    llm_result = _verify_llm(problem, solution, pred, expected)
-    return llm_result
+    # Tier 1
+    if _verify_symbolic(pred, expected):
+        return True
+
+    # Tier 2
+    return _verify_llm(problem, solution, pred, expected)
