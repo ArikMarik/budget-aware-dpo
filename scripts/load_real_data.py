@@ -7,6 +7,8 @@ Saves training data for DPO preprocessing; holds out test sets for Phase 9 evalu
 import argparse
 import json
 
+from tqdm import tqdm
+
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, REAL_DATASET_PATH
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer, verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
@@ -19,6 +21,13 @@ MATH_CONFIGS = [
     "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
     "number_theory", "prealgebra", "precalculus",
 ]
+
+OPENMATH_SIZES = {
+    "train_1M": 1_000_000,
+    "train_2M": 2_000_000,
+    "train_5M": 5_000_000,
+    "train": 14_000_000,
+}
 
 
 def normalize_problem(text: str) -> str:
@@ -82,8 +91,9 @@ def load_openmath_instruct(split: str = "train_1M", limit: int | None = None) ->
     logger.info("Built level map for %s MATH problems", f"{len(problem_to_level):,}")
 
     dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split, streaming=True)
+    total = min(limit, OPENMATH_SIZES[split]) if limit else OPENMATH_SIZES[split]
     examples = []
-    for i, item in enumerate(dataset):
+    for i, item in enumerate(tqdm(dataset, total=total, desc="Loading OpenMathInstruct-2")):
         if limit and i >= limit:
             break
         examples.append(convert_openmath_instruct(dict(item), problem_to_level))
