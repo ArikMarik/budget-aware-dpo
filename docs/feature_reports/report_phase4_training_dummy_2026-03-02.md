@@ -11,7 +11,7 @@
 - **Baseline script:** `scripts/training/train_baseline_dpo.py` — standard DPO
 - **Budget-aware script:** `scripts/training/train_budget_aware_dpo.py` — custom R_budget loss
 - **Experiment tracking:** `training_config.json`, `metrics.json` per run
-- **Checkpointing:** Every N steps (default 500), `resume_from` support
+- **Checkpointing:** Every N epochs (default 1), `resume_from` support
 
 ## Test Results (Dummy Data)
 
@@ -23,13 +23,13 @@
 
 ```bash
 # Baseline (standard DPO)
-python scripts/training/train_baseline_dpo.py --max-steps 1000 --batch-size 4
+python scripts/training/train_baseline_dpo.py --max-epochs 10 --batch-size 4
 
 # Budget-aware DPO
-python scripts/training/train_budget_aware_dpo.py --max-steps 1000 --batch-size 4
+python scripts/training/train_budget_aware_dpo.py --max-epochs 10 --batch-size 4
 
 # Resume from checkpoint
-python scripts/training/train_budget_aware_dpo.py --resume-from checkpoints/budget_aware_dpo/checkpoint-500
+python scripts/training/train_budget_aware_dpo.py --resume-from checkpoints/budget_aware_dpo/checkpoint-epoch-5
 ```
 
 ## Next Steps

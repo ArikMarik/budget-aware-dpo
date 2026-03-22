@@ -21,8 +21,8 @@
 
 ```bash
 # Full training on real data (ensure Phase 7 preprocessing done)
-USE_DUMMY_DATA=0 python scripts/training/train_baseline_dpo.py --max-steps 1000
-USE_DUMMY_DATA=0 python scripts/training/train_budget_aware_dpo.py --max-steps 1000
+USE_DUMMY_DATA=0 python scripts/training/train_baseline_dpo.py --max-epochs 10
+USE_DUMMY_DATA=0 python scripts/training/train_budget_aware_dpo.py --max-epochs 10
 ```
 
 ## Next Steps

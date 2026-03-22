@@ -145,7 +145,7 @@ classify_complexity(example):
 | `train/avg_chosen_tokens` | Every `eval_every` | Mean token count of chosen responses in batch |
 | `train/avg_rejected_tokens` | Every `eval_every` | Mean token count of rejected responses |
 | `train/token_diff` | Every `eval_every` | Mean (chosen_tokens - rejected_tokens) |
-| `config/*` | At init | Hyperparameters (max_steps, batch_size, lr, use_budget_aware, etc.) |
+| `config/*` | At init | Hyperparameters (max_epochs, batch_size, lr, use_budget_aware, etc.) |
 
 ### 5.4 Overfitting & Validation (Optional Enhancement)
 
