@@ -9,7 +9,6 @@ Skips processing if all output files already exist.
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import torch
 from tqdm import tqdm
@@ -31,9 +30,10 @@ from src.data.preprocessing import (
     load_jsonl,
     split_pairs_by_problem,
 )
-from src.utils import get_logger, set_seed
+from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
+setup_global_exception_handler(__name__)
 
 VAL_SPLIT = 0.2
 SEED = 42
@@ -62,15 +62,7 @@ def _write_jsonl(path: Path, pairs: list[dict], desc: str = "Saving") -> None:
 
 
 def _format_prompt(problem: str) -> str:
-    return f"Problem: {problem}\nSolution:"
-
-
-def _format_chosen(problem: str, chosen: str) -> str:
-    return f"{_format_prompt(problem)} {chosen}"
-
-
-def _format_rejected(problem: str, rejected: str) -> str:
-    return f"{_format_prompt(problem)} {rejected}"
+    return f"Problem: {problem}\nSolution: "
 
 
 def tokenize_and_save(
@@ -79,44 +71,42 @@ def tokenize_and_save(
     tokenizer: PreTrainedTokenizer,
     filename: str = "tokens.pt",
     max_length: int = MAX_LENGTH,
+    batch_size: int = 1000,
 ) -> Path:
-    """
-    Tokenize all pairs and save as torch tensors.
-    Returns path to the saved tensor file.
-    """
-    chosen_texts = []
-    rejected_texts = []
-    complexities = []
+    chosen_ids_acc, chosen_masks_acc = [], []
+    rejected_ids_acc, rejected_masks_acc = [], []
+    complexities_all = []
 
-    for p in tqdm(pairs, desc="Formatting texts", unit=" pairs"):
-        chosen_texts.append(_format_chosen(p["problem"], p["chosen"]))
-        rejected_texts.append(_format_rejected(p["problem"], p["rejected"]))
-        complexities.append(p.get("complexity", 0))
+    num_batches = (len(pairs) + batch_size - 1) // batch_size
 
-    chosen_tok = tokenizer(
-        chosen_texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-    )
-    rejected_tok = tokenizer(
-        rejected_texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-    )
-    complexities_t = torch.tensor(complexities, dtype=torch.long)
+    for batch_idx in tqdm(range(num_batches), desc="Tokenizing batches", unit=" batches"):
+        start_idx = batch_idx * batch_size
+        end_idx = start_idx + batch_size
+        batch_pairs = pairs[start_idx:end_idx]
+
+        chosen_combined, rejected_combined = [], []
+        for pair in batch_pairs:
+            prompt_text = _format_prompt(pair["problem"])
+            chosen_combined.append(prompt_text + pair["chosen"])
+            rejected_combined.append(prompt_text + pair["rejected"])
+            complexities_all.append(pair.get("complexity", 0))
+
+        chosen_tok = tokenizer(chosen_combined, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
+        rejected_tok = tokenizer(rejected_combined, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
+
+        chosen_ids_acc.append(chosen_tok.input_ids)
+        chosen_masks_acc.append(chosen_tok.attention_mask)
+        rejected_ids_acc.append(rejected_tok.input_ids)
+        rejected_masks_acc.append(rejected_tok.attention_mask)
 
     output_path = output_dir / filename
     torch.save(
         {
-            "chosen_input_ids": chosen_tok["input_ids"],
-            "chosen_attention_mask": chosen_tok["attention_mask"],
-            "rejected_input_ids": rejected_tok["input_ids"],
-            "rejected_attention_mask": rejected_tok["attention_mask"],
-            "complexities": complexities_t,
+            "chosen_input_ids": torch.cat(chosen_ids_acc),
+            "chosen_attention_mask": torch.cat(chosen_masks_acc),
+            "rejected_input_ids": torch.cat(rejected_ids_acc),
+            "rejected_attention_mask": torch.cat(rejected_masks_acc),
+            "complexities": torch.tensor(complexities_all, dtype=torch.long),
         },
         output_path,
     )
@@ -147,51 +137,69 @@ def main():
     input_path = get_input_path()
     if not input_path.exists():
         if USE_DUMMY_DATA:
+            logger.error("Input data not found: %s. Run generate_dummy_data.py first.", input_path)
             raise FileNotFoundError(
                 f"Input data not found: {input_path}. Run generate_dummy_data.py first."
             )
+        logger.error("Input data not found: %s. Run load_real_data.py first.", input_path)
         raise FileNotFoundError(
             f"Input data not found: {input_path}. Run load_real_data.py first."
         )
 
-    logger.info("[1/7] Loading input data...")
-    raw_data = load_jsonl(input_path)
-    logger.info("      Loaded %s examples", f"{len(raw_data):,}")
+    if any(not p.exists() for p in (train_path, val_path)):     
+        logger.info("[1/7] Loading input data...")
+        raw_data = load_jsonl(input_path)
+        logger.info("      Loaded %s examples", f"{len(raw_data):,}")
 
-    logger.info("[2/7] Building DPO pairs (classify, label, group)...")
-    real_pairs, synthesized_pairs, skipped_groups = build_dpo_pairs(raw_data)
-    a = real_pairs + synthesized_pairs
-    logger.info("      Built %s real + %s synthesized = %s total pairs", f"{len(real_pairs):,}", f"{len(synthesized_pairs):,}", f"{len(all_pairs):,}")
+        logger.info("[2/7] Building DPO pairs (classify, label, group)...")
+        real_pairs, synthesized_pairs, skipped_groups = build_dpo_pairs(raw_data)
+        all_pairs = real_pairs + synthesized_pairs
+        logger.info("      Built %s real + %s synthesized = %s total pairs", f"{len(real_pairs):,}", f"{len(synthesized_pairs):,}", f"{len(all_pairs):,}")
 
-    logger.info("[3/7] Splitting by problem (train/val)...")
-    train_pairs, val_pairs = split_pairs_by_problem(all_pairs, VAL_SPLIT, SEED)
-    logger.info("      Split: %s train pairs, %s val pairs", f"{len(train_pairs):,}", f"{len(val_pairs):,}")
+        logger.info("[3/7] Splitting by problem (train/val)...")
+        train_pairs, val_pairs = split_pairs_by_problem(all_pairs, VAL_SPLIT, SEED)
+        logger.info("      Split: %s train pairs, %s val pairs", f"{len(train_pairs):,}", f"{len(val_pairs):,}")
 
-    train_problems = set(p["problem"] for p in train_pairs)
-    val_problems = set(p["problem"] for p in val_pairs)
-    overlap = train_problems & val_problems
-    if overlap:
-        logger.warning("      WARNING: %s problems in both sets!", len(overlap))
+        train_problems = set(p["problem"] for p in train_pairs)
+        val_problems = set(p["problem"] for p in val_pairs)
+        overlap = train_problems & val_problems
+        if overlap:
+            logger.warning("      WARNING: %s problems in both sets!", len(overlap))
+        else:
+            logger.info("      No problem overlap (good - no data leakage)")
+
+        logger.info("[4/7] Saving split datasets...")
+        _write_jsonl(real_path, real_pairs, desc="Saving dataset_real.jsonl")
+        _write_jsonl(synthesized_path, synthesized_pairs, desc="Saving dataset_synthesized.jsonl")
+        _write_jsonl(dataset_path, all_pairs, desc="Saving dataset.jsonl")
+        _write_jsonl(train_path, train_pairs, desc="Saving train.jsonl")
+        _write_jsonl(val_path, val_pairs, desc="Saving val.jsonl")
+        logger.info("      Saved to %s", output_dir)
     else:
-        logger.info("      No problem overlap (good - no data leakage)")
+        logger.info("Split train, val dataset exists at %s. Loading from disk.", output_dir)
 
-    logger.info("[4/7] Saving split datasets...")
-    _write_jsonl(real_path, real_pairs, desc="Saving dataset_real.jsonl")
-    _write_jsonl(synthesized_path, synthesized_pairs, desc="Saving dataset_synthesized.jsonl")
-    _write_jsonl(dataset_path, all_pairs, desc="Saving dataset.jsonl")
-    _write_jsonl(train_path, train_pairs, desc="Saving train.jsonl")
-    _write_jsonl(val_path, val_pairs, desc="Saving val.jsonl")
-    logger.info("      Saved to %s", output_dir)
+        real_pairs = load_jsonl(real_path)
+        synthesized_pairs = load_jsonl(synthesized_path)
+        train_pairs = load_jsonl(train_path)
+        val_pairs = load_jsonl(val_path)
+        skipped_groups = -1  # Not needed for loading, only for stats
 
-    logger.info("[5/7] Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        train_problems = set(p["problem"] for p in train_pairs)
+        val_problems = set(p["problem"] for p in val_pairs)
 
-    logger.info("[6/7] Tokenizing and saving...")
-    train_tokens_path = tokenize_and_save(train_pairs, output_dir, tokenizer, "train_tokens.pt")
-    val_tokens_path = tokenize_and_save(val_pairs, output_dir, tokenizer, "val_tokens.pt")
-    logger.info("      Saved tokens to %s", output_dir)
+
+    if any(not p.exists() for p in (train_tokens_path, val_tokens_path)):
+        logger.info("[5/7] Loading tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        logger.info("[6/7] Tokenizing and saving...")
+        train_tokens_path = tokenize_and_save(train_pairs, output_dir, tokenizer, "train_tokens.pt")
+        val_tokens_path = tokenize_and_save(val_pairs, output_dir, tokenizer, "val_tokens.pt")
+        logger.info("      Saved tokens to %s", output_dir)
+    else:
+        logger.info("Tokenized data exists at %s. Skipping tokenization.", output_dir)
 
     logger.info("[7/7] Computing and saving statistics...")
     stats = compute_statistics(real_pairs, synthesized_pairs, skipped_groups)
