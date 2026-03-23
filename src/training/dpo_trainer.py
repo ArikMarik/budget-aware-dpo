@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
@@ -26,9 +27,10 @@ from src.config import (
     get_tokenized_train_path,
     get_tokenized_val_path,
 )
-from src.utils import get_logger, set_seed
+from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
+setup_global_exception_handler(__name__)
 
 
 @dataclass
@@ -102,7 +104,7 @@ def log_prob(logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torc
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = input_ids[..., 1:].contiguous()
     shift_mask = attention_mask[..., 1:].contiguous().float()
-    log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+    log_probs = F.log_softmax(shift_logits, dim=-1)
     token_log_probs = torch.gather(log_probs, -1, shift_labels.unsqueeze(-1)).squeeze(-1)
     return (token_log_probs * shift_mask).sum(-1) / shift_mask.sum(-1).clamp(min=1)
 
@@ -138,6 +140,7 @@ class TokenizedDPODataset(Dataset):
 
 def load_tokenized_dataset(tokens_path: Path) -> TokenizedDPODataset:
     if not tokens_path.exists():
+        logger.error("Tokenized dataset not found at %s. Run preprocess_dpo_data.py first.", tokens_path)
         raise FileNotFoundError(
             f"Tokenized dataset not found at {tokens_path}. "
             "Run preprocess_dpo_data.py first."
@@ -323,7 +326,7 @@ def compute_batch_loss_eval(
     reward_diff_per_sample = dpo_beta * (
         (policy_chosen_lp - ref_chosen_lp) - (policy_rejected_lp - ref_rejected_lp)
     )
-    per_sample_loss = -torch.nn.functional.logsigmoid(reward_diff_per_sample)
+    per_sample_loss = -F.logsigmoid(reward_diff_per_sample)
 
     mask_easy = (complexities == 0).float()
     mask_hard = (complexities == 1).float()
@@ -694,6 +697,7 @@ def train_dpo(
 
 def _validate_datasets_exist(train_path: Path, val_path: Path) -> None:
     if not train_path.exists() or not val_path.exists():
+        logger.error("Tokenized datasets not found. Expected train: %s, val: %s. Run preprocess_dpo_data.py first.", train_path, val_path)
         raise FileNotFoundError(
             f"Tokenized datasets not found. Run preprocess_dpo_data.py first.\n"
             f"Expected: {train_path}, {val_path}"
@@ -751,7 +755,7 @@ def _run_epoch(
             reward_diff_per_sample = dpo_beta * (
                 (policy_chosen_lp - ref_chosen_lp) - (policy_rejected_lp - ref_rejected_lp)
             )
-            per_sample_loss = -torch.nn.functional.logsigmoid(reward_diff_per_sample)
+            per_sample_loss = -F.logsigmoid(reward_diff_per_sample)
             complexities = batch[-1].cuda(non_blocking=True)
             mask_easy = (complexities == 0).float()
             mask_hard = (complexities == 1).float()
