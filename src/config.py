@@ -33,7 +33,7 @@ MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
 def get_processed_dataset_path() -> Path:
     """Return processed dataset path based on USE_DUMMY_DATA."""
     # TODO - change this
-    return PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH_LIMITED #PROCESSED_DATASET_PATH_REAL
+    return PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH_REAL
 
 
 def get_tokenized_train_path() -> Path:
