@@ -1,8 +1,11 @@
 """Reproducibility utilities: fix random seeds for all libraries."""
 
+import atexit
 import logging
 import os
 import random
+import sys
+import traceback
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -16,8 +19,10 @@ LOG_DIR = PROJECT_ROOT / "logs" / "cli"
 
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+DETAILED_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(pathname)s:%(lineno)d - %(message)s"
 
 _loggers = {}
+_exception_handler_installed = False
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -26,7 +31,7 @@ def get_logger(name: str) -> logging.Logger:
         return _loggers[name]
 
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
     if logger.handlers:
@@ -43,7 +48,7 @@ def get_logger(name: str) -> logging.Logger:
         maxBytes=10 * 1024 * 1024,
         backupCount=2,
     )
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
 
     console_handler = logging.StreamHandler()
@@ -55,6 +60,26 @@ def get_logger(name: str) -> logging.Logger:
 
     _loggers[name] = logger
     return logger
+
+
+def setup_global_exception_handler(logger_name: str = "main") -> None:
+    """Install a global exception handler that logs all uncaught exceptions before crash."""
+    global _exception_handler_installed
+    if _exception_handler_installed:
+        return
+    _exception_handler_installed = True
+
+    logger = get_logger(logger_name)
+
+    def exception_handler(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        tb = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        logger.critical("Unhandled exception:\n%s", tb)
+
+    sys.excepthook = exception_handler
+    atexit.register(lambda: logger.info("Script exited normally"))
 
 
 def set_seed(seed: int = 42) -> None:

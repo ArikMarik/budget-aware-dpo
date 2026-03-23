@@ -11,9 +11,10 @@ import sys
 from pathlib import Path
 
 from src.config import REAL_DATASET_PATH
-from src.utils import get_logger, set_seed
+from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
+setup_global_exception_handler(__name__)
 
 set_seed(42)
 
@@ -33,10 +34,12 @@ def load_math_problem_to_level() -> dict[str, str]:
             for cfg in MATH_CONFIGS
         ]
         ds = concatenate_datasets(parts)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to load EleutherAI/hendrycks_math: %s. Trying fallback...", e)
         try:
             ds = load_dataset("hendrycks/competition_math", split="train")
-        except Exception:
+        except Exception as e2:
+            logger.warning("Failed to load hendrycks/competition_math: %s. Using final fallback...", e2)
             ds = load_dataset("lighteval/MATH", split="train")
     mapping = {}
     for item in ds:

@@ -21,9 +21,10 @@ from src.evaluation.run_evaluation import (
     evaluate_checkpoint,
     load_eval_problems,
 )
-from src.utils import get_logger, set_seed
+from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
+setup_global_exception_handler(__name__)
 
 set_seed(42)
 
@@ -38,6 +39,7 @@ def main():
     use_real = not args.dummy and not USE_DUMMY_DATA
     problems = load_eval_problems(limit=args.limit, use_real=use_real)
     if not problems:
+        logger.error("No evaluation problems found. Run preprocess_dpo_data.py (dummy) or load_real_data.py (real).")
         raise RuntimeError("No evaluation problems. Run preprocess_dpo_data.py (dummy) or load_real_data.py (real).")
 
     output_dir = Path(args.output or str(CHECKPOINT_DIR))
