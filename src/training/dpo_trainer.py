@@ -183,7 +183,7 @@ def create_model(
 ) -> tuple[PeftModel, PreTrainedTokenizer]:
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        torch_dtype=torch.float32,
         device_map="auto" if device == "cuda" else None,
     )
     if device == "cpu":
@@ -211,7 +211,7 @@ def create_model(
 def create_ref_model(model_name: str, device: str) -> nn.Module:  # type: ignore[return]
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        torch_dtype=torch.float32,
         device_map="auto" if device == "cuda" else None,
     )
     if device == "cpu":
@@ -638,7 +638,7 @@ def train_dpo(
         threshold=early_stopping_threshold,
         threshold_mode="rel",
     )
-    autocast_dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    autocast_dtype = torch.float16 if device == "cuda" else torch.float32
 
     for epoch in range(1, max_epochs + 1):
         epoch_metrics = _run_epoch(
@@ -733,7 +733,7 @@ def _run_epoch(
     accum_chosen_tokens = torch.zeros((), device=device)
     accum_rejected_tokens = torch.zeros((), device=device)
 
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch}", mininterval=1.0, dynamic_ncols=True)
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch}", total=len(train_loader), mininterval=1.0, dynamic_ncols=True)
     optimizer.zero_grad()
 
     for batch_idx, batch in enumerate(pbar):
@@ -749,7 +749,11 @@ def _run_epoch(
             )
             loss = loss / gradient_accumulation_steps
 
-        scaler.scale(loss).backward()
+        if use_mixed_precision:
+            scaled_loss = scaler.scale(loss)
+            scaled_loss.backward()
+        else:
+            loss.backward()
 
         with torch.no_grad():
             reward_diff_per_sample = dpo_beta * (
@@ -773,18 +777,40 @@ def _run_epoch(
             accum_rejected_tokens += rejected_lens.mean().detach()
 
         if is_last_accum:
-            scaler.unscale_(optimizer)
+            if use_mixed_precision:
+                scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # type: ignore[assignment]
-            scaler.step(optimizer)
-            scaler.update()
+            if use_mixed_precision:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             optimizer.zero_grad()
 
             current_lr = optimizer.param_groups[0]["lr"]
             pbar.set_postfix({
+                "step": batch_idx + 1,
                 "loss": f"{(accum_loss / gradient_accumulation_steps).item():.4f}",
                 "lr": f"{current_lr:.2e}",
                 "gn": f"{grad_norm.item():.2f}",
             })
+
+            if use_wandb:
+                num_steps_so_far = batch_idx + 1
+                global_step = (epoch - 1) * steps_per_epoch + num_steps_so_far
+                log_metrics(
+                    step=global_step,
+                    train_loss=(accum_loss / gradient_accumulation_steps).item(),
+                    val_loss=None,
+                    avg_chosen_tokens=accum_chosen_tokens.item() / num_steps_so_far,
+                    avg_rejected_tokens=accum_rejected_tokens.item() / num_steps_so_far,
+                    learning_rate=current_lr,
+                    reward_diff=accum_reward_diff.item() / num_steps_so_far,
+                    gradient_norm=grad_norm.item(),
+                    epoch=epoch,
+                    complexity_0_loss=accum_complexity_0.item() / num_steps_so_far,
+                    complexity_1_loss=accum_complexity_1.item() / num_steps_so_far,
+                )
 
     if use_wandb:
         num_batches = len(train_loader)
