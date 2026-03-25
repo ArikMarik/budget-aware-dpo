@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--no-mixed-precision", action="store_true")
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--run-name", type=str, default=None, help="WandB run name (auto-generated if omitted)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir or str(get_budget_aware_output_dir()))
@@ -45,6 +46,7 @@ def main():
         resume_from=args.resume_from,
         seed=args.seed,
         use_wandb=args.wandb,
+        run_name=args.run_name,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_threshold=args.early_stopping_threshold,
         dpo_beta=args.dpo_beta,

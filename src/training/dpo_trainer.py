@@ -249,7 +249,7 @@ def compute_batch_loss_train(
     loss_fn: Callable,
     dpo_beta: float,
     use_compile: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
     chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities = batch
     chosen_ids = chosen_ids.cuda(non_blocking=True)
     chosen_mask = chosen_mask.cuda(non_blocking=True)
@@ -281,7 +281,7 @@ def compute_batch_loss_train(
         complexities,
     )
 
-    return loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens
+    return loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, extra
 
 
 def compute_batch_loss_eval(
@@ -548,6 +548,7 @@ def train_dpo(
     resume_from: Optional[str] = None,
     seed: int = 42,
     use_wandb: bool = False,
+    run_name: Optional[str] = None,
     early_stopping_patience: int = 5,
     early_stopping_threshold: float = 0.0,
     dpo_beta: float = 0.1,
@@ -627,7 +628,11 @@ def train_dpo(
         json.dump(config.to_dict(), f, indent=2)
 
     if use_wandb:
-        _init_wandb(config)
+        if not run_name:
+            variant = os.environ.get("DATASET_VARIANT", "unknown")
+            mode = "budget_aware" if use_budget_aware else "baseline"
+            run_name = f"{mode}_{variant}_s{seed}"
+        _init_wandb(config, run_name=run_name)
 
     metrics_log = []
     best_val_loss = float("inf")
@@ -732,6 +737,7 @@ def _run_epoch(
     accum_complexity_1 = torch.zeros((), device=device)
     accum_chosen_tokens = torch.zeros((), device=device)
     accum_rejected_tokens = torch.zeros((), device=device)
+    accum_length_penalty = 0.0
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}", total=len(train_loader), mininterval=1.0, dynamic_ncols=True)
     optimizer.zero_grad()
@@ -744,7 +750,7 @@ def _run_epoch(
             dtype=autocast_dtype,
             enabled=use_mixed_precision,
         ):
-            loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens = compute_batch_loss_train(
+            loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, extra = compute_batch_loss_train(
                 model, ref_model, batch, tokenizer, loss_fn, dpo_beta, compile_model
             )
             loss = loss / gradient_accumulation_steps
@@ -775,6 +781,8 @@ def _run_epoch(
             accum_complexity_1 += (per_sample_loss * mask_hard).sum() / mask_hard.sum().clamp(min=1)
             accum_chosen_tokens += chosen_lens.mean().detach()
             accum_rejected_tokens += rejected_lens.mean().detach()
+            if "length_penalty" in extra:
+                accum_length_penalty += extra["length_penalty"]
 
         if is_last_accum:
             if use_mixed_precision:
@@ -788,19 +796,22 @@ def _run_epoch(
             optimizer.zero_grad()
 
             current_lr = optimizer.param_groups[0]["lr"]
+            num_steps_so_far = batch_idx + 1
             pbar.set_postfix({
-                "step": batch_idx + 1,
-                "loss": f"{(accum_loss / gradient_accumulation_steps).item():.4f}",
+                "step": num_steps_so_far,
+                "loss": f"{(accum_loss / num_steps_so_far).item():.4f}",
                 "lr": f"{current_lr:.2e}",
                 "gn": f"{grad_norm.item():.2f}",
             })
 
             if use_wandb:
-                num_steps_so_far = batch_idx + 1
                 global_step = (epoch - 1) * steps_per_epoch + num_steps_so_far
+                extra_wandb = {}
+                if accum_length_penalty != 0.0:
+                    extra_wandb["length_penalty"] = accum_length_penalty / num_steps_so_far
                 log_metrics(
                     step=global_step,
-                    train_loss=(accum_loss / gradient_accumulation_steps).item(),
+                    train_loss=(accum_loss / num_steps_so_far).item(),
                     val_loss=None,
                     avg_chosen_tokens=accum_chosen_tokens.item() / num_steps_so_far,
                     avg_rejected_tokens=accum_rejected_tokens.item() / num_steps_so_far,
@@ -810,6 +821,7 @@ def _run_epoch(
                     epoch=epoch,
                     complexity_0_loss=accum_complexity_0.item() / num_steps_so_far,
                     complexity_1_loss=accum_complexity_1.item() / num_steps_so_far,
+                    extra=extra_wandb if extra_wandb else None,
                 )
 
     if use_wandb:
