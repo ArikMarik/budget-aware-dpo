@@ -25,14 +25,17 @@ REAL_DATASET_PATH_LIMITED = DATA_PATH / "real_openmathinstruct.jsonl.limited"
 
 PROCESSED_DATASET_PATH_REAL = DATA_PATH / "processed_dpo_dataset_real"
 PROCESSED_DATASET_PATH_LIMITED = DATA_PATH / "processed_dpo_dataset_limited"
+PROCESSED_DATASET_PATH_BALANCED = DATA_PATH / "processed_dpo_dataset_balanced"
 
 GSM8K_TEST_PATH = DATA_PATH / "gsm8k_test.jsonl"
 MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
 
 
 def get_processed_dataset_path() -> Path:
-    """Return processed dataset path based on USE_DUMMY_DATA."""
-    # TODO - change this
+    """Return processed dataset path based on USE_DUMMY_DATA / DATASET_VARIANT."""
+    variant = os.environ.get("DATASET_VARIANT", "")
+    if variant == "balanced":
+        return PROCESSED_DATASET_PATH_BALANCED
     return PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH_REAL
 
 
