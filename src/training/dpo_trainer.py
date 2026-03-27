@@ -27,6 +27,11 @@ from src.config import (
     get_tokenized_train_path,
     get_tokenized_val_path,
 )
+from src.evaluation.run_evaluation import (
+    generate_and_evaluate,
+    compute_metrics,
+    load_eval_problems,
+)
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
@@ -50,6 +55,7 @@ class TrainingConfig:
     dpo_beta: float = 0.1
     lambda_easy: float = 0.05
     lambda_hard: float = 0.001
+    kl_penalty_weight: float = 0.0
     gradient_accumulation_steps: int = 1
     use_mixed_precision: bool = True
     compile_model: bool = False
@@ -331,13 +337,30 @@ def compute_batch_loss_eval(
     mask_easy = (complexities == 0).float()
     mask_hard = (complexities == 1).float()
 
+    accuracy = (reward_diff_per_sample > 0).float().mean().detach()
+    accuracy_easy = ((reward_diff_per_sample > 0).float() * mask_easy).sum() / mask_easy.sum().clamp(min=1)
+    accuracy_hard = ((reward_diff_per_sample > 0).float() * mask_hard).sum() / mask_hard.sum().clamp(min=1)
+    reward_diff_easy = (reward_diff_per_sample * mask_easy).sum() / mask_easy.sum().clamp(min=1)
+    reward_diff_hard = (reward_diff_per_sample * mask_hard).sum() / mask_hard.sum().clamp(min=1)
+
     metrics = {
         "loss": loss.detach(),
         "reward_diff": reward_diff_per_sample.mean().detach(),
+        "reward_diff_easy": reward_diff_easy.detach(),
+        "reward_diff_hard": reward_diff_hard.detach(),
         "complexity_0_loss": (per_sample_loss * mask_easy).sum() / mask_easy.sum().clamp(min=1),
         "complexity_1_loss": (per_sample_loss * mask_hard).sum() / mask_hard.sum().clamp(min=1),
+        "accuracy": accuracy,
+        "accuracy_easy": accuracy_easy.detach(),
+        "accuracy_hard": accuracy_hard.detach(),
         "avg_chosen_tokens": chosen_lens.mean().detach(),
         "avg_rejected_tokens": rejected_lens.mean().detach(),
+        "chosen_tokens_easy": (chosen_lens * mask_easy).sum().detach(),
+        "chosen_tokens_hard": (chosen_lens * mask_hard).sum().detach(),
+        "rejected_tokens_easy": (rejected_lens * mask_easy).sum().detach(),
+        "rejected_tokens_hard": (rejected_lens * mask_hard).sum().detach(),
+        "easy_count": mask_easy.sum().detach(),
+        "hard_count": mask_hard.sum().detach(),
     }
 
     return loss, metrics
@@ -352,10 +375,22 @@ def evaluate(
     dpo_beta: float,
 ) -> tuple[float, dict]:
     model.eval()
-    total_loss = torch.zeros((), device="cuda" if torch.cuda.is_available() else "cpu")
-    total_reward_diff = torch.zeros((), device="cuda" if torch.cuda.is_available() else "cpu")
-    total_complexity_0 = torch.zeros((), device="cuda" if torch.cuda.is_available() else "cpu")
-    total_complexity_1 = torch.zeros((), device="cuda" if torch.cuda.is_available() else "cpu")
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    total_loss = torch.zeros((), device=dev)
+    total_reward_diff = torch.zeros((), device=dev)
+    total_reward_diff_easy = torch.zeros((), device=dev)
+    total_reward_diff_hard = torch.zeros((), device=dev)
+    total_complexity_0 = torch.zeros((), device=dev)
+    total_complexity_1 = torch.zeros((), device=dev)
+    total_accuracy = torch.zeros((), device=dev)
+    total_accuracy_easy = torch.zeros((), device=dev)
+    total_accuracy_hard = torch.zeros((), device=dev)
+    total_chosen_easy = torch.zeros((), device=dev)
+    total_chosen_hard = torch.zeros((), device=dev)
+    total_rejected_easy = torch.zeros((), device=dev)
+    total_rejected_hard = torch.zeros((), device=dev)
+    total_easy_count = torch.zeros((), device=dev)
+    total_hard_count = torch.zeros((), device=dev)
     num_batches = 0
 
     with torch.inference_mode():
@@ -364,19 +399,41 @@ def evaluate(
                 model, ref_model, batch, tokenizer, loss_fn, dpo_beta
             )
             total_loss += loss.detach()
-            total_reward_diff += batch_metrics["reward_diff"].detach()
-            total_complexity_0 += batch_metrics["complexity_0_loss"].detach()
-            total_complexity_1 += batch_metrics["complexity_1_loss"].detach()
+            total_reward_diff += batch_metrics["reward_diff"]
+            total_reward_diff_easy += batch_metrics["reward_diff_easy"]
+            total_reward_diff_hard += batch_metrics["reward_diff_hard"]
+            total_complexity_0 += batch_metrics["complexity_0_loss"]
+            total_complexity_1 += batch_metrics["complexity_1_loss"]
+            total_accuracy += batch_metrics["accuracy"]
+            total_accuracy_easy += batch_metrics["accuracy_easy"]
+            total_accuracy_hard += batch_metrics["accuracy_hard"]
+            total_chosen_easy += batch_metrics["chosen_tokens_easy"]
+            total_chosen_hard += batch_metrics["chosen_tokens_hard"]
+            total_rejected_easy += batch_metrics["rejected_tokens_easy"]
+            total_rejected_hard += batch_metrics["rejected_tokens_hard"]
+            total_easy_count += batch_metrics["easy_count"]
+            total_hard_count += batch_metrics["hard_count"]
             num_batches += 1
 
     model.train()
 
-    num_batches_t = max(num_batches, 1)
-    avg_loss = (total_loss / num_batches_t).cpu().item()
+    n = max(num_batches, 1)
+    easy_n = total_easy_count.clamp(min=1).cpu().item()
+    hard_n = total_hard_count.clamp(min=1).cpu().item()
+    avg_loss = (total_loss / n).cpu().item()
     metrics = {
-        "val/reward_diff": (total_reward_diff / num_batches_t).cpu().item(),
-        "val/complexity_0_loss": (total_complexity_0 / num_batches_t).cpu().item(),
-        "val/complexity_1_loss": (total_complexity_1 / num_batches_t).cpu().item(),
+        "val/reward_diff": (total_reward_diff / n).cpu().item(),
+        "val/reward_diff_easy": (total_reward_diff_easy / n).cpu().item(),
+        "val/reward_diff_hard": (total_reward_diff_hard / n).cpu().item(),
+        "val/complexity_0_loss": (total_complexity_0 / n).cpu().item(),
+        "val/complexity_1_loss": (total_complexity_1 / n).cpu().item(),
+        "val/accuracy": (total_accuracy / n).cpu().item(),
+        "val/accuracy_easy": (total_accuracy_easy / n).cpu().item(),
+        "val/accuracy_hard": (total_accuracy_hard / n).cpu().item(),
+        "val/avg_chosen_tokens_easy": total_chosen_easy.cpu().item() / easy_n,
+        "val/avg_chosen_tokens_hard": total_chosen_hard.cpu().item() / hard_n,
+        "val/avg_rejected_tokens_easy": total_rejected_easy.cpu().item() / easy_n,
+        "val/avg_rejected_tokens_hard": total_rejected_hard.cpu().item() / hard_n,
     }
     return avg_loss, metrics
 
@@ -384,7 +441,6 @@ def evaluate(
 def log_metrics(
     step: int,
     train_loss: float,
-    val_loss: Optional[float],
     avg_chosen_tokens: float,
     avg_rejected_tokens: float,
     learning_rate: float,
@@ -394,9 +450,8 @@ def log_metrics(
     epoch: int = 0,
     complexity_0_loss: Optional[float] = None,
     complexity_1_loss: Optional[float] = None,
-    val_reward_diff: Optional[float] = None,
-    val_complexity_0_loss: Optional[float] = None,
-    val_complexity_1_loss: Optional[float] = None,
+    val_loss: Optional[float] = None,
+    val_metrics: Optional[dict] = None,
 ) -> None:
     log_dict = {
         "train/loss": train_loss,
@@ -417,14 +472,11 @@ def log_metrics(
         log_dict["train/complexity_1_loss"] = complexity_1_loss
     if val_loss is not None:
         log_dict["val/loss"] = val_loss
-    if extra and "length_penalty" in extra:
-        log_dict["train/length_penalty"] = extra["length_penalty"]
-    if val_reward_diff is not None:
-        log_dict["val/reward_diff"] = val_reward_diff
-    if val_complexity_0_loss is not None:
-        log_dict["val/complexity_0_loss"] = val_complexity_0_loss
-    if val_complexity_1_loss is not None:
-        log_dict["val/complexity_1_loss"] = val_complexity_1_loss
+    if extra:
+        for key, value in extra.items():
+            log_dict[f"train/{key}"] = value
+    if val_metrics:
+        log_dict.update(val_metrics)
     wandb.log(log_dict, step=step)
 
 
@@ -466,6 +518,10 @@ def _init_wandb(config: TrainingConfig, run_name: Optional[str] = None) -> None:
         config=config.to_dict(),
         mode=wandb_mode,
     )
+    # Define val and gen metrics to use epoch as x-axis so they render as proper graphs
+    wandb.define_metric("train/epoch")
+    wandb.define_metric("val/*", step_metric="train/epoch")
+    wandb.define_metric("gen/*", step_metric="train/epoch")
 
 
 def _build_loss_fn(
@@ -473,11 +529,13 @@ def _build_loss_fn(
     dpo_beta: float,
     lambda_easy: float,
     lambda_hard: float,
+    kl_penalty_weight: float = 0.0,
 ) -> Callable:
     if use_budget_aware:
         from src.models.budget_aware_dpo_loss import budget_aware_dpo_loss
         return lambda pc, pr, rc, rr, cl, rl, c: budget_aware_dpo_loss(
-            pc, pr, rc, rr, cl, rl, c, beta=dpo_beta, lambda_easy=lambda_easy, lambda_hard=lambda_hard
+            pc, pr, rc, rr, cl, rl, c, beta=dpo_beta, lambda_easy=lambda_easy, lambda_hard=lambda_hard,
+            kl_penalty_weight=kl_penalty_weight,
         )
     else:
         from src.models.standard_dpo_loss import standard_dpo_loss
@@ -554,6 +612,7 @@ def train_dpo(
     dpo_beta: float = 0.1,
     lambda_easy: float = 0.05,
     lambda_hard: float = 0.001,
+    kl_penalty_weight: float = 0.0,
     gradient_accumulation_steps: int = 1,
     use_mixed_precision: bool = True,
     compile_model: bool = False,
@@ -587,7 +646,7 @@ def train_dpo(
         train_dataset, val_dataset, batch_size, num_workers, pin_memory
     )
 
-    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard)
+    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
 
@@ -616,6 +675,7 @@ def train_dpo(
         dpo_beta=dpo_beta,
         lambda_easy=lambda_easy,
         lambda_hard=lambda_hard,
+        kl_penalty_weight=kl_penalty_weight,
         gradient_accumulation_steps=gradient_accumulation_steps,
         use_mixed_precision=use_mixed_precision,
         compile_model=compile_model,
@@ -633,6 +693,9 @@ def train_dpo(
             mode = "budget_aware" if use_budget_aware else "baseline"
             run_name = f"{mode}_{variant}_s{seed}"
         _init_wandb(config, run_name=run_name)
+
+    # Load generation eval problems once (50 easy + 50 hard)
+    gen_eval_problems = _load_gen_eval_problems(n_easy=50, n_hard=50)
 
     metrics_log = []
     best_val_loss = float("inf")
@@ -665,6 +728,17 @@ def train_dpo(
             autocast_dtype=autocast_dtype,
             compile_model=compile_model,
         )
+
+        # Generation-based evaluation after each epoch
+        gen_metrics = _run_gen_eval(
+            model=model,
+            tokenizer=tokenizer,
+            problems=gen_eval_problems,
+            epoch=epoch,
+            use_wandb=use_wandb,
+            steps_per_epoch=steps_per_epoch,
+        )
+        epoch_metrics["gen_metrics"] = gen_metrics
 
         best_val_loss, best_model_state, best_epoch = _update_best_model(
             epoch_metrics, epoch, model, best_val_loss, best_model_state, best_epoch
@@ -700,6 +774,63 @@ def train_dpo(
     }
 
 
+def _load_gen_eval_problems(n_easy: int = 50, n_hard: int = 50) -> list[dict]:
+    """Load a balanced set of eval problems for generation-based validation."""
+    all_problems = load_eval_problems(limit=None)
+    easy = [p for p in all_problems if p["complexity"] == 0][:n_easy]
+    hard = [p for p in all_problems if p["complexity"] == 1][:n_hard]
+    problems = easy + hard
+    logger.info(
+        "Loaded %d gen-eval problems (%d easy, %d hard)",
+        len(problems), len(easy), len(hard),
+    )
+    return problems
+
+
+def _run_gen_eval(
+    model: nn.Module,
+    tokenizer: PreTrainedTokenizer,
+    problems: list[dict],
+    epoch: int,
+    use_wandb: bool,
+    steps_per_epoch: int,
+) -> dict[str, float]:
+    """Run generation-based evaluation and log results."""
+    model.eval()
+    results = generate_and_evaluate(model, tokenizer, problems, use_llm_judge=False)
+    metrics = compute_metrics(results)
+    model.train()
+
+    gen_metrics = {
+        "gen/accuracy": metrics["accuracy"],
+        "gen/accuracy_easy": len([r for r in results if r["complexity"] == 0 and r["correct"]]) / max(len([r for r in results if r["complexity"] == 0]), 1),
+        "gen/accuracy_hard": len([r for r in results if r["complexity"] == 1 and r["correct"]]) / max(len([r for r in results if r["complexity"] == 1]), 1),
+        "gen/avg_tokens_easy": metrics["avg_tokens_easy"],
+        "gen/avg_tokens_hard": metrics["avg_tokens_hard"],
+        "gen/tpca": metrics["tpca"],
+    }
+
+    logger.info(
+        "Epoch %d gen-eval: accuracy=%.4f (easy=%.4f, hard=%.4f), "
+        "avg_tokens_easy=%.1f, avg_tokens_hard=%.1f, tpca=%.1f",
+        epoch,
+        gen_metrics["gen/accuracy"],
+        gen_metrics["gen/accuracy_easy"],
+        gen_metrics["gen/accuracy_hard"],
+        gen_metrics["gen/avg_tokens_easy"],
+        gen_metrics["gen/avg_tokens_hard"],
+        gen_metrics["gen/tpca"],
+    )
+
+    if use_wandb:
+        wandb.log(
+            {**gen_metrics, "train/epoch": epoch},
+            step=(epoch * steps_per_epoch),
+        )
+
+    return gen_metrics
+
+
 def _validate_datasets_exist(train_path: Path, val_path: Path) -> None:
     if not train_path.exists() or not val_path.exists():
         logger.error("Tokenized datasets not found. Expected train: %s, val: %s. Run preprocess_dpo_data.py first.", train_path, val_path)
@@ -733,11 +864,23 @@ def _run_epoch(
 
     accum_loss = torch.zeros((), device=device)
     accum_reward_diff = torch.zeros((), device=device)
+    accum_reward_diff_easy = torch.zeros((), device=device)
+    accum_reward_diff_hard = torch.zeros((), device=device)
     accum_complexity_0 = torch.zeros((), device=device)
     accum_complexity_1 = torch.zeros((), device=device)
+    accum_accuracy = torch.zeros((), device=device)
+    accum_accuracy_easy = torch.zeros((), device=device)
+    accum_accuracy_hard = torch.zeros((), device=device)
     accum_chosen_tokens = torch.zeros((), device=device)
     accum_rejected_tokens = torch.zeros((), device=device)
+    accum_chosen_easy = torch.zeros((), device=device)
+    accum_chosen_hard = torch.zeros((), device=device)
+    accum_rejected_easy = torch.zeros((), device=device)
+    accum_rejected_hard = torch.zeros((), device=device)
+    accum_easy_count = torch.zeros((), device=device)
+    accum_hard_count = torch.zeros((), device=device)
     accum_length_penalty = 0.0
+    accum_kl_penalty = 0.0
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}", total=len(train_loader), mininterval=1.0, dynamic_ncols=True)
     optimizer.zero_grad()
@@ -777,12 +920,26 @@ def _run_epoch(
 
             accum_loss += loss.detach() * gradient_accumulation_steps
             accum_reward_diff += reward_diff_per_sample.mean().detach()
+            accum_reward_diff_easy += (reward_diff_per_sample * mask_easy).sum().detach() / mask_easy.sum().clamp(min=1)
+            accum_reward_diff_hard += (reward_diff_per_sample * mask_hard).sum().detach() / mask_hard.sum().clamp(min=1)
             accum_complexity_0 += (per_sample_loss * mask_easy).sum() / mask_easy.sum().clamp(min=1)
             accum_complexity_1 += (per_sample_loss * mask_hard).sum() / mask_hard.sum().clamp(min=1)
+            batch_accuracy = (reward_diff_per_sample > 0).float()
+            accum_accuracy += batch_accuracy.mean().detach()
+            accum_accuracy_easy += (batch_accuracy * mask_easy).sum().detach() / mask_easy.sum().clamp(min=1)
+            accum_accuracy_hard += (batch_accuracy * mask_hard).sum().detach() / mask_hard.sum().clamp(min=1)
             accum_chosen_tokens += chosen_lens.mean().detach()
             accum_rejected_tokens += rejected_lens.mean().detach()
+            accum_chosen_easy += (chosen_lens * mask_easy).sum().detach()
+            accum_chosen_hard += (chosen_lens * mask_hard).sum().detach()
+            accum_rejected_easy += (rejected_lens * mask_easy).sum().detach()
+            accum_rejected_hard += (rejected_lens * mask_hard).sum().detach()
+            accum_easy_count += mask_easy.sum().detach()
+            accum_hard_count += mask_hard.sum().detach()
             if "length_penalty" in extra:
                 accum_length_penalty += extra["length_penalty"]
+            if "kl_penalty" in extra:
+                accum_kl_penalty += extra["kl_penalty"]
 
         if is_last_accum:
             if use_mixed_precision:
@@ -806,22 +963,36 @@ def _run_epoch(
 
             if use_wandb:
                 global_step = (epoch - 1) * steps_per_epoch + num_steps_so_far
-                extra_wandb = {}
+                n = num_steps_so_far
+                easy_n = accum_easy_count.item() or 1
+                hard_n = accum_hard_count.item() or 1
+                extra_wandb = {
+                    "reward_diff_easy": accum_reward_diff_easy.item() / n,
+                    "reward_diff_hard": accum_reward_diff_hard.item() / n,
+                    "accuracy": accum_accuracy.item() / n,
+                    "accuracy_easy": accum_accuracy_easy.item() / n,
+                    "accuracy_hard": accum_accuracy_hard.item() / n,
+                    "avg_chosen_tokens_easy": accum_chosen_easy.item() / easy_n,
+                    "avg_chosen_tokens_hard": accum_chosen_hard.item() / hard_n,
+                    "avg_rejected_tokens_easy": accum_rejected_easy.item() / easy_n,
+                    "avg_rejected_tokens_hard": accum_rejected_hard.item() / hard_n,
+                }
                 if accum_length_penalty != 0.0:
-                    extra_wandb["length_penalty"] = accum_length_penalty / num_steps_so_far
+                    extra_wandb["length_penalty"] = accum_length_penalty / n
+                if accum_kl_penalty != 0.0:
+                    extra_wandb["kl_penalty"] = accum_kl_penalty / n
                 log_metrics(
                     step=global_step,
-                    train_loss=(accum_loss / num_steps_so_far).item(),
-                    val_loss=None,
-                    avg_chosen_tokens=accum_chosen_tokens.item() / num_steps_so_far,
-                    avg_rejected_tokens=accum_rejected_tokens.item() / num_steps_so_far,
+                    train_loss=(accum_loss / n).item(),
+                    avg_chosen_tokens=accum_chosen_tokens.item() / n,
+                    avg_rejected_tokens=accum_rejected_tokens.item() / n,
                     learning_rate=current_lr,
-                    reward_diff=accum_reward_diff.item() / num_steps_so_far,
+                    reward_diff=accum_reward_diff.item() / n,
                     gradient_norm=grad_norm.item(),
                     epoch=epoch,
-                    complexity_0_loss=accum_complexity_0.item() / num_steps_so_far,
-                    complexity_1_loss=accum_complexity_1.item() / num_steps_so_far,
-                    extra=extra_wandb if extra_wandb else None,
+                    complexity_0_loss=accum_complexity_0.item() / n,
+                    complexity_1_loss=accum_complexity_1.item() / n,
+                    extra=extra_wandb,
                 )
 
     if use_wandb:
@@ -855,6 +1026,7 @@ def _run_epoch(
             step=(epoch * steps_per_epoch),
             train_loss=avg_train_loss,
             val_loss=val_loss,
+            val_metrics=val_metrics,
             avg_chosen_tokens=avg_chosen,
             avg_rejected_tokens=avg_rejected,
             learning_rate=current_lr,
@@ -863,9 +1035,6 @@ def _run_epoch(
             epoch=epoch,
             complexity_0_loss=avg_complexity_0,
             complexity_1_loss=avg_complexity_1,
-            val_reward_diff=val_metrics["val/reward_diff"],
-            val_complexity_0_loss=val_metrics["val/complexity_0_loss"],
-            val_complexity_1_loss=val_metrics["val/complexity_1_loss"],
         )
 
         return {"val_loss": val_loss, "val_metrics": val_metrics, "avg_train_loss": avg_train_loss}

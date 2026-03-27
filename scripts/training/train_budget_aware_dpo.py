@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--dpo-beta", type=float, default=0.1)
     parser.add_argument("--lambda-easy", type=float, default=0.05)
     parser.add_argument("--lambda-hard", type=float, default=0.001)
+    parser.add_argument("--kl-penalty", type=float, default=0.0, help="KL divergence penalty weight to prevent model collapse (0.0 = disabled)")
     parser.add_argument("--no-mixed-precision", action="store_true")
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--num-workers", type=int, default=4)
@@ -52,6 +53,7 @@ def main():
         dpo_beta=args.dpo_beta,
         lambda_easy=args.lambda_easy,
         lambda_hard=args.lambda_hard,
+        kl_penalty_weight=args.kl_penalty,
         use_mixed_precision=not args.no_mixed_precision,
         compile_model=args.compile_model,
         num_workers=args.num_workers,

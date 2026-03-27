@@ -179,6 +179,7 @@ def verify_answer(
     expected: str,
     problem: str = "",
     solution: str = "",
+    use_llm_judge: bool = True,
 ) -> bool:
     """
     Tiered verification:
@@ -210,4 +211,6 @@ def verify_answer(
         return True
 
     # Tier 2
+    if not use_llm_judge:
+        return False
     return _verify_llm(problem, solution, pred, expected)

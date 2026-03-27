@@ -1,0 +1,8 @@
+iteration	run_name	val_loss	val_accuracy	reward_diff_easy	reward_diff_hard	length_penalty	lambda_easy	lambda_hard	other_changes	status	description
+0	baseline_balanced_3	0.8478	0.0	0.0	0.0	0.0	0.0	0.0	none	keep	standard DPO baseline
+0	budget_aware_balanced_3	0.8230	0.0	0.0	0.0	0.0	0.05	0.001	none	discard	lambda too small - no divergence from baseline
+1	budget_aware_balanced_4	0.6909	0.376	0.0	0.0	0.0	5.0	0.0	none	analyze	better val_loss and accuracy but tokens 2x higher on easy - opposite of goal
+2	baseline_balanced_iter2	0.3751	0.02	0.0	0.0	0.0	0.0	0.0	capped50 dataset 10K pairs grad_accum=4	reference	low accuracy due to 20x fewer weight updates
+2	budget_aware_balanced_iter2	0.3304	0.01	0.0	0.0	0.0	5.0	0.0	capped50 dataset 10K pairs grad_accum=4	analyze	correct token direction at epoch1 but lost at epoch2 and 1% accuracy
+3	baseline_balanced_iter3	1.3360	0.0	0.0	0.0	0.0	0.0	0.0	real_capped100 51K pairs	discard	model collapse - 0% accuracy gibberish output
+3	budget_aware_balanced_iter3	1.2013	0.0	0.0	0.0	0.0	5.0	0.0	real_capped100 51K pairs	discard	model collapse - 0% accuracy gibberish output

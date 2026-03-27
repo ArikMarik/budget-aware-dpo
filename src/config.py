@@ -32,7 +32,10 @@ MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
 
 
 def get_processed_dataset_path() -> Path:
-    """Return processed dataset path based on USE_DUMMY_DATA / DATASET_VARIANT."""
+    """Return processed dataset path based on DATASET_PATH / DATASET_VARIANT / USE_DUMMY_DATA."""
+    override = os.environ.get("DATASET_PATH", "")
+    if override:
+        return Path(override)
     variant = os.environ.get("DATASET_VARIANT", "")
     if variant == "balanced":
         return PROCESSED_DATASET_PATH_BALANCED

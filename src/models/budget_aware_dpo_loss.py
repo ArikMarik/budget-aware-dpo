@@ -26,6 +26,7 @@ def budget_aware_dpo_loss(
     beta: float = 0.1,
     lambda_easy: float = 0.1,
     lambda_hard: float = 0.001,
+    kl_penalty_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict]:
     """
     Budget-Aware DPO loss with length penalty.
@@ -58,8 +59,20 @@ def budget_aware_dpo_loss(
     reward_diff = beta * (log_ratio_chosen - log_ratio_rejected) - length_penalty
 
     # DPO loss: -log(sigma(reward_diff))
-    loss = -F.logsigmoid(reward_diff).mean()
+    dpo_loss = -F.logsigmoid(reward_diff).mean()
 
     length_penalty_mean = length_penalty.detach().mean().item()
 
-    return loss, {"length_penalty": length_penalty_mean}
+    extra = {"length_penalty": length_penalty_mean}
+
+    # KL divergence penalty: penalizes policy for deviating from reference model
+    if kl_penalty_weight > 0.0:
+        kl_div = (policy_chosen_logps - reference_chosen_logps).mean() + \
+                 (policy_rejected_logps - reference_rejected_logps).mean()
+        kl_penalty = kl_penalty_weight * kl_div.abs()
+        loss = dpo_loss + kl_penalty
+        extra["kl_penalty"] = kl_penalty.detach().item()
+    else:
+        loss = dpo_loss
+
+    return loss, extra

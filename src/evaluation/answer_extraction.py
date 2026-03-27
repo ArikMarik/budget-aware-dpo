@@ -80,12 +80,22 @@ def normalize_answer(a: str | None) -> str:
     return s
 
 
-def verify_correctness(generated_solution: str, expected_answer: str, problem: str = "") -> bool:
+def verify_correctness(
+    generated_solution: str,
+    expected_answer: str,
+    problem: str = "",
+    use_llm_judge: bool = True,
+) -> bool:
     """Verify if generated_solution matches expected_answer using tiered checking.
 
+    Tier 0: trivial string equality.
     Tier 1: math-verify symbolic equivalence (handles LaTeX format differences).
     Tier 2: LLM judge with full solution context (handles base notation, etc.).
     Returns False when expected_answer is empty (cannot verify).
+
+    Args:
+        use_llm_judge: If False, skip Tier 2 (LLM judge). Useful during training
+                       to avoid loading a second model onto the GPU.
     """
     if not expected_answer or not str(expected_answer).strip():
         return False
@@ -98,6 +108,7 @@ def verify_correctness(generated_solution: str, expected_answer: str, problem: s
         expected=str(expected_answer),
         problem=problem,
         solution=generated_solution,
+        use_llm_judge=use_llm_judge,
     )
     if not is_correct:
         logger.info(f"Incorrect answer: {pred} != {expected_answer}")
