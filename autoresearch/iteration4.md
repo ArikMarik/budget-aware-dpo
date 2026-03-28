@@ -42,6 +42,9 @@ Iteration 3 failed catastrophically — model collapse producing gibberish. Root
 - **Why**: `\frac{1}{3}` vs `\dfrac{1}{3}`, `48` vs `48.0`, decimal vs fraction — all were marked wrong. Tiered verification handles mathematical equivalence.
 - **Note**: In-training gen eval uses Tier 0+1 only (no LLM judge, would conflict with GPU). Post-training eval uses full Tier 0+1+2.
 
+### Why KL penalty is only on budget-aware, not baseline
+Standard DPO already has an implicit KL constraint (the `beta * log(pi/pi_ref)` term). The baseline's only issue in iter 3 was lr too high — fixed with 1e-6. The budget-aware model has an additional divergence pressure from the length penalty term, which pushes it further from the reference than standard DPO. Evidence: in iter 1, budget-aware overfitted faster than baseline (val_loss collapsed epoch 2 vs epoch 3). The KL penalty compensates for this extra pressure. If baseline still collapses at 1e-6, we'd add KL to it too — but iter 1 showed baseline can learn fine (32.4% accuracy) without it. Keeping KL off baseline also isolates the effect of budget-aware changes for cleaner comparison.
+
 ### No change to lambda values
 - `lambda_easy=5.0`, `lambda_hard=0.0` — keeping from iter 1-3. The token direction was correct in iter 2 with these values.
 
@@ -106,7 +109,13 @@ PYTHONUNBUFFERED=1 nohup .venv/bin/python -m scripts.training.train_budget_aware
 
 ## 5. Results
 
-_TBD — will be filled as training progresses_
+### Early Detection: Budget-aware learning stalled
+
+**Detected at step ~9,000 (78% epoch 1)**: Budget-aware loss stuck at ~0.40 while baseline dropped to ~0.15. The KL penalty at 0.1 is too strong — effectively freezing the budget-aware model. Every gradient update gets pulled back to the reference, preventing any learning.
+
+**Decision**: Kill budget-aware run, keep baseline running (it's learning fine). Reduce KL penalty from 0.1 to 0.01 for iteration 5.
+
+### Partial Epoch-Level Metrics (before kill)
 
 ### Epoch-Level Metrics
 

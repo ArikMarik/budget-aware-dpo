@@ -1,71 +1,87 @@
-# Autoresearch Handoff — Live State
+# Autoresearch Handoff — Phase 2
 
-**Last updated**: 2026-03-27 08:15 UTC
+**Last updated**: 2026-03-28 09:05 UTC
+**Phase**: Phase 2 — autonomous experimentation with 3 GPUs for 24 hours
 **Branch**: `autoresearch/mar26`
-**Agent status**: Iteration 4 training launched (both baseline + budget-aware)
 
 ---
 
-## Current Runs (Iteration 4)
+## Start Here
 
-### Baseline
-- **Run name**: `baseline_balanced_iter4`
-- **PID**: 889675
-- **GPU**: 0
-- **Log**: `logs/baseline_balanced_iter4.log`
-- **Checkpoints**: `checkpoints/baseline_balanced_iter4/`
-
-### Budget-Aware
-- **Run name**: `budget_aware_balanced_iter4`
-- **PID**: 889686
-- **GPU**: 1
-- **Log**: `logs/budget_aware_balanced_iter4.log`
-- **Checkpoints**: `checkpoints/budget_aware_balanced_iter4/`
-
-### Hyperparameters
-```
-Budget: lambda_easy=5.0, lambda_hard=0.0, beta=0.1, kl_penalty=0.1 (NEW)
-Both: max_epochs=3, batch_size=4, lr=1e-6 (was 1e-5), grad_accum=1
-Dataset: data/processed_dpo_dataset_balanced_v4_capped (50K pairs, 6,347 unique problems, cap=50easy/100hard)
-```
-
-### Changes from iteration 3
-1. **Dataset**: real_capped100 (51K, 11K problems) → balanced_v4_capped (50K, 6K problems, same pipeline as original)
-2. **Learning rate**: 1e-5 → 1e-6 (10x lower to prevent model collapse)
-3. **KL penalty**: 0.0 → 0.1 (prevents policy diverging from reference)
-4. **Gen eval**: String comparison → tiered verify_correctness() (Tier 0+1 during training, full Tier 0+1+2 post-training)
-5. **Baseline re-run**: Yes (lr changed + dataset changed)
-
-### Expected timeline
-- ~11,296 steps/epoch × ~1s/step = ~3.1 hours/epoch
-- Gen eval: ~25 min after each epoch
-- Total: ~10-12 hours for 3 epochs
+You are the Phase 2 agent. Read these files in order:
+1. **This file** — current state and what to do first
+2. **`autoresearch/PHASE1_SUMMARY.md`** — full Phase 1 findings, hypotheses A-G, technical reference, and Phase 2 experiment plan
+3. **`autoresearch/RULES.md`** — operational rules (polling, GPU assignment, commit protocol, etc.)
+4. **`program.md`** — master experiment protocol (training commands, eval commands, monitoring)
 
 ---
 
-## Iteration History
+## Current State
 
-| Iter | Dataset | lr | Key Result | Status |
-|------|---------|-----|------------|--------|
-| 0 | balanced 50K | 1e-5 | Lambda too small (0.05), no divergence | Done |
-| 1 | balanced 50K | 1e-5 | Lambda=5.0: accuracy +5.2% but tokens 2x UP | Done |
-| 2 | capped50 10K | 1e-5 | Correct token direction but 1% accuracy | Done |
-| 3 | real_capped100 51K | 1e-5 | MODEL COLLAPSE — 0% accuracy, gibberish | Done |
-| 4 | balanced_v4_capped 50K | 1e-6 | Running... | Active |
+- **All 3 GPUs are FREE** (no processes running)
+- Phase 1 is complete (6 iterations, all evaluated)
+- Last iteration number: **6**. Start Phase 2 from **iteration 7**.
 
 ---
 
-## Rules
-- **2 GPUs always occupied** during training
-- **Document BEFORE acting** — iterationN.md written before launch
-- **Never overwrite data/checkpoints** — new directories only
-- **Poll every 20-30 min**, 1-hour for mid-epoch
-- Read `autoresearch/RULES.md` for full operational rules
+## Phase 1 Bottom Line
+
+The length penalty (lambda_easy=5.0) produces **marginal** improvement over KL-only baseline:
+- **2 fewer tokens** on easy problems (177 vs 179)
+- **5% better TPCA** (846 vs 891)
+- **Same accuracy** (22% vs 21.2%)
+
+This is real but too small for a paper. Phase 2 needs a **stronger mechanism** to shorten easy tokens.
 
 ---
 
-## How to resume
-1. Read this file + `autoresearch/iteration4.md` for current plan
-2. Check training: `ps aux | grep "train_b" | grep -v grep`
-3. Poll logs: `grep -iE "Epoch.*train_loss|gen-eval" logs/*_iter4.log`
-4. When done: collect results, run post-training eval, update iteration4.md, plan iter 5
+## Phase 2 Goals
+
+**Primary**: Shorten token count on easy problems (avg_tokens_easy ↓↓).
+**Secondary**: Maintain or improve accuracy. Hard problem improvement is a bonus.
+**Constraint**: DPO must be part of the approach.
+
+---
+
+## Recommended First Actions
+
+1. **Read PHASE1_SUMMARY.md** (especially Sections 6-9) for full hypothesis details
+2. **Pick 2-3 hypotheses** to test in parallel on 3 GPUs
+3. **Document your plan** in `autoresearch/iteration7.md` before launching
+4. **Launch experiments** on all 3 GPUs
+
+### Top hypotheses (see PHASE1_SUMMARY Section 6 for details):
+
+| ID | Hypothesis | Expected Impact | Effort |
+|----|-----------|----------------|--------|
+| A | Per-token penalty (not per-sequence) | High — directly shapes generation | Medium (code change) |
+| B | Larger model (1.5B) | High — more room to show budget effect | Low (download + same code) |
+| D | SimPO (length-normalized DPO, no ref model) | High — built-in length control | Medium (new loss function) |
+| E | Two-phase training (accuracy then efficiency) | Medium | Low (run sequentially) |
+| C | More/better hard data | Low for our goal | Medium |
+
+### Suggested Block 1 (hours 0-8, parallel on 3 GPUs):
+- **GPU 0**: 0.5B + SimPO (new loss, no reference model, built-in length normalization)
+- **GPU 1**: 0.5B + stronger per-token penalty (modify `budget_aware_dpo_loss.py`)
+- **GPU 2**: 1.5B baseline DPO (download Qwen2.5-1.5B, establish new baseline)
+
+---
+
+## Available Checkpoints (for reference, don't overwrite)
+
+| Checkpoint | Description | Post-train Accuracy | Easy Tokens |
+|-----------|-------------|--------------------:|------------:|
+| `budget_aware_balanced_iter5/` | Best budget (λ=5.0, KL=0.01) | 22.0% | 177.4 |
+| `baseline_kl_iter6/` | Best baseline (KL=0.01 only) | 21.2% | 179.4 |
+
+---
+
+## Operational Notes
+
+- Use `.venv/bin/python` (NOT system python)
+- Set `PYTHONUNBUFFERED=1` for all training/eval
+- Set `PYTHONPATH=/storage/arik/nlp_final_project` for eval scripts
+- Eval command: `scripts/eval_checkpoint.py --use-real --limit 500`
+- Kill `keep_alive.py` before training, start when idle
+- Poll every 20 min, /compact at 200K context
+- Commit after each completed iteration
