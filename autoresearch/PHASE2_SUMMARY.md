@@ -75,6 +75,15 @@ The 0.5B model already gets 29.2% on easy (GSM8K) problems with 177 tokens. Base
 - **0.5B Budget without KL but with warmup** — test if warmup replaces KL
 - **Different easy/hard threshold** — currently GSM8K=easy, MATH L4-5=hard. Try including MATH L1-2 as easy.
 
+### Benchmark Targets (from literature)
+- **Qwen2.5-0.5B base on GSM8K: ~44%** (Qwen3 Technical Report)
+- **Qwen2.5-Coder-0.5B on GSM8K: 34.5%** (4-shot)
+- **Realistic ceiling after DPO fine-tuning: 45-55%**
+- Our current best easy accuracy: 29.2% (held-out GSM8K)
+- **Gap to close: ~15-25 percentage points** — significant room for improvement
+
+Note: The base model already gets 44% on GSM8K. Our DPO fine-tuning is getting 29.2% — we're actually BELOW the base model. This suggests DPO may be hurting GSM8K performance, or our evaluation setup differs (max_new_tokens=256 may truncate solutions).
+
 ### Success Criteria
 | Metric | Target |
 |--------|--------|
