@@ -530,7 +530,14 @@ def _build_loss_fn(
     lambda_easy: float,
     lambda_hard: float,
     kl_penalty_weight: float = 0.0,
+    loss_type: str = "dpo",
 ) -> Callable:
+    if loss_type == "simpo":
+        from src.models.simpo_loss import simpo_loss
+        return lambda pc, pr, rc, rr, cl, rl, c: simpo_loss(
+            pc, pr, cl, rl, c, beta=dpo_beta, gamma=0.5,
+            lambda_easy=lambda_easy, lambda_hard=lambda_hard,
+        )
     if use_budget_aware:
         from src.models.budget_aware_dpo_loss import budget_aware_dpo_loss
         return lambda pc, pr, rc, rr, cl, rl, c: budget_aware_dpo_loss(
@@ -617,6 +624,8 @@ def train_dpo(
     use_mixed_precision: bool = True,
     compile_model: bool = False,
     num_workers: int = 4,
+    model_name: Optional[str] = None,
+    loss_type: str = "dpo",
 ) -> dict:
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -627,14 +636,16 @@ def train_dpo(
     _validate_datasets_exist(train_tokens_path, val_tokens_path)
 
     pin_memory = device == "cuda"
+    effective_model_name = model_name or MODEL_NAME
+    logger.info("Using model: %s (loss_type=%s)", effective_model_name, loss_type)
     model, tokenizer = create_model(
-        MODEL_NAME,
+        effective_model_name,
         device,
         lora_config=_build_lora_config(),
         resume_from=resume_from,
         use_compile=compile_model and device == "cuda",
     )
-    ref_model = create_ref_model(MODEL_NAME, device)
+    ref_model = create_ref_model(effective_model_name, device)
 
     train_dataset = load_tokenized_dataset(train_tokens_path)
     val_dataset = load_tokenized_dataset(val_tokens_path)
@@ -646,7 +657,7 @@ def train_dpo(
         train_dataset, val_dataset, batch_size, num_workers, pin_memory
     )
 
-    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight)
+    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
 

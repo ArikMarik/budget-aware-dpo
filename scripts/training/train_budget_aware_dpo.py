@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--run-name", type=str, default=None, help="WandB run name (auto-generated if omitted)")
+    parser.add_argument("--model", type=str, default=None, help="Model name/path (default: Qwen/Qwen2.5-0.5B)")
+    parser.add_argument("--loss-type", type=str, default="dpo", choices=["dpo", "simpo"], help="Loss function type")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir or str(get_budget_aware_output_dir()))
@@ -57,6 +59,8 @@ def main():
         use_mixed_precision=not args.no_mixed_precision,
         compile_model=args.compile_model,
         num_workers=args.num_workers,
+        model_name=args.model,
+        loss_type=args.loss_type,
     )
 
 

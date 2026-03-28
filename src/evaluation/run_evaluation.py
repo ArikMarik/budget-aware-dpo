@@ -164,15 +164,17 @@ def evaluate_checkpoint(
     checkpoint_path: Path,
     problems: list[dict],
     output_path: Optional[Path] = None,
+    base_model: Optional[str] = None,
 ) -> dict:
     """Load model, run evaluation, return metrics."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_name = base_model or MODEL_NAME
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path), trust_remote_code=True)
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        model_name,
         torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         device_map="auto" if device == "cuda" else None,
     )

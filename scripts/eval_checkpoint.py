@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--limit", type=int, default=500, help="Number of problems")
     parser.add_argument("--output", type=str, required=True, help="Output JSON path")
     parser.add_argument("--use-real", action="store_true", help="Use GSM8K+MATH test sets (not training data)")
+    parser.add_argument("--base-model", type=str, default=None, help="Base model name (default: Qwen/Qwen2.5-0.5B)")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint)
@@ -67,6 +68,7 @@ def main():
         checkpoint_path,
         sampled,
         output_path=output_path,
+        base_model=args.base_model,
     )
 
     logger.info("=== RESULTS ===")

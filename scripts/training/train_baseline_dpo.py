@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--run-name", type=str, default=None, help="WandB run name (auto-generated if omitted)")
+    parser.add_argument("--model", type=str, default=None, help="Model name/path (default: Qwen/Qwen2.5-0.5B)")
+    parser.add_argument("--kl-penalty", type=float, default=0.0, help="KL divergence penalty weight")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir or str(get_baseline_output_dir()))
@@ -48,9 +50,11 @@ def main():
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_threshold=args.early_stopping_threshold,
         dpo_beta=args.dpo_beta,
+        kl_penalty_weight=args.kl_penalty,
         use_mixed_precision=not args.no_mixed_precision,
         compile_model=args.compile_model,
         num_workers=args.num_workers,
+        model_name=args.model,
     )
 
 
