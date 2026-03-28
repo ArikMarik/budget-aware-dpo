@@ -50,7 +50,10 @@ No code changes — uses existing `--resume-from` parameter.
 - Significant accuracy jump from 3% → 25% with budget-aware objective
 
 ### Phase 2: Budget DPO E2
-*Pending — in progress*
+- train_loss=0.2270, val_loss=0.4441 (↑ from 0.4177 — slight overfit), reward_diff=0.0248
+- gen-eval: accuracy=**30%** (easy=**56%**, hard=4%), avg_tokens_easy=219.4, avg_tokens_hard=237.8, TPCA=762.1
+- Best model saved at E1 (val_loss 0.4177)
+- Accuracy improved (25→30%) but tokens_easy went up (160→219). val_loss slightly worse.
 
 ## 5. Comparison
 
