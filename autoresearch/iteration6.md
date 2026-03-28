@@ -1,4 +1,4 @@
-# Budget-Aware DPO — Auto-Research Iteration 6
+# Iteration 6 — Fair Baseline Comparison (KL=0.01, λ=0)
 
 **Date**: 2026-03-27
 **Status**: Launching

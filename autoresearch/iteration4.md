@@ -1,4 +1,4 @@
-# Budget-Aware DPO — Auto-Research Iteration 4
+# Iteration 4 — Lower LR + KL Penalty (KL=0.1 Too Strong)
 
 **Date**: 2026-03-27
 **Status**: Preparing to launch

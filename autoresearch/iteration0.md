@@ -1,4 +1,4 @@
-# Budget-Aware DPO — Auto-Research Iteration 0
+# Iteration 0 — Baseline + Lambda Too Small (λ=0.05)
 
 **Date**: 2026-03-26
 **Status**: Baseline established, no meaningful divergence observed. Ready for hyperparameter exploration.

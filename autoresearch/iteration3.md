@@ -1,4 +1,4 @@
-# Budget-Aware DPO — Auto-Research Iteration 3
+# Iteration 3 — Large Diverse Dataset (Model Collapse)
 
 **Date**: 2026-03-26
 **Status**: COMPLETE — model collapsed (0% accuracy, gibberish output on all epochs)

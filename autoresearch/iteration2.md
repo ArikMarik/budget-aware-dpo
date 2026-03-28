@@ -1,4 +1,4 @@
-# Budget-Aware DPO — Auto-Research Iteration 2
+# Iteration 2 — Data Capping + Gen-Eval (First Correct Token Direction)
 
 **Date**: 2026-03-26
 **Status**: COMPLETE — both models trained, gen eval done for all epochs

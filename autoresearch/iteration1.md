@@ -1,4 +1,4 @@
-# Budget-Aware DPO — Auto-Research Iteration 1
+# Iteration 1 — Strong Lambda (λ=5.0), Tokens Went Wrong Direction
 
 **Date**: 2026-03-26
 **Status**: COMPLETE — killed after epoch 2 (overfitting), post-training eval done

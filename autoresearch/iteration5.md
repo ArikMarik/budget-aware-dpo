@@ -1,4 +1,4 @@
-# Budget-Aware DPO — Auto-Research Iteration 5
+# Iteration 5 — KL=0.01 Breakthrough (Phase 1 Best: 22% Post-Train)
 
 **Date**: 2026-03-27
 **Status**: Preparing to launch
