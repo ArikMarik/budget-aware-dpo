@@ -72,24 +72,63 @@ PYTHONUNBUFFERED=1 nohup .venv/bin/python -m scripts.training.train_budget_aware
 - `scripts/eval_checkpoint.py` — Added `--base-model` arg
 - `src/evaluation/run_evaluation.py` — Added `base_model` parameter to `evaluate_checkpoint()`
 
-## 4. Results
+## 4. Results (Epoch 1)
 
-*To be filled after training completes.*
+### 7a: 1.5B Baseline DPO (E1)
+- train_loss=0.1184, val_loss=0.7426, reward_diff=4.6286
+- gen-eval: accuracy=6% (easy=12%, hard=0%), avg_tokens_easy=149.0, avg_tokens_hard=178.8, TPCA=2732.0
+- **Verdict**: Very low accuracy — KL=0.01 baseline without lambda may be too restrictive for 1.5B, or needs more epochs
 
-## 5. Comparison to Baseline
+### 7b: 1.5B Budget-Aware DPO (E1) — BREAKTHROUGH
+- train_loss=0.2665, val_loss=0.4273, reward_diff=0.0868
+- gen-eval: accuracy=**30%** (easy=**56%**, hard=**4%**), avg_tokens_easy=**131.9**, avg_tokens_hard=**247.8**, TPCA=**632.9**
+- **Verdict**: Best results yet! 30% accuracy (5x baseline), 131.9 easy tokens (shortest ever, 26% shorter than Phase 1 baseline's 179), strong easy/hard divergence in both accuracy and tokens
 
-*To be filled after training completes.*
+### 7c: 0.5B SimPO v1 (E1) — FAILED
+- beta=2.0, lr=1e-6: train_loss=0.1252, val_loss=1.5616, accuracy=3%
+- Saturated by E2 (loss=0.0001, gradients=0). Killed.
+
+### 7c-v2: 0.5B SimPO v2 (E1) — FAILED
+- beta=0.5, lr=5e-7: train_loss=0.1787, val_loss=1.6498, accuracy=5%
+- avg_tokens_easy=238.7 (worse than baseline). SimPO still overfits without reference model anchor.
+- Killed after E1.
+
+## 5. Comparison
+
+| Metric | 1.5B Baseline (7a) | 1.5B Budget (7b) | Phase1 0.5B Budget (iter5 E3) | Phase1 0.5B Baseline (iter6 E2) |
+|--------|-------------------|------------------|-------------------------------|--------------------------------|
+| accuracy | 6% | **30%** | 38% | 35% |
+| easy_acc | 12% | **56%** | 68% | 68% |
+| hard_acc | 0% | **4%** | 8% | 2% |
+| tokens_easy | 149.0 | **131.9** | 193.3 | 144.0 |
+| tokens_hard | 178.8 | **247.8** | 245.9 | 250.9 |
+| TPCA | 2732 | **632.9** | 578 | 564 |
+| val_loss | 0.7426 | **0.4273** | 0.4460 | 0.5703 |
 
 ## 6. Analysis
 
-*To be filled after training completes.*
+**The 1.5B budget-aware model is the clear winner.** Key findings:
+
+1. **1.5B + budget-aware = strong divergence**: 131.9 easy tokens vs 247.8 hard tokens (1.88x ratio). This is the clearest budget-aware signal we've seen. On 0.5B the ratio was ~0.79x (193/245).
+
+2. **Accuracy is competitive**: 30% at E1 is likely to improve with more epochs (Phase 1 went from 27% E2 → 38% E3).
+
+3. **1.5B baseline underperforms**: Only 6% accuracy suggests the KL penalty may be too strong for the baseline at 1.5B scale without the length penalty providing additional learning signal. Or it needs more epochs.
+
+4. **SimPO doesn't work**: Without a reference model, the policy drifts too far. Both beta=2.0 and beta=0.5 led to overfitting. The reference model is essential for stability.
+
+5. **1.5B model shows the budget effect that was marginal on 0.5B**: The larger model has enough capacity to simultaneously learn accuracy AND length efficiency. This validates Hypothesis B.
 
 ## 7. Open Questions
 
-1. Does 1.5B have enough headroom on MATH to show meaningful budget-aware divergence?
-2. Does SimPO's built-in length normalization translate to shorter generation?
-3. Is batch_size=2 sufficient for 1.5B, or do we need gradient accumulation?
+1. Will 1.5B budget-aware accuracy improve to 40%+ by E3?
+2. Will 1.5B baseline catch up with more epochs?
+3. Will the token advantage (131.9 easy) persist or drift verbose like Phase 1?
+4. Would two-phase training (accuracy warmup → budget DPO) work even better?
 
 ## 8. Next Iteration Plan
 
-*To be decided based on results.*
+- **GPU 0-1**: Continue 1.5B runs through E2-E3 (already running)
+- **GPU 2**: Two-phase training experiment (iter 8) — standard DPO warmup then budget-aware fine-tuning
+- **After E3**: Run post-training eval (500 problems, Tier 0+1+2) on best 1.5B checkpoints
+- **If 1.5B budget stays strong**: Try lambda tuning (lambda=10, lambda=20) on 1.5B

@@ -11,3 +11,7 @@ iteration	run_name	val_loss	val_accuracy	reward_diff_easy	reward_diff_hard	lengt
 5	budget_aware_balanced_iter5	0.4460	0.38	0.0	0.0	0.0	5.0	0.0	lr=1e-6 KL=0.01 balanced_v4	keep	breakthrough - 22% post-train acc, tokens 177/195
 5	baseline_balanced_iter5b	0.0	0.01	0.0	0.0	0.0	0.0	0.0	lr=1e-5 balanced_v4	discard	collapsed - lr too high for v4 data
 6	baseline_kl_iter6	0.5703	0.39	0.0	0.0	0.0	0.0	0.0	lr=1e-6 KL=0.01 balanced_v4	keep	fair comparison - 21.2% post-train, tokens 179/198
+7a	baseline_1.5b_iter7a	0.7426	0.06	0.0	0.0	0.0	0.0	0.0	1.5B model lr=1e-6 KL=0.01 batch=2	running	E1: 6% acc, tokens 149/179 - needs more epochs
+7b	budget_1.5b_iter7b	0.4273	0.30	0.0	0.0	0.0	5.0	0.0	1.5B model lr=1e-6 KL=0.01 batch=2	running	E1: 30% acc, tokens 132/248 - BREAKTHROUGH shortest easy tokens
+7c	simpo_budget_0.5b_iter7c	1.5616	0.03	0.0	0.0	0.0	5.0	0.0	SimPO beta=2.0 lr=1e-6	discard	SimPO overfits - 3% acc, saturated by E2
+7c-v2	simpo_budget_0.5b_iter7c_v2	1.6498	0.05	0.0	0.0	0.0	5.0	0.0	SimPO beta=0.5 lr=5e-7	discard	SimPO still overfits - 5% acc, tokens 239 (longer)
