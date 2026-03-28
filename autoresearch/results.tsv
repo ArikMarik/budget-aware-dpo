@@ -16,6 +16,7 @@ iteration	run_name	val_loss	val_accuracy	reward_diff_easy	reward_diff_hard	lengt
 7c	simpo_budget_0.5b_iter7c	1.5616	0.03	0.0	0.0	0.0	5.0	0.0	SimPO beta=2.0 lr=1e-6	discard	SimPO overfitting - 3% accuracy, val_loss 1.56
 7c_v2	simpo_budget_0.5b_iter7c_v2	1.6498	0.05	0.0	0.0	0.0	5.0	0.0	SimPO beta=0.5 lr=5e-7	discard	SimPO still overfitting with lower beta
 7b_e2	budget_1.5b_iter7b	0.4240	0.43	0.0	0.0	0.0	5.0	0.0	1.5B model lr=1e-6 KL=0.01 batch=2	keep	post-train: 25.8% acc, TPCA 811.5, 13% better than baseline
+9	baseline_1.5b_noKL_iter9	0.6125	0.10	0.0	0.0	0.0	0.0	0.0	1.5B model lr=1e-6 KL=0.0 batch=2	in_progress	noKL baseline E1: 10% acc, 74 easy tokens, 1298 TPCA
 7a	baseline_1.5b_iter7a	0.7426	0.06	0.0	0.0	0.0	0.0	0.0	1.5B model lr=1e-6 KL=0.01 batch=2	running	E1: 6% acc, tokens 149/179 - needs more epochs
 7b	budget_1.5b_iter7b	0.4273	0.30	0.0	0.0	0.0	5.0	0.0	1.5B model lr=1e-6 KL=0.01 batch=2	running	E1: 30% acc, tokens 132/248 - BREAKTHROUGH shortest easy tokens
 7c	simpo_budget_0.5b_iter7c	1.5616	0.03	0.0	0.0	0.0	5.0	0.0	SimPO beta=2.0 lr=1e-6	discard	SimPO overfits - 3% acc, saturated by E2
