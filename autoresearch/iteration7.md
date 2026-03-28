@@ -155,9 +155,24 @@ PYTHONUNBUFFERED=1 nohup .venv/bin/python -m scripts.training.train_budget_aware
 
 **Baseline is overfitting**: train_loss=0.022 vs val_loss=0.649. Accuracy stuck at 5%. KL=0.01 baseline without lambda is failing on 1.5B — killed E3 and launched no-KL baseline (iter 9).
 
+### Post-Training Eval: 1.5B Budget E2 vs 1.5B Baseline E1 (500 held-out, Tier 0+1+2)
+
+| Metric | 1.5B Budget E2 | 1.5B Baseline E1 (KL) | Delta | Phase1 0.5B Budget | Phase1 0.5B Baseline |
+|--------|---------------|----------------------|-------|-------------------|---------------------|
+| Overall Accuracy | **25.8%** | 22.4% | **+3.4%** | 22.0% | 21.2% |
+| MATH L4-5 | **13.7%** | 13.0% | +0.7% | 8.2% | 11.6% |
+| Tokens Easy | **239.7** | 241.9 | **-2.2** | 177.4 | 179.4 |
+| Tokens Hard | 179.1 | 176.8 | +2.3 | 194.8 | 198.3 |
+| TPCA | **811.5** | 934.6 | **-13.2%** | 845.9 | 890.8 |
+
+**The 1.5B budget model beats baseline by 13% TPCA and 3.4% accuracy.** This is a much stronger signal than Phase 1's 5% TPCA improvement with 0.5B.
+
+**Note**: The baseline with KL=0.01 failed (5% gen-eval accuracy, severely overfitting at train_loss=0.02). Launched no-KL 1.5B baseline (iter 8) for a fairer comparison.
+
 ## 8. Next Iteration Plan
 
-- **GPU 0-1**: Continue 1.5B runs through E2-E3 (already running)
-- **GPU 2**: Two-phase training experiment (iter 8) — standard DPO warmup then budget-aware fine-tuning
-- **After E3**: Run post-training eval (500 problems, Tier 0+1+2) on best 1.5B checkpoints
-- **If 1.5B budget stays strong**: Try lambda tuning (lambda=10, lambda=20) on 1.5B
+- **GPU 1**: Budget 1.5B E3 completing (~2h remaining)
+- **GPU 0**: Leaked memory, need process cleanup. Launch 1.5B no-KL baseline
+- **After E3**: Full post-training eval on best 1.5B budget checkpoint
+- **Iteration 8**: Try higher lambda (10-20) to push easy tokens shorter on 1.5B
+- **Iteration 9**: 1.5B no-KL baseline for fair comparison
