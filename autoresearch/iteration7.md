@@ -126,6 +126,18 @@ PYTHONUNBUFFERED=1 nohup .venv/bin/python -m scripts.training.train_budget_aware
 3. Will the token advantage (131.9 easy) persist or drift verbose like Phase 1?
 4. Would two-phase training (accuracy warmup → budget DPO) work even better?
 
+### Post-Training Eval: 1.5B Budget E1 (500 held-out problems, Tier 0+1+2)
+
+| Metric | 1.5B Budget E1 | Phase1 0.5B Budget (iter5) | Phase1 0.5B Baseline (iter6) |
+|--------|---------------|---------------------------|------------------------------|
+| Overall Accuracy | **24.6%** | 22.0% | 21.2% |
+| MATH L4-5 Accuracy | **13.7%** | 8.2% | 11.6% |
+| Avg Tokens Easy | 243.5 | 177.4 | 179.4 |
+| Avg Tokens Hard | 177.5 | 194.8 | 198.3 |
+| TPCA | 855.6 | 845.9 | 890.8 |
+
+**Key finding**: 1.5B budget-aware is more accurate (+2.6% overall, +5.5% MATH L4-5) but tokens_easy is higher on held-out data (243 vs 177). In-training gen-eval showed 131.9 easy tokens — large gap between training data performance and held-out. E2-E3 may improve token efficiency as the model continues learning.
+
 ## 8. Next Iteration Plan
 
 - **GPU 0-1**: Continue 1.5B runs through E2-E3 (already running)
