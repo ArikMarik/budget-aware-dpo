@@ -138,6 +138,23 @@ PYTHONUNBUFFERED=1 nohup .venv/bin/python -m scripts.training.train_budget_aware
 
 **Key finding**: 1.5B budget-aware is more accurate (+2.6% overall, +5.5% MATH L4-5) but tokens_easy is higher on held-out data (243 vs 177). In-training gen-eval showed 131.9 easy tokens — large gap between training data performance and held-out. E2-E3 may improve token efficiency as the model continues learning.
 
+### Epoch 2 Results (In-Training Gen-Eval)
+
+| Metric | 1.5B Baseline E2 | 1.5B Budget E2 |
+|--------|-----------------|----------------|
+| accuracy | 5% (↓ from 6%) | **43%** (↑ from 30%) |
+| easy_acc | 8% | **74%** |
+| hard_acc | 2% | **12%** |
+| tokens_easy | 159.9 (↑ from 149) | 210.7 (↑ from 132) |
+| tokens_hard | 189.4 | 251.1 |
+| TPCA | 3492.8 | **537.0** |
+| val_loss | 0.6493 | 0.4240 |
+| train_loss | 0.0222 (overfit) | 0.2233 |
+
+**Budget E2 is a breakthrough**: 43% accuracy with 537 TPCA. Easy tokens went up (132→211) but accuracy jumped massively (30→43%, easy 56→74%, hard 4→12%). The model is learning both accuracy AND efficiency with more training.
+
+**Baseline is overfitting**: train_loss=0.022 vs val_loss=0.649. Accuracy stuck at 5%. KL=0.01 baseline without lambda is failing on 1.5B — killed E3 and launched no-KL baseline (iter 9).
+
 ## 8. Next Iteration Plan
 
 - **GPU 0-1**: Continue 1.5B runs through E2-E3 (already running)
