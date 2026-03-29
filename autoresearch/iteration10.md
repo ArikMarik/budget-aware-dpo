@@ -39,7 +39,29 @@ No code changes. Pure hyperparameter experiment.
 
 ## 4. Results
 
-*In progress — launched at 20:20 (10a) and 20:52 (10b)*
+### 10a: Budget λ=10 (E1-E3 done, continuing to E6)
+| Epoch | Accuracy | Easy Acc | Hard Acc | Easy Tok | Hard Tok | TPCA | val_loss |
+|-------|---------|---------|---------|---------|---------|------|----------|
+| 1 | 25% | 46% | 4% | 201 | 221 | 845 | 0.4018 |
+| 2 | 27% | 52% | 2% | 255 | 244 | 922 | **0.3998** |
+| 3 | 30% | 54% | 6% | 256 | 256 | 853 | 0.4024 |
+
+Accuracy improving (25→30%) but tokens maxing at 256 by E3. λ=10 doesn't produce shorter tokens — the model generates full-length responses. val_loss plateauing around 0.40.
+
+### 10b: Baseline 6 epochs (E1-E3, overfitting badly)
+| Epoch | Accuracy | Easy Acc | Easy Tok | TPCA | val_loss |
+|-------|---------|---------|---------|------|----------|
+| 1 | 3% | 4% | 163 | 5337 | 0.5800 |
+| 2 | 1% | 2% | 247 | 22462 | 0.7083 |
+| 3 | 3% | 6% | 215 | 6867 | **1.1478** |
+
+**Baseline completely fails** — val_loss exploding 0.58→1.15, accuracy 1-3%. Same pattern as 1.5B baseline. Standard DPO with KL=0.01 at lr=1e-6 doesn't work on this dataset without lambda.
+
+### 10c: Budget λ=20 (just launched on GPU 0)
+Testing if even stronger penalty produces different behavior.
+
+### Key Insight
+The budget-aware lambda provides a **crucial learning signal** that standard DPO lacks. Both 0.5B and 1.5B baselines fail at lr=1e-6 with KL=0.01, while budget-aware models learn effectively. The lambda isn't just a length penalty — it's an additional gradient signal that helps the model distinguish between easy and hard problems.
 
 ## 5. Reference: Full Post-Training Eval Table (all models so far)
 
