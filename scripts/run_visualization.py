@@ -11,7 +11,10 @@ import argparse
 from pathlib import Path
 
 from src.config import CHECKPOINT_DIR
+from src.utils import get_logger
 from src.visualization.plot_results import generate_figures, generate_results_table
+
+logger = get_logger(__name__)
 
 
 def main():
@@ -27,14 +30,14 @@ def main():
 
     # Figures
     paths = generate_figures(eval_dir, output_dir, suffix=suffix)
-    print(f"Generated figures: {paths}")
+    logger.info("Generated figures: %s", paths)
 
     # Results table
     metrics_path = CHECKPOINT_DIR / f"evaluation_results{suffix}.json"
     if metrics_path.exists():
         table_path = output_dir / f"results_table{suffix}.md"
         generate_results_table(metrics_path, table_path)
-        print(f"Results table: {table_path}")
+        logger.info("Results table: %s", table_path)
 
 
 if __name__ == "__main__":

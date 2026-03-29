@@ -133,8 +133,8 @@ USE_DUMMY_DATA=1 python scripts/train_sanity_check.py
 # Real data pipeline
 python scripts/load_real_data.py --split train_1M --limit 5000
 USE_DUMMY_DATA=0 python scripts/preprocess_dpo_data.py
-USE_DUMMY_DATA=0 python scripts/training/train_baseline_dpo.py --max-steps 1000
-USE_DUMMY_DATA=0 python scripts/training/train_budget_aware_dpo.py --max-steps 1000
+USE_DUMMY_DATA=0 python scripts/training/train_baseline_dpo.py --max-epochs 10
+USE_DUMMY_DATA=0 python scripts/training/train_budget_aware_dpo.py --max-epochs 10
 
 # Evaluation (real: requires GSM8K+MATH test sets — run load_real_data.py or --test-sets-only)
 USE_DUMMY_DATA=1 python scripts/run_evaluation.py --dummy

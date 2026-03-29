@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -124,7 +126,7 @@ def main():
     with open(DUMMY_PATH, "w", encoding="utf-8") as f:
         for ex in examples:
             f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-    print(f"Saved {len(examples)} dummy examples to {DUMMY_PATH}")
+    logger.info("Saved %s dummy examples to %s", len(examples), DUMMY_PATH)
 
 
 if __name__ == "__main__":

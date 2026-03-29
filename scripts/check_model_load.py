@@ -7,7 +7,9 @@ Uses Unsloth when available, otherwise falls back to transformers.
 import os
 from pathlib import Path
 
-from src.utils import set_seed
+from src.utils import get_logger, set_seed
+
+logger = get_logger(__name__)
 
 set_seed(42)
 
@@ -26,7 +28,7 @@ def main():
         example = json.loads(f.readline())
 
     prompt = f"Problem: {example['problem']}\nSolution:"
-    print(f"Prompt (truncated): {prompt[:80]}...")
+    logger.info("Prompt (truncated): %s...", prompt[:80])
 
     try:
         from unsloth import FastLanguageModel
@@ -45,7 +47,7 @@ def main():
             outputs = model(**inputs)
 
         logits = outputs.logits
-        print(f"Forward pass OK. Logits shape: {logits.shape}")
+        logger.info("Forward pass OK. Logits shape: %s", logits.shape)
     except ImportError:
         # Fallback to transformers
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -59,9 +61,9 @@ def main():
         with torch.no_grad():
             outputs = model(**inputs)
 
-        print(f"Forward pass OK (transformers). Logits shape: {outputs.logits.shape}")
+        logger.info("Forward pass OK (transformers). Logits shape: %s", outputs.logits.shape)
 
-    print("Model loading check passed.")
+    logger.info("Model loading check passed.")
 
 
 if __name__ == "__main__":

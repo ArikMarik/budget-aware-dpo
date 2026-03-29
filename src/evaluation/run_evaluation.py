@@ -15,7 +15,7 @@ from src.config import (
     MODEL_NAME,
     get_processed_dataset_path,
 )
-from src.evaluation.answer_extraction import extract_answer, normalize_answer
+from src.evaluation.answer_extraction import extract_answer, normalize_answer, verify_correctness
 from src.utils import set_seed
 
 set_seed(42)
@@ -85,6 +85,7 @@ def generate_and_evaluate(
     tokenizer,
     problems: list[dict],
     max_new_tokens: int = 256,
+    use_llm_judge: bool = True,
 ) -> dict:
     """Generate for each problem, extract answer, compute metrics."""
     device = next(model.parameters()).device
@@ -103,7 +104,11 @@ def generate_and_evaluate(
         num_tokens = out.shape[1] - inputs["input_ids"].shape[1]
         pred = extract_answer(response)
         correct = (
-            normalize_answer(pred) == normalize_answer(p["expected"])
+            verify_correctness(
+                response, p["expected"],
+                problem=p["problem"],
+                use_llm_judge=use_llm_judge,
+            )
             if p["expected"] else None
         )
         results.append({
@@ -159,15 +164,17 @@ def evaluate_checkpoint(
     checkpoint_path: Path,
     problems: list[dict],
     output_path: Optional[Path] = None,
+    base_model: Optional[str] = None,
 ) -> dict:
     """Load model, run evaluation, return metrics."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_name = base_model or MODEL_NAME
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path), trust_remote_code=True)
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        model_name,
         torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         device_map="auto" if device == "cuda" else None,
     )
