@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--output", type=str, required=True, help="Output JSON path")
     parser.add_argument("--use-real", action="store_true", help="Use GSM8K+MATH test sets (not training data)")
     parser.add_argument("--base-model", type=str, default=None, help="Base model name (default: Qwen/Qwen2.5-0.5B)")
+    parser.add_argument("--few-shot", type=int, default=0, choices=[0, 8],
+                        help="Number of few-shot exemplars (0=zero-shot, 8=standard GSM8K 8-shot)")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint)
@@ -63,12 +65,19 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    prompt_fn = None
+    if args.few_shot == 8:
+        from src.evaluation.few_shot_exemplars import build_8shot_prompt
+        prompt_fn = build_8shot_prompt
+        logger.info("Using 8-shot chain-of-thought prompting")
+
     logger.info("Evaluating %s with %d problems (Tier 0+1+2, LLM judge ON)...", checkpoint_path, len(sampled))
     metrics = evaluate_checkpoint(
         checkpoint_path,
         sampled,
         output_path=output_path,
         base_model=args.base_model,
+        prompt_fn=prompt_fn,
     )
 
     logger.info("=== RESULTS ===")

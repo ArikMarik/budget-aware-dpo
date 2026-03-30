@@ -1,4 +1,4 @@
-# Iteration 3 — Large Diverse Dataset (Model Collapse)
+# Iteration 3 — Full 3.9M Dataset, Complete Model Collapse (Phase 1)
 
 **Date**: 2026-03-26
 **Status**: COMPLETE — model collapsed (0% accuracy, gibberish output on all epochs)

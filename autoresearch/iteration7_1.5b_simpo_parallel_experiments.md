@@ -1,4 +1,4 @@
-# Iteration 7 — Phase 2: SimPO + 1.5B Model (3 Parallel Experiments)
+# Iteration 7 — 1.5B Model + SimPO, 3 Parallel GPU Experiments (Phase 2)
 
 **Date**: 2026-03-28
 **Branch**: `autoresearch/mar26`

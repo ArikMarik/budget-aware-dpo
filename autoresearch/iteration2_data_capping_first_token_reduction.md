@@ -1,4 +1,4 @@
-# Iteration 2 — Data Capping + Gen-Eval (First Correct Token Direction)
+# Iteration 2 — Data Capping, First Correct Token Reduction but 1-2% Accuracy (Phase 1)
 
 **Date**: 2026-03-26
 **Status**: COMPLETE — both models trained, gen eval done for all epochs

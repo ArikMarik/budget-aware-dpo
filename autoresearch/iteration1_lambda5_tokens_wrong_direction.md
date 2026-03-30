@@ -1,4 +1,4 @@
-# Iteration 1 — Strong Lambda (λ=5.0), Tokens Went Wrong Direction
+# Iteration 1 — λ=5.0, Tokens Increased Instead of Decreased (Phase 1)
 
 **Date**: 2026-03-26
 **Status**: COMPLETE — killed after epoch 2 (overfitting), post-training eval done

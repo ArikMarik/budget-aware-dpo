@@ -1,4 +1,4 @@
-# Iteration 6 — Fair Baseline Comparison (KL=0.01, λ=0)
+# Iteration 6 — Fair Baseline (KL=0.01, No λ), Isolating Budget Effect (Phase 1)
 
 **Date**: 2026-03-27
 **Status**: Launching

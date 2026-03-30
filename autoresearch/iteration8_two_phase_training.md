@@ -1,4 +1,4 @@
-# Iteration 8 — Two-Phase Training (0.5B)
+# Iteration 8 — Two-Phase Training: Accuracy Then Efficiency (Phase 2)
 
 **Date**: 2026-03-28
 **Branch**: `autoresearch/mar26`
