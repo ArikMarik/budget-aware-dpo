@@ -8,7 +8,7 @@ import math
 import os
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Optional, Any, Callable
+from typing import Optional, Any, Callable, Literal
 
 from tqdm import tqdm
 
@@ -36,6 +36,13 @@ from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
+
+BestModelMetric = Literal[
+    "val_loss",
+    "gen_tokens_easy",
+    "gen_tpca",
+    "gen_tokens_easy_with_accuracy_floor",
+]
 
 
 @dataclass
@@ -500,14 +507,35 @@ def save_best_model(
     model: PeftModel,
     tokenizer: PreTrainedTokenizer,
     output_dir: Path,
-    best_val_loss: float,
+    *,
+    best_model_metric: BestModelMetric,
     best_epoch: int,
+    best_epoch_metrics: dict[str, float],
 ) -> None:
     best_model_path = output_dir / "best-model"
     best_model_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(best_model_path))
     tokenizer.save_pretrained(best_model_path)
-    logger.info("Saved best model to %s (val_loss: %.4f, epoch: %d)", best_model_path, best_val_loss, best_epoch)
+    selection_payload = {
+        "best_model_metric": best_model_metric,
+        "best_epoch": best_epoch,
+        "metrics": best_epoch_metrics,
+    }
+    with open(output_dir / "best_model_selection.json", "w") as f:
+        json.dump(selection_payload, f, indent=2)
+
+    logger.info(
+        "Saved best model to %s (metric=%s, epoch=%d). "
+        "val_loss=%.4f, gen/accuracy=%.4f, gen/accuracy_easy=%.4f, gen/avg_tokens_easy=%.1f, gen/tpca=%.1f",
+        best_model_path,
+        best_model_metric,
+        best_epoch,
+        float(best_epoch_metrics.get("val_loss", float("nan"))),
+        float(best_epoch_metrics.get("gen/accuracy", float("nan"))),
+        float(best_epoch_metrics.get("gen/accuracy_easy", float("nan"))),
+        float(best_epoch_metrics.get("gen/avg_tokens_easy", float("nan"))),
+        float(best_epoch_metrics.get("gen/tpca", float("nan"))),
+    )
 
 
 def _init_wandb(config: TrainingConfig, run_name: Optional[str] = None) -> None:
@@ -626,6 +654,8 @@ def train_dpo(
     num_workers: int = 4,
     model_name: Optional[str] = None,
     loss_type: str = "dpo",
+    best_model_metric: BestModelMetric = "val_loss",
+    accuracy_floor: Optional[float] = None,
 ) -> dict:
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -712,6 +742,7 @@ def train_dpo(
     best_val_loss = float("inf")
     best_model_state: Optional[dict] = None
     best_epoch = 0
+    best_epoch_metrics: Optional[dict[str, float]] = None
     early_stopping = EarlyStopping(
         patience=early_stopping_patience,
         threshold=early_stopping_threshold,
@@ -751,8 +782,25 @@ def train_dpo(
         )
         epoch_metrics["gen_metrics"] = gen_metrics
 
-        best_val_loss, best_model_state, best_epoch = _update_best_model(
-            epoch_metrics, epoch, model, best_val_loss, best_model_state, best_epoch
+        # Persist generation metrics into the epoch entry so we can compare epochs later.
+        if metrics_log:
+            metrics_log[-1].update(gen_metrics)
+            metrics_log[-1]["best_model_metric"] = best_model_metric
+            if best_model_metric == "gen_tokens_easy_with_accuracy_floor":
+                metrics_log[-1]["accuracy_floor"] = accuracy_floor
+        else:
+            logger.warning("metrics_log was empty after epoch %d; cannot persist gen metrics.", epoch)
+
+        best_val_loss, best_model_state, best_epoch, best_epoch_metrics = _update_best_model(
+            epoch_metrics=epoch_metrics,
+            epoch=epoch,
+            model=model,
+            best_val_loss=best_val_loss,
+            best_model_state=best_model_state,
+            best_epoch=best_epoch,
+            best_epoch_metrics=best_epoch_metrics,
+            best_model_metric=best_model_metric,
+            accuracy_floor=accuracy_floor,
         )
 
         if epoch % checkpoint_every == 0:
@@ -770,19 +818,67 @@ def train_dpo(
         model.load_state_dict(best_model_state)
         if device != "cuda":
             model = model.to(device)
-        save_best_model(model, tokenizer, output_dir, best_val_loss, best_epoch)
+        save_best_model(
+            model,
+            tokenizer,
+            output_dir,
+            best_model_metric=best_model_metric,
+            best_epoch=best_epoch,
+            best_epoch_metrics=(best_epoch_metrics or {}),
+        )
+    else:
+        logger.warning("No best model state was selected; skipping best-model save.")
 
     model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics_log, f, indent=2)
     logger.info("Training complete. Saved to %s", output_dir)
+
+    with open(output_dir / "summary.json", "w") as f:
+        json.dump(
+            {
+                "config": config.to_dict(),
+                "best_model_metric": best_model_metric,
+                "accuracy_floor": accuracy_floor,
+                "best_epoch": best_epoch,
+                "best_epoch_metrics": best_epoch_metrics,
+                "best_val_loss": best_val_loss,
+            },
+            f,
+            indent=2,
+        )
     return {
         "metrics": metrics_log,
         "config": config.to_dict(),
         "best_val_loss": best_val_loss,
         "best_epoch": best_epoch,
     }
+
+
+def _get_best_value_for_epoch(
+    *,
+    epoch_metrics: dict,
+    best_model_metric: BestModelMetric,
+    accuracy_floor: Optional[float],
+) -> Optional[float]:
+    if best_model_metric == "val_loss":
+        return float(epoch_metrics["val_loss"])
+
+    gen_metrics = epoch_metrics.get("gen_metrics") or {}
+    if best_model_metric == "gen_tokens_easy":
+        return float(gen_metrics["gen/avg_tokens_easy"])
+    if best_model_metric == "gen_tpca":
+        return float(gen_metrics["gen/tpca"])
+    if best_model_metric == "gen_tokens_easy_with_accuracy_floor":
+        if accuracy_floor is None:
+            raise ValueError("--accuracy-floor is required when --best-model-metric=gen_tokens_easy_with_accuracy_floor")
+        acc_easy = float(gen_metrics["gen/accuracy_easy"])
+        if acc_easy < float(accuracy_floor):
+            return None
+        return float(gen_metrics["gen/avg_tokens_easy"])
+
+    raise ValueError(f"Unsupported best_model_metric: {best_model_metric}")
 
 
 def _load_gen_eval_problems(n_easy: int = 50, n_hard: int = 50) -> list[dict]:
@@ -1076,17 +1172,75 @@ def _run_epoch(
 
 
 def _update_best_model(
+    *,
     epoch_metrics: dict,
     epoch: int,
     model: nn.Module,
     best_val_loss: float,
     best_model_state: Optional[dict],
     best_epoch: int,
-) -> tuple[float, Optional[dict], int]:
-    val_loss = epoch_metrics["val_loss"]
+    best_epoch_metrics: Optional[dict[str, float]],
+    best_model_metric: BestModelMetric,
+    accuracy_floor: Optional[float],
+) -> tuple[float, Optional[dict], int, Optional[dict[str, float]]]:
+    val_loss = float(epoch_metrics["val_loss"])
+    candidate_value = _get_best_value_for_epoch(
+        epoch_metrics=epoch_metrics,
+        best_model_metric=best_model_metric,
+        accuracy_floor=accuracy_floor,
+    )
+
+    # Maintain original behavior for reporting even when selecting by a different metric.
     if val_loss < best_val_loss:
         best_val_loss = val_loss
+
+    if candidate_value is None:
+        # Only happens for gen_tokens_easy_with_accuracy_floor when epoch is below floor.
+        logger.info(
+            "Best-model selection skipped epoch %d for metric=%s (accuracy_easy below floor=%.4f). "
+            "val_loss=%.4f, gen/accuracy_easy=%.4f",
+            epoch,
+            best_model_metric,
+            float(accuracy_floor or 0.0),
+            val_loss,
+            float((epoch_metrics.get("gen_metrics") or {}).get("gen/accuracy_easy", float("nan"))),
+        )
+        return best_val_loss, best_model_state, best_epoch, best_epoch_metrics
+
+    should_update = False
+    if best_epoch_metrics is None:
+        should_update = True
+    else:
+        prev_value = _get_best_value_for_epoch(
+            epoch_metrics={"val_loss": best_epoch_metrics.get("val_loss"), "gen_metrics": best_epoch_metrics},
+            best_model_metric=best_model_metric,
+            accuracy_floor=accuracy_floor,
+        )
+        # If prev_value is None (e.g. previous best was invalid under floor), always update.
+        should_update = (prev_value is None) or (float(candidate_value) < float(prev_value))
+
+    if should_update:
+        gen_metrics = epoch_metrics.get("gen_metrics") or {}
+        best_epoch_metrics = {
+            "val_loss": val_loss,
+            "gen/accuracy": float(gen_metrics.get("gen/accuracy", float("nan"))),
+            "gen/accuracy_easy": float(gen_metrics.get("gen/accuracy_easy", float("nan"))),
+            "gen/avg_tokens_easy": float(gen_metrics.get("gen/avg_tokens_easy", float("nan"))),
+            "gen/tpca": float(gen_metrics.get("gen/tpca", float("nan"))),
+        }
         best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         best_epoch = epoch
-        logger.info("New best val_loss: %.4f at epoch %d", best_val_loss, epoch)
-    return best_val_loss, best_model_state, best_epoch
+        logger.info(
+            "New best model by metric=%s at epoch %d (value=%.4f). "
+            "val_loss=%.4f, gen/accuracy=%.4f, gen/accuracy_easy=%.4f, gen/avg_tokens_easy=%.1f, gen/tpca=%.1f",
+            best_model_metric,
+            epoch,
+            float(candidate_value),
+            best_epoch_metrics["val_loss"],
+            best_epoch_metrics["gen/accuracy"],
+            best_epoch_metrics["gen/accuracy_easy"],
+            best_epoch_metrics["gen/avg_tokens_easy"],
+            best_epoch_metrics["gen/tpca"],
+        )
+
+    return best_val_loss, best_model_state, best_epoch, best_epoch_metrics

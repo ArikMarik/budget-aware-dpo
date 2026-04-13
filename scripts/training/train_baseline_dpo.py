@@ -31,6 +31,25 @@ def main():
     parser.add_argument("--run-name", type=str, default=None, help="WandB run name (auto-generated if omitted)")
     parser.add_argument("--model", type=str, default=None, help="Model name/path (default: Qwen/Qwen2.5-0.5B)")
     parser.add_argument("--kl-penalty", type=float, default=0.0, help="KL divergence penalty weight")
+    parser.add_argument(
+        "--best-model-metric",
+        type=str,
+        default="val_loss",
+        choices=[
+            "val_loss",
+            "gen_tokens_easy",
+            "gen_tpca",
+            "gen_tokens_easy_with_accuracy_floor",
+        ],
+        help="Metric used to select the best epoch/checkpoint.",
+    )
+    parser.add_argument(
+        "--accuracy-floor",
+        type=float,
+        default=None,
+        help="Only used with --best-model-metric=gen_tokens_easy_with_accuracy_floor. "
+             "Requires gen/accuracy_easy >= this threshold to be eligible.",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir or str(get_baseline_output_dir()))
@@ -55,6 +74,8 @@ def main():
         compile_model=args.compile_model,
         num_workers=args.num_workers,
         model_name=args.model,
+        best_model_metric=args.best_model_metric,
+        accuracy_floor=args.accuracy_floor,
     )
 
 
