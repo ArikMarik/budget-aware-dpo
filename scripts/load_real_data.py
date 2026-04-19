@@ -6,10 +6,12 @@ Saves training data for DPO preprocessing; holds out test sets for Phase 9 evalu
 
 import argparse
 import json
+from collections import defaultdict
 
 from tqdm import tqdm
 
-from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, REAL_DATASET_PATH
+from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, DATASET_PATH
+from src.data.preprocessing import classify_complexity
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer, verify_correctness
 from src.utils import count_tokens, get_logger, set_seed, setup_global_exception_handler
 
@@ -154,12 +156,62 @@ def load_math_test() -> list[dict]:
     return examples
 
 
+SOURCE_PREFERENCE = {"math": 0, "augmented_math": 1, "gsm8k": 2, "augmented_gsm8k": 3}
+
+def get_source_rank(source: str) -> int:
+    """Lower is better. Returns high default for unknown sources."""
+    return SOURCE_PREFERENCE.get(source.lower(), 999)
+
+
+def build_problem_index(raw_data: list[dict]) -> list[dict]:
+    """Build a problem index by grouping solutions by normalized problem text.
+    
+    For each unique problem:
+    - Assign a unique integer problem_id
+    - Collect all solution token lengths from all sources
+    - Compute average token length
+    - Select data by source preference (math > augmented_math > gsm8k > augmented_gsm8k)
+    - Classify complexity using the average token length
+    - Copy level from similar MATH problem if available
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for ex in raw_data:
+        norm_problem = normalize_problem(ex.get("problem", ""))
+        if norm_problem:
+            groups[norm_problem].append(ex)
+    
+    result = []
+    for problem_id, examples in enumerate(tqdm(groups.values(), desc="Building problem index", unit=" problems")):
+        token_lengths = [ex.get("teacher_token_count", 0) for ex in examples]
+        avg_tokens = sum(token_lengths) / len(token_lengths) if token_lengths else 0
+        
+        examples_sorted = sorted(examples, key=lambda ex: get_source_rank(ex.get("problem_source", "")))
+        primary = examples_sorted[0]
+        
+        complexity, matched_level = classify_complexity(primary, avg_token_length=avg_tokens)
+        
+        level = matched_level or primary.get("level", "")
+        
+        result.append({
+            "problem_id": problem_id,
+            "problem": primary.get("problem", ""),
+            "problem_source": primary.get("problem_source", ""),
+            "level": level,
+            "token_lengths": token_lengths,
+            "avg_token_length": avg_tokens,
+            "complexity": complexity,
+        })
+    
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", default="train", help="OpenMathInstruct split: train_1M, train_2M, train_5M, train")
     parser.add_argument("--limit", type=int, default=None, help="Limit training examples (for quick test)")
     parser.add_argument("--skip-test-sets", action="store_true", help="Skip loading GSM8K/MATH test (faster)")
     parser.add_argument("--test-sets-only", action="store_true", help="Load only GSM8K/MATH test (for Phase 9 evaluation)")
+    parser.add_argument("--no-problem-index", action="store_true", help="Skip building problem index JSON")
     args = parser.parse_args()
 
     DATA_PATH.mkdir(parents=True, exist_ok=True)
@@ -169,11 +221,22 @@ def main():
         train_data = load_openmath_instruct(split=args.split, limit=args.limit)
         logger.info("Loaded %s training examples", len(train_data))
 
-        REAL_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(REAL_DATASET_PATH, "w", encoding="utf-8") as f:
+        DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DATASET_PATH, "w", encoding="utf-8") as f:
             for ex in train_data:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-        logger.info("Saved to %s", REAL_DATASET_PATH)
+        logger.info("Saved to %s", DATASET_PATH)
+
+        if not args.no_problem_index:
+            logger.info("Building problem index...")
+            problem_index = build_problem_index(train_data)
+            logger.info("Built index for %s unique problems", len(problem_index))
+            
+            DATA_PATH.mkdir(parents=True, exist_ok=True)
+            problem_index_path = DATA_PATH / "problem_index.json"
+            with open(problem_index_path, "w", encoding="utf-8") as f:
+                json.dump(problem_index, f, ensure_ascii=False)
+            logger.info("Saved problem index to %s", problem_index_path)
 
     if args.test_sets_only or not args.skip_test_sets:
         logger.info("Loading GSM8K test...")
