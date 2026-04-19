@@ -23,8 +23,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-from src.evaluation.answer_extraction import extract_answer, normalize_answer, verify_correctness
-from src.evaluation.math_grader import verify_answer
+from src.evaluation.answer_extraction import verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
 
 set_seed(42)
@@ -32,8 +31,9 @@ set_seed(42)
 logger = get_logger(__name__)
 
 # Configurable thresholds (env or defaults); Qwen tokenizer
-EASY_TOKEN_THRESHOLD = int(os.environ.get("EASY_TOKEN_THRESHOLD", "70"))
-HARD_TOKEN_THRESHOLD = int(os.environ.get("HARD_TOKEN_THRESHOLD", "130"))
+EASY_TOKEN_THRESHOLD = int(os.environ.get("EASY_TOKEN_THRESHOLD", 140))
+HARD_TOKEN_THRESHOLD = int(os.environ.get("HARD_TOKEN_THRESHOLD", 250))
+REJECTION_REASONS = {'unknown': -1, 'length': 0, 'incorrect': 1}
 
 _VALID_MATH_LEVELS = {"1", "2", "3", "4", "5"}
 
@@ -64,40 +64,156 @@ def _verify_correctness(example: dict) -> bool:
     )
 
 
-def classify_complexity(example: dict) -> int:
+def _normalize_level(level: Any) -> str | None:
+    """Normalize level to numeric string, handling formats like 'Level 2', '2', 2, 'Level ?', etc."""
+    if level is None:
+        return None
+    level_str = str(level).strip()
+    # Skip unknown/invalid levels
+    if "?" in level_str or "unknown" in level_str.lower():
+        return None
+    # Extract numeric part
+    for num in ("1", "2", "3", "4", "5"):
+        if num in level_str:
+            return num
+    return None
+
+
+# Similarity search components (lazy loaded)
+_similarity_index: Any = None
+_similarity_metadata: list[dict] | None = None
+_similarity_model: Any = None
+
+
+def _load_similarity_index():
+    """Lazy load the similarity index for augmented MATH problems."""
+    global _similarity_index, _similarity_metadata, _similarity_model
+
+    if _similarity_index is not None:
+        return
+
+    try:
+        import faiss
+        from sentence_transformers import SentenceTransformer
+
+        index_path = Path(__file__).parent.parent.parent / "data" / "math_problem_index"
+        if not index_path.exists():
+            logger.warning(f"Similarity index not found at {index_path}")
+            return
+
+        # Load FAISS index
+        _similarity_index = faiss.read_index(str(index_path / "index.faiss"))
+
+        # Load metadata
+        _similarity_metadata = []
+        with open(index_path / "metadata.jsonl", "r") as f:
+            for line in f:
+                _similarity_metadata.append(json.loads(line))
+
+        # Load embedding model
+        config_path = index_path / "config.json"
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+                model_name = config.get("embedding_model", "sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
+        else:
+            model_name = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+
+        _similarity_model = SentenceTransformer(model_name)
+
+        logger.info(f"Loaded similarity index with {_similarity_index.ntotal} problems")
+    except Exception as e:
+        logger.warning(f"Failed to load similarity index: {e}")
+        _similarity_index = None
+        _similarity_metadata = None
+        _similarity_model = None
+
+
+def find_similar_math_problem(problem: str, threshold: float = 0.7) -> tuple[int | None, str | None]:
     """
-    Canonical decision flow (PRD §3.1):
-    1. GSM8K: always C=0 (immediate; no further heuristics)
-    2. MATH: level heuristic when available; else token fallback
-    3. Unknown source: token heuristic only; default Easy if ambiguous
+    Find similar original MATH problem for an augmented problem.
+    Returns (complexity, level) tuple - complexity is int or None, level is str or None.
+    """
+    global _similarity_index, _similarity_metadata, _similarity_model
+
+    if _similarity_index is None:
+        _load_similarity_index()
+
+    if _similarity_index is None or _similarity_metadata is None or _similarity_model is None:
+        return None, None
+
+    try:
+        # Encode the problem
+        import numpy as np
+        import faiss
+
+        query = _similarity_model.encode([problem], convert_to_numpy=True)
+        faiss.normalize_L2(query)
+
+        # Search
+        scores, indices = _similarity_index.search(query, k=1)
+
+        if scores[0][0] >= threshold:
+            idx = indices[0][0]
+            if idx >= 0 and idx < len(_similarity_metadata):
+                meta = _similarity_metadata[idx]
+                return meta.get("complexity"), meta.get("level")
+    except Exception as e:
+        logger.warning(f"Similarity search failed: {e}")
+
+    return None, None
+
+
+def classify_complexity(example: dict, avg_token_length: float | None = None) -> tuple[int, str | None]:
+    """
+    Canonical decision flow:
+    1. Exact match: same problem text already classified → reuse
+    2. GSM8K: always C=0 (immediate; no further heuristics)
+    3. MATH with level: level-based classification
+    4. Augmented MATH: similarity search → find similar original → use its complexity
+    5. Unknown: token fallback → default Easy
+    
+    Returns (complexity, matched_level) tuple. matched_level is the level copied from
+    similar MATH problem, or the original level if available, or None if no match.
     """
     source = str(example.get("problem_source", "")).lower()
+    problem = example.get("problem", "")
 
-    # 1. SOURCE CHECK (GSM8K) — invariant: always Easy
-    if "gsm" in source or "gsm8k" in source:
-        return 0
+    # 1. GSM8K / augmented_gsm8k — invariant: always C=0 (per requirement)
+    if "gsm" in source:
+        return 0, None
 
-    # 2. SOURCE CHECK (MATH)
-    if "math" in source:
-        level = example.get("level")
-        level_str = str(level).strip() if level is not None else ""
+    # 2. Original MATH with known level
+    if source == "math":
+        level_str = _normalize_level(example.get("level"))
         if level_str in _VALID_MATH_LEVELS:
             if level_str in ("1", "2"):
-                return 0
+                return 0, level_str
             if level_str in ("4", "5"):
-                return 1
-            # Level 3: fall through to token fallback
+                return 1, level_str
+            # Level 3: similarity search first, then token fallback
+            if level_str == "3" and problem:
+                complexity, matched_level = find_similar_math_problem(problem, threshold=0.7)
+                if complexity is not None:
+                    return complexity, matched_level
+            # No similar match → token fallback using HARD_TOKEN_THRESHOLD
+            tokens = avg_token_length if avg_token_length is not None else _get_teacher_token_count(example)
+            return (1 if tokens > HARD_TOKEN_THRESHOLD else 0), level_str
 
-    # Level missing or invalid: use token fallback / UNKNOWN SOURCE — token heuristic only
-    tokens = _get_teacher_token_count(example)
-    if tokens < EASY_TOKEN_THRESHOLD:
-        return 0
+    # 3. Augmented MATH - use similarity search
+    if source == "augmented_math" and problem:
+        complexity, matched_level = find_similar_math_problem(problem, threshold=0.7)
+        if complexity is not None:
+            return complexity, matched_level
+
+    # 4. Unknown source: token fallback only for truly unknown sources
+    tokens = avg_token_length if avg_token_length is not None else _get_teacher_token_count(example)
     if tokens > HARD_TOKEN_THRESHOLD:
-        return 1
-    return 0  # Ambiguous medium → default Easy
+        return 1, None
+    return 0, None  # Default Easy
 
 
-def label_preference(example: dict, complexity: int) -> tuple[str, str | None]:
+def label_preference(example: dict, complexity: int) -> tuple[str, int | None]:
     """
     Returns "preferred" or "rejected" (witt rejection reason) for this solution.
     Uses Qwen tokenizer and same thresholds (70/130) as classify_complexity.
@@ -106,169 +222,75 @@ def label_preference(example: dict, complexity: int) -> tuple[str, str | None]:
     tokens = _get_teacher_token_count(example)
 
     if not correct:
-        return "rejected", "incorrect"
+        return "rejected", REJECTION_REASONS["incorrect"]
 
     if complexity == 0:  # Easy
         if tokens <= EASY_TOKEN_THRESHOLD:
             return "preferred", None
-        return "rejected", "length"
+        return "rejected", REJECTION_REASONS["length"]
 
     # Hard
     if tokens >= HARD_TOKEN_THRESHOLD:
         return "preferred", None
-    return "rejected", "length"
+    return "rejected", REJECTION_REASONS["length"]
 
 
-def _make_short_answer(solution: str, expected: str = "") -> str:
+def build_dpo_pairs(raw_data: list[dict]) -> list[dict]:
     """
-    Create short answer string. Use when solution is correct (or use expected for correct minimal).
-    Only call when we have a correct solution or expected_answer for synthesizing preferred.
-    """
-    ans = extract_answer(solution) or (expected.strip() if expected else "")
-    if ans:
-        return f"The answer is {ans}."
-    short_solution_length = 100
-    if len(solution) <= short_solution_length:
-        return solution
-    return solution[: short_solution_length // 2] + " ... " + solution[-short_solution_length // 2 :]
+    Group by problem and build preferred/rejected pairs.
+    Returns list of pairs with: problem, chosen, rejected, complexity, rejection_reason, chosen_length, rejected_length, problem_id.
 
-
-def _make_verbose_answer(short_solution: str) -> str:
+    Token counts are stored for training-time filtering by length_ratio.
+    problem_id is a unique integer per unique problem for stratified split.
     """
-    Create verbose (redundant) version from short solution. For Easy: rejected = verbose.
-    Expands to 6-7 sentences with CoT indicators (first, then, later, therefore, etc.).
-    """
-    ans = extract_answer(short_solution) or ""
-    if not ans and short_solution.strip():
-        ans = short_solution.strip().rstrip(".")
-    if not ans:
-        return short_solution
-    return (
-        "Let me think step by step. "
-        "First, I need to understand the problem. "
-        "Then, I will work through the solution carefully. "
-        "Later, I will verify each step. "
-        "So we proceed methodically. "
-        "Therefore, after considering all the details, "
-        f"the answer is {ans}."
-    )
-
-
-def _make_long_reasoning(short_solution: str, expected: str, problem: str) -> str:
-    """
-    Synthesize long CoT-style reasoning from short answer. For Hard: preferred = long.
-    Template-based expansion with 6-7 sentences and CoT indicators.
-    """
-    ans = extract_answer(short_solution) or (expected.strip() if expected else "")
-    if not ans:
-        return short_solution
-    # Truncate problem for context if very long
-    prob_snippet = (problem[:200] + "...") if len(problem) > 200 else problem
-    return (
-        "Let me work through this step by step. "
-        f"First, we examine the problem: {prob_snippet} "
-        "Then, we identify the key quantities and relationships. "
-        "So we set up the necessary equations or reasoning. "
-        "Therefore, after applying the appropriate method, "
-        "we obtain the result. "
-        f"Thus, the answer is {ans}."
-    )
-
-
-def build_dpo_pairs(raw_data: list[dict]) -> tuple[list[dict], list[dict], int]:
-    """
-    Group by (problem, complexity) and build preferred/rejected pairs.
-    Returns (real_pairs, synthesized_pairs, skipped_groups).
-    Each pair has: problem, chosen, rejected, complexity, rejection_reason.
-    """
-    groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    groups: dict[str, list[dict]] = defaultdict(list)
     for ex in tqdm(raw_data, desc="Classifying & labeling", unit=" examples"):
-        c = classify_complexity(ex)
+        c, _ = classify_complexity(ex)
         label, rejection_reason = label_preference(ex, c)
-        groups[(ex["problem"], c)].append({**ex, "complexity": c, "label": label, "rejection_reason": rejection_reason})
+        tc = _get_teacher_token_count(ex)
+        groups[ex["problem"]].append({**ex, "complexity": c, "label": label, "rejection_reason": rejection_reason, "_token_count": tc})
 
-    real_pairs: list[dict] = []
-    synthesized_pairs: list[dict] = []
-    skipped_groups = 0
+    # Assign unique problem_id to each unique problem
+    unique_problems = list(groups.keys())
+    problem_to_id = {prob: idx for idx, prob in enumerate(unique_problems)}
 
-    for (problem, complexity), items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
-        preferred = [x for x in items if x["label"] == "preferred"]
-        rejected = [x for x in items if x["label"] == "rejected"]
-        expected = items[0].get("expected_answer", "") if items else ""
+    print(f'{len(unique_problems) = }')
+    print(f'{len(problem_to_id) = }')
+    print(f'{max(problem_to_id.values()) = }')
+    skipped = 0
 
-        # Natural pairs: both preferred and rejected exist
-        # If rejection reason is correctness, the pair teaches correctness not length — useless for our goal.
-        # Synthesize a length-based pair instead (complexity=0: short preferred, verbose rejected;
-        # complexity=1: long preferred, short rejected).
+    pairs: list[dict] = []
+
+    for (problem, c), items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
+        preferred, rejected = [], []
+        for x in items:
+            (preferred if x["label"] == "preferred" else rejected).append(x)
+
+        problem_id = problem_to_id.get(problem, 0)
+        complexity = items[0]["complexity"]
+
         if preferred and rejected:
             for pw in preferred:
                 for rj in rejected:
-                    # if rj["rejection_reason"] == "incorrect":
-                    #     logger.info(f'{"Encountered an INCORRECT answer":#^100}')
-                    #     expected = rj.get("expected_answer", "").strip()
-                    #     pred = extract_answer(rj.get("generated_solution", "")) # TODO - verify this
-                    #     logger.info(f'Prediction: {normalize_answer(pred)}\n Expected: {normalize_answer(expected)}')
-
-                    #     logger.info(f'{"Encountered an INCORRECT answer":#^100}')
-                    #     # Replace with synthesized length-based pair
-                    #     short = _make_short_answer(pw["generated_solution"], expected)
-                    
-                    #     synthesized_pairs.append({
-                    #         "problem": problem,
-                    #         "chosen": short if complexity == 0 else pw["generated_solution"],
-                    #         "rejected": short if complexity == 1 else _make_verbose_answer(short),
-                    #         "complexity": complexity,
-                    #         "rejection_reason": rj["rejection_reason"],
-                    #     })
-                    # else:
-                    
-                    real_pairs.append({
+                    pairs.append({
                         "problem": problem,
+                        "problem_id": problem_id,
                         "chosen": pw["generated_solution"],
                         "rejected": rj["generated_solution"],
                         "complexity": complexity,
                         "rejection_reason": rj["rejection_reason"],
+                        "chosen_length": pw["_token_count"],
+                        "rejected_length": rj["_token_count"],
                     })
-            continue
-        
-        # TODO - add this if we dont have enough real pairs
-        # Synthetic: preferred-only
-        # if preferred and not rejected:
-        #     for ex in preferred:
-        #         sol = ex["generated_solution"] # TODO - this isn't the solution per answer - FIX IT!!!
-        #         exp = ex.get("expected_answer", expected)
-        #         synthesized_pairs.append({
-        #             "problem": problem,
-        #             "chosen": sol,
-        #             "rejected": _make_verbose_answer(sol) if complexity == 0 else _make_short_answer(sol, exp),
-        #             "complexity": complexity,
-        #             "rejection_reason": "length",
-        #         })
+        else:
+            skipped += 1
 
-        # Synthetic: rejected-only — synthesize minimal correct as preferred
-        # Complexity=0: preferred = short; complexity=1: preferred = long (synthesize CoT)
-        # TODO - add this if we dont have enough real pairs
-        # if rejected and not preferred:
-        #     if not expected or not str(expected).strip():
-        #         skipped_groups += 1
-        #         continue
-        #     for rj in rejected:
-        #         if complexity == 0:
-        #             preferred_synth = _make_short_answer("", expected)
-        #         else:
-        #             preferred_synth = _make_long_reasoning("", expected, problem)
-        #         synthesized_pairs.append({
-        #             "problem": problem,
-        #             "chosen": preferred_synth,
-        #             "rejected": rj["generated_solution"],
-        #             "complexity": complexity,
-        #             "rejection_reason": "correctness",
-        #         })
+    print(f'{skipped = }')
+    print(f'{len(pairs) = }')
 
+    logger.info(f'Created a total of {len(pairs)} pairs')
 
-    logger.info(f'{("Created a total of " + str(len(synthesized_pairs)) + " synthesized pairs"):#^100}')
-
-    return real_pairs, synthesized_pairs, skipped_groups
+    return pairs
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -285,10 +307,11 @@ def load_jsonl(path: Path) -> list[dict]:
 
 
 def split_pairs_by_problem(
-    pairs: list[dict],
+    pairs: list[dict] | dict,
     val_split: float,
     seed: int = 42,
-) -> tuple[list[dict], list[dict]]:
+    filtered_indices: list[int] | None = None,
+) -> tuple[list[int], list[int]] | tuple[list[dict], list[dict]]:
     """
     Split pairs into train/val by unique problem to prevent data leakage.
     Ensures the same problem doesn't appear in both sets.
@@ -300,100 +323,231 @@ def split_pairs_by_problem(
 
     set_seed(seed)
 
-    problem_to_pairs: dict[str, list[dict]] = defaultdict(list)
-    for p in pairs:
-        problem_to_pairs[p["problem"]].append(p)
 
-    unique_problems = list(problem_to_pairs.keys())
-    problem_complexities = []
-    for prob in unique_problems:
-        prob_pairs = problem_to_pairs[prob]
-        comps = [p.get("complexity", 0) for p in prob_pairs]
-        problem_complexities.append(max(set(comps), key=comps.count) if comps else 0)
+    if isinstance(pairs, dict):
+        if filtered_indices is None:
+            filtered_indices = np.arange(len(pairs)).tolist()
+        problem_ids = pairs["problem_ids"].numpy()[filtered_indices]
+        complexities = pairs["complexities"].numpy()[filtered_indices]
+    else: # TODO - deprecate the list[dict] options
+        problem_ids, complexities = [], []
+        for i, pair in enumerate(pairs):
+            if filtered_indices and i not in filtered_indices:
+                continue
 
-    problem_complexities = np.array(problem_complexities)
-    # TODO - make sure problems are balanced enough
-    train_problems, val_problems = train_test_split(
+            problem_ids.append(pair["problem_ids"])
+            complexities.append(pair["complexities"])
+
+        problem_ids = np.array(problem_ids)
+        complexities = np.array(complexities)
+
+        if filtered_indices is None:
+                filtered_indices = np.arange(len(pairs)).tolist()
+
+    # Get unique problems
+    unique_problems = np.unique(problem_ids)
+
+    # Build problem -> complexity mapping (pick first sample's complexity)
+    problem_to_complexity = {}
+    for pid in unique_problems:
+        first_idx = np.where(problem_ids == pid)[0][0]
+        problem_to_complexity[pid] = complexities[first_idx]
+
+    problem_complexities = np.array([problem_to_complexity[p] for p in unique_problems])
+
+    # Stratified split
+    unique_train_problem_ids, unique_val_problem_ids = train_test_split(
         unique_problems,
         test_size=val_split,
         stratify=problem_complexities,
         random_state=seed,
     )
 
-    train_problems_set = set(train_problems)
-    val_problems_set = set(val_problems)
+    # Single loop - assign to train or val
+    train_indices = []
+    val_indices = []
+    for i, pid in enumerate(problem_ids):
+        if pid in unique_val_problem_ids:
+            if isinstance(pairs, dict):
+                val_indices.append(filtered_indices[i])
+            else: # TODO - deprecate
+                val_indices.append(pairs[filtered_indices[i]]) # NOT indices, but the actual pairs (temporary)
+        else:
+            if isinstance(pairs, dict):
+                train_indices.append(filtered_indices[i])
+            else: # TODO - deprecate
+                train_indices.append(pairs[filtered_indices[i]]) # NOT indices, but the actual pairs (temporary)
 
-    train_pairs = [p for p in pairs if p["problem"] in train_problems_set]
-    val_pairs = [p for p in pairs if p["problem"] in val_problems_set]
+    return train_indices, val_indices
 
-    return train_pairs, val_pairs
+
+def compute_pair_length_ratio(pair: dict[str, Any]) -> float | None:
+    rejection_reason = pair['rejection_reason']
+    if rejection_reason != REJECTION_REASONS['length']:
+        return None
+
+    complexity = pair["complexity"]
+    chosen_length = pair["chosen_length"]
+    rejected_length = pair["rejected_length"]
+
+    if complexity == 0:
+        if chosen_length > 0:
+            return rejected_length / chosen_length
+    else:
+        if rejected_length > 0:
+            return chosen_length / rejected_length
+    return 0.0
 
 
 def compute_statistics(
-    real_pairs: list[dict],
-    synthesized_pairs: list[dict],
-    skipped_groups: int,
+    pairs: list[dict],
 ) -> dict[str, Any]:
-    """Compute full statistics per spec (Section 4)."""
-    all_pairs = real_pairs + synthesized_pairs
-    total = len(all_pairs)
+    """Compute full statistics per spec (Section 4), including length ratio histogram."""
+    total = len(pairs)
 
     if total == 0:
         return {
             "easy_token_threshold": EASY_TOKEN_THRESHOLD,
             "hard_token_threshold": HARD_TOKEN_THRESHOLD,
-            "total_real_pairs": 0,
-            "total_synthesized_pairs": 0,
             "total_pairs": 0,
-            "skipped_groups": skipped_groups,
         }
 
     # Single pass over all_pairs with tqdm
-    pairs_iter = tqdm(all_pairs, desc="Computing statistics", unit=" pairs")
+    pairs_iter = tqdm(pairs, desc="Computing statistics", unit=" pairs")
 
     rej_correctness = 0
     rej_length = 0
-    easy = 0
-    hard = 0
+    count_correct_easy = 0
+    count_correct_hard = 0
+    count_incorrect_easy = 0
+    count_incorrect_hard = 0
+    chosen_length_sum_easy = 0
+    rejected_length_sum_easy = 0
+    chosen_length_sum_hard = 0
+    rejected_length_sum_hard = 0
+
+    # For histograms
+    ratios_easy = []
+    ratios_hard = []
+    pairs_per_problem: dict[int, int] = defaultdict(int)
+
     for p in pairs_iter:
-        rr = p.get("rejection_reason")
-        if rr == "correctness":
+        pairs_per_problem[p["problem_id"]] += 1
+        rejection_reason = p["rejection_reason"]
+        complexity = p["complexity"]
+
+        if rejection_reason == REJECTION_REASONS['incorrect']:
             rej_correctness += 1
-        elif rr == "length":
+            if complexity == 0:
+                count_incorrect_easy += 1
+            else:
+                count_incorrect_hard += 1
+        elif rejection_reason == REJECTION_REASONS['length']:
             rej_length += 1
-        c = p.get("complexity", 0)
-        if c == 0:
-            easy += 1
+
+            chosen_length = p["chosen_length"]
+            rejected_length = p["rejected_length"]
+
+            if complexity == 0:
+                count_correct_easy += 1
+                chosen_length_sum_easy += chosen_length
+                rejected_length_sum_easy += rejected_length
+                ratios_easy.append(compute_pair_length_ratio(p))
+            else:
+                count_correct_hard += 1
+                chosen_length_sum_hard += chosen_length
+                rejected_length_sum_hard += rejected_length
+                ratios_hard.append(compute_pair_length_ratio(p))
         else:
-            hard += 1
+            raise ValueError('All pairs must be rejected by either incorrect/length')
 
-    rej_correctness_real = sum(1 for p in real_pairs if p.get("rejection_reason") == "correctness")
-    rej_correctness_synth = sum(1 for p in synthesized_pairs if p.get("rejection_reason") == "correctness")
-    rej_length_real = sum(1 for p in real_pairs if p.get("rejection_reason") == "length")
-    rej_length_synth = sum(1 for p in synthesized_pairs if p.get("rejection_reason") == "length")
+    avg_chosen_length_easy = chosen_length_sum_easy / count_correct_easy if count_correct_easy > 0 else 0
+    avg_rejected_length_easy = rejected_length_sum_easy / count_correct_easy if count_correct_easy > 0 else 0
+    avg_chosen_length_hard = chosen_length_sum_hard / count_correct_hard if count_correct_hard > 0 else 0
+    avg_rejected_length_hard = rejected_length_sum_hard / count_correct_hard if count_correct_hard > 0 else 0
+    avg_length_ratio_easy = sum(ratios_easy) / len(ratios_easy) if ratios_easy else 0
+    avg_length_ratio_hard = sum(ratios_hard) / len(ratios_hard) if ratios_hard else 0
 
-    # Token stats (avg_preferred_tokens, avg_rejected_tokens) skipped for speed.
-    # Run separately in parallel with training if needed.
+    # Histogram bins for length ratio
+    histogram_edges = [1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 5.5]
+    histogram_bins = []
+    for i, edge in enumerate(histogram_edges):
+        if i == 0:
+            start = 0
+            end = edge
+        elif i == len(histogram_edges)-1:
+            start = edge
+            end = float('inf')
+        else:
+            start = histogram_edges[i-1]
+            end = edge
+
+        histogram_bins.append((start, end))
+
+    def compute_histogram(ratios: list[float] | list[int], bins: list[tuple[float, float]]) -> dict:
+        counts = []
+        for start_bin, end_bin in bins:
+            count = sum(1 for r in ratios if start_bin <= r < end_bin)
+            counts.append(count)
+        return {"bins": bins, "counts": counts}
+
+    def compute_reverse_cumulative(histogram: dict) -> dict:
+        bins, counts = histogram['bins'], histogram['counts']
+        result = {}
+        total = 0
+        biggest_end = bins[-1][-1]
+        for i, (start_bin, end_bin) in enumerate(bins[::-1], start=1):
+            total += counts[-i]
+            result[f"ratio_gte_[{start_bin}, {biggest_end})"] = total
+        return result
+
+    # Pairs-per-problem histogram
+    problem_pair_counts = sorted(pairs_per_problem.values())
+    pairs_per_problem_bins = [(1, 2), (2, 5), (5, 10), (10, 20), (20, 50), (50, 100), (100, 200), (200, float('inf'))]
+    pairs_per_problem_histogram = compute_histogram(problem_pair_counts, pairs_per_problem_bins)
+
+    histogram_easy = compute_histogram(ratios_easy, histogram_bins) if ratios_easy else {"bins": histogram_bins, "counts": [0] * len(histogram_bins)}
+    histogram_hard = compute_histogram(ratios_hard, histogram_bins) if ratios_hard else {"bins": histogram_bins, "counts": [0] * len(histogram_bins)}
+    cumulative_easy = compute_reverse_cumulative(histogram_easy) if ratios_easy else {f"ratio_gte_{b}": 0 for b in histogram_bins}
+    cumulative_hard = compute_reverse_cumulative(histogram_hard) if ratios_hard else {f"ratio_gte_{b}": 0 for b in histogram_bins}
 
     return {
         "easy_token_threshold": EASY_TOKEN_THRESHOLD,
         "hard_token_threshold": HARD_TOKEN_THRESHOLD,
-        "total_real_pairs": len(real_pairs),
-        "total_synthesized_pairs": len(synthesized_pairs),
         "total_pairs": total,
-        "real_pairs_pct": round(100 * len(real_pairs) / total, 2),
-        "synthesized_pairs_pct": round(100 * len(synthesized_pairs) / total, 2),
         "rejected_by_correctness": rej_correctness,
         "rejected_by_length": rej_length,
         "rejected_by_correctness_pct": round(100 * rej_correctness / total, 2),
         "rejected_by_length_pct": round(100 * rej_length / total, 2),
-        "rejected_by_correctness_real": rej_correctness_real,
-        "rejected_by_correctness_synthesized": rej_correctness_synth,
-        "rejected_by_length_real": rej_length_real,
-        "rejected_by_length_synthesized": rej_length_synth,
-        "easy_pairs": easy,
-        "hard_pairs": hard,
-        "easy_pairs_pct": round(100 * easy / total, 2),
-        "hard_pairs_pct": round(100 * hard / total, 2),
-        "skipped_groups": skipped_groups,
+        "easy_pairs": count_correct_easy + count_incorrect_easy,
+        "hard_pairs": count_correct_hard + count_incorrect_hard,
+        "correct_easy_pairs": count_correct_easy,
+        "correct_hard_pairs": count_correct_hard,
+        "incorrect_easy_pairs": count_incorrect_easy,
+        "incorrect_hard_pairs": count_incorrect_hard,
+        "correct_easy_pairs_pct": round(100 * count_correct_easy / rej_length, 2),
+        "correct_hard_pairs_pct": round(100 * count_correct_hard / rej_length, 2),
+        "incorrect_easy_pairs_pct": round(100 * count_incorrect_easy / rej_correctness, 2),
+        "incorrect_hard_pairs_pct": round(100 * count_incorrect_hard / rej_correctness, 2),
+        "avg_chosen_length_easy": round(avg_chosen_length_easy, 2),
+        "avg_rejected_length_easy": round(avg_rejected_length_easy, 2),
+        "avg_chosen_length_hard": round(avg_chosen_length_hard, 2),
+        "avg_rejected_length_hard": round(avg_rejected_length_hard, 2),
+        "avg_length_ratio_easy": round(avg_length_ratio_easy, 2),
+        "avg_length_ratio_hard": round(avg_length_ratio_hard, 2),
+        "length_ratio_histogram": {
+            "complexity_easy": histogram_easy,
+            "complexity_hard": histogram_hard,
+        },
+        "length_ratio_cumulative": {
+            "complexity_easy": cumulative_easy,
+            "complexity_hard": cumulative_hard,
+        },
+        "pairs_per_problem": {
+            "unique_problems": len(pairs_per_problem),
+            "avg_pairs_per_problem": round(total / len(pairs_per_problem), 2),
+            "max_pairs_per_problem": max(problem_pair_counts),
+            "min_pairs_per_problem": min(problem_pair_counts),
+            "histogram": pairs_per_problem_histogram,
+        },
     }
