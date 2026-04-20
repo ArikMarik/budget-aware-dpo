@@ -172,7 +172,7 @@ def classify_complexity(example: dict, avg_token_length: float | None = None) ->
     3. MATH with level: level-based classification
     4. Augmented MATH: similarity search → find similar original → use its complexity
     5. Unknown: token fallback → default Easy
-    
+
     Returns (complexity, matched_level) tuple. matched_level is the level copied from
     similar MATH problem, or the original level if available, or None if no match.
     """
@@ -213,6 +213,7 @@ def classify_complexity(example: dict, avg_token_length: float | None = None) ->
     return 0, None  # Default Easy
 
 
+# TODO - improve the logic (maybe use tokens-length quantiles per problem (based on complexity))
 def label_preference(example: dict, complexity: int) -> tuple[str, int | None]:
     """
     Returns "preferred" or "rejected" (witt rejection reason) for this solution.
@@ -235,33 +236,76 @@ def label_preference(example: dict, complexity: int) -> tuple[str, int | None]:
     return "rejected", REJECTION_REASONS["length"]
 
 
-def build_dpo_pairs(raw_data: list[dict]) -> list[dict]:
+def load_problem_index(path: Path | str) -> dict[str, dict]:
+    """Load problem index from JSON and build problem_text -> problem data mapping."""
+    with open(path) as f:
+        index = json.load(f)
+    return {item["problem"]: item for item in index}
+
+
+def build_dpo_pairs(
+    raw_data: list[dict],
+    problem_index_path: Path | str | None = None,
+    strict: bool = False,
+) -> list[dict]:
     """
     Group by problem and build preferred/rejected pairs.
     Returns list of pairs with: problem, chosen, rejected, complexity, rejection_reason, chosen_length, rejected_length, problem_id.
 
     Token counts are stored for training-time filtering by length_ratio.
     problem_id is a unique integer per unique problem for stratified split.
+
+    Args:
+        raw_data: List of examples with problem, generated_solution, etc.
+        problem_index_path: Path to problem_index.json. If provided, uses existing IDs and complexity.
+        strict: If True, raises error when problem not found in index. If False, generates new IDs.
     """
+    problem_index: dict[str, dict] | None = None
+    if problem_index_path:
+        problem_index = load_problem_index(problem_index_path)
+        logger.info(f"Loaded problem index with {len(problem_index)} problems")
+
     groups: dict[str, list[dict]] = defaultdict(list)
     for ex in tqdm(raw_data, desc="Classifying & labeling", unit=" examples"):
-        c, _ = classify_complexity(ex)
+        problem = ex.get("problem", "")
+        
+        if problem_index:
+            problem_data = problem_index.get(problem)
+            if problem_data is None:
+                if strict:
+                    raise ValueError(f"Problem not found in problem index: {problem[:50]}...")
+                # Fall back to generate new ID
+                c, _ = classify_complexity(ex)
+            else:
+                c = problem_data.get("complexity", 0)
+        else:
+            c, _ = classify_complexity(ex)
+        
         label, rejection_reason = label_preference(ex, c)
         tc = _get_teacher_token_count(ex)
-        groups[ex["problem"]].append({**ex, "complexity": c, "label": label, "rejection_reason": rejection_reason, "_token_count": tc})
+        groups[problem].append({**ex, "complexity": c, "label": label, "rejection_reason": rejection_reason, "_token_count": tc})
 
     # Assign unique problem_id to each unique problem
     unique_problems = list(groups.keys())
-    problem_to_id = {prob: idx for idx, prob in enumerate(unique_problems)}
-
-    print(f'{len(unique_problems) = }')
-    print(f'{len(problem_to_id) = }')
-    print(f'{max(problem_to_id.values()) = }')
-    skipped = 0
+    if problem_index:
+        problem_to_id = {}
+        existing_ids = []
+        for prob in unique_problems:
+            if prob in problem_index:
+                problem_to_id[prob] = problem_index[prob]["problem_id"]
+                existing_ids.append(problem_index[prob]["problem_id"])
+        # Add new IDs for problems not in index
+        max_existing_id = max(existing_ids) if existing_ids else -1
+        for prob in unique_problems:
+            if prob not in problem_to_id:
+                max_existing_id += 1
+                problem_to_id[prob] = max_existing_id
+    else:
+        problem_to_id = {prob: idx for idx, prob in enumerate(unique_problems)}
 
     pairs: list[dict] = []
 
-    for (problem, c), items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
+    for problem, items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
         preferred, rejected = [], []
         for x in items:
             (preferred if x["label"] == "preferred" else rejected).append(x)
@@ -282,11 +326,6 @@ def build_dpo_pairs(raw_data: list[dict]) -> list[dict]:
                         "chosen_length": pw["_token_count"],
                         "rejected_length": rj["_token_count"],
                     })
-        else:
-            skipped += 1
-
-    print(f'{skipped = }')
-    print(f'{len(pairs) = }')
 
     logger.info(f'Created a total of {len(pairs)} pairs')
 
