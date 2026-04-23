@@ -2,14 +2,14 @@
 4-Way Augmentation Pipeline: Complexity classification and DPO preference labeling.
 
 Complexity Flag C:
-- C=0 (Easy): GSM8K (always), MATH level 1-2, or low token count
-- C=1 (Hard): MATH level 4-5 or high token count
+- C=0 (Easy): GSM8K (always), MATH level 1, or low token count
+- C=1 (Hard): MATH level 2-5 or high token count
 
 GSM8K invariant: Always C=0; never affected by level or token heuristics.
 
 Preference Labeling:
 - Easy-Correct: Short direct paths = Preferred; verbose redundant = Rejected
-- Hard-Correct: Detailed CoT = Preferred; oversimplified = Rejected
+- Hard-Correct: Shorter-safe CoT = Preferred; verbose = Rejected
 - Incorrect: Logically flawed = Rejected (all levels)
 
 See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessing_and_wandb.md.
@@ -17,6 +17,7 @@ See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessin
 
 import json
 import os
+import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -31,11 +32,111 @@ set_seed(42)
 logger = get_logger(__name__)
 
 # Configurable thresholds (env or defaults); Qwen tokenizer
-EASY_TOKEN_THRESHOLD = int(os.environ.get("EASY_TOKEN_THRESHOLD", 140))
-HARD_TOKEN_THRESHOLD = int(os.environ.get("HARD_TOKEN_THRESHOLD", 250))
+HARD_TOKEN_THRESHOLD = int(os.environ.get("HARD_TOKEN_THRESHOLD", 370))
+# Per-problem percentile bands for preference labeling.
+# For each problem we rank every teacher solution by its teacher_token_count
+# within that problem's own distribution; preferred solutions fall inside the
+# band, all other *correct* solutions become "rejected" by length.
+#   Easy (C=0): preferred = short-and-clean → default [10, 40]
+#   Hard (C=1): preferred = short-safe CoT → default [20, 45]
+EASY_PREF_PCT_LOW = float(os.environ.get("EASY_PREF_PCT_LOW", 10))
+EASY_PREF_PCT_HIGH = float(os.environ.get("EASY_PREF_PCT_HIGH", 40))
+# HARD_PREF_PCT_LOW = float(os.environ.get("HARD_PREF_PCT_LOW", 60))
+# HARD_PREF_PCT_HIGH = float(os.environ.get("HARD_PREF_PCT_HIGH", 92))
+HARD_PREF_PCT_LOW = float(os.environ.get("HARD_PREF_PCT_LOW", 20))
+HARD_PREF_PCT_HIGH = float(os.environ.get("HARD_PREF_PCT_HIGH", 45))
+
 REJECTION_REASONS = {'unknown': -1, 'length': 0, 'incorrect': 1}
 
-_VALID_MATH_LEVELS = {"1", "2", "3", "4", "5"}
+
+def _normalize_level(level: Any) -> int | None:
+    """Normalize level to numeric string, handling formats like 'Level 2', '2', 2, 'Level ?', etc."""
+    if level is None:
+        return None
+    level_str = str(level).strip()
+    # Extract numeric part
+    for num in range(1, 6):
+        if str(num) in level_str:
+            return num
+
+    # unknown/invalid levels
+    return None
+
+
+class SimilarityIndex:
+    """Lazy-loaded FAISS index for similarity search on augmented MATH problems."""
+
+    def __init__(self):
+        self._index: Any = None
+        self._metadata: list[dict] | None = None
+        self._model: Any = None
+        self._loaded = False
+
+    def ensure_loaded(self) -> None:
+        """Lazy load the similarity index. Idempotent - only loads once."""
+        if self._loaded:
+            return
+
+        try:
+            import faiss
+            from sentence_transformers import SentenceTransformer
+
+            index_path = Path(__file__).parent.parent.parent / "data" / "math_problem_index"
+            if not index_path.exists():
+                logger.warning(f"Similarity index not found at {index_path}")
+                self._loaded = True
+                return
+
+            self._index = faiss.read_index(str(index_path / "index.faiss"))
+
+            self._metadata = []
+            with open(index_path / "metadata.jsonl", "r") as f:
+                for line in f:
+                    self._metadata.append(json.loads(line))
+
+            config_path = index_path / "config.json"
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+                    model_name = config.get("embedding_model", "sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
+            else:
+                model_name = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+
+            self._model = SentenceTransformer(model_name)
+
+            logger.info(f"Loaded similarity index with {self._index.ntotal} problems")
+        except Exception as e:
+            logger.warning(f"Failed to load similarity index: {e}")
+
+        self._loaded = True
+
+    def find_similar(self, problem: str, threshold: float = 0.7) -> tuple[int | None, int | None]:
+        """Find similar original MATH problem. Returns (complexity, level)."""
+        self.ensure_loaded()
+
+        if self._index is None or self._metadata is None or self._model is None:
+            return None, None
+
+        try:
+            import faiss
+
+            query = self._model.encode([problem], convert_to_numpy=True)
+            faiss.normalize_L2(query)
+
+            scores, indices = self._index.search(query, k=1)
+
+            if scores[0][0] >= threshold:
+                idx = indices[0][0]
+                if idx >= 0 and idx < len(self._metadata):
+                    meta = self._metadata[idx]
+                    return meta.get("complexity"), _normalize_level(meta.get("level"))
+        except Exception as e:
+            logger.warning(f"Similarity search failed: {e}")
+
+        return None, None
+
+
+_similarity_index = SimilarityIndex()
 
 
 def _get_teacher_token_count(example: dict) -> int:
@@ -64,112 +165,12 @@ def _verify_correctness(example: dict) -> bool:
     )
 
 
-def _normalize_level(level: Any) -> str | None:
-    """Normalize level to numeric string, handling formats like 'Level 2', '2', 2, 'Level ?', etc."""
-    if level is None:
-        return None
-    level_str = str(level).strip()
-    # Skip unknown/invalid levels
-    if "?" in level_str or "unknown" in level_str.lower():
-        return None
-    # Extract numeric part
-    for num in ("1", "2", "3", "4", "5"):
-        if num in level_str:
-            return num
-    return None
-
-
-# Similarity search components (lazy loaded)
-_similarity_index: Any = None
-_similarity_metadata: list[dict] | None = None
-_similarity_model: Any = None
-
-
-def _load_similarity_index():
-    """Lazy load the similarity index for augmented MATH problems."""
-    global _similarity_index, _similarity_metadata, _similarity_model
-
-    if _similarity_index is not None:
-        return
-
-    try:
-        import faiss
-        from sentence_transformers import SentenceTransformer
-
-        index_path = Path(__file__).parent.parent.parent / "data" / "math_problem_index"
-        if not index_path.exists():
-            logger.warning(f"Similarity index not found at {index_path}")
-            return
-
-        # Load FAISS index
-        _similarity_index = faiss.read_index(str(index_path / "index.faiss"))
-
-        # Load metadata
-        _similarity_metadata = []
-        with open(index_path / "metadata.jsonl", "r") as f:
-            for line in f:
-                _similarity_metadata.append(json.loads(line))
-
-        # Load embedding model
-        config_path = index_path / "config.json"
-        if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-                model_name = config.get("embedding_model", "sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
-        else:
-            model_name = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
-
-        _similarity_model = SentenceTransformer(model_name)
-
-        logger.info(f"Loaded similarity index with {_similarity_index.ntotal} problems")
-    except Exception as e:
-        logger.warning(f"Failed to load similarity index: {e}")
-        _similarity_index = None
-        _similarity_metadata = None
-        _similarity_model = None
-
-
-def find_similar_math_problem(problem: str, threshold: float = 0.7) -> tuple[int | None, str | None]:
-    """
-    Find similar original MATH problem for an augmented problem.
-    Returns (complexity, level) tuple - complexity is int or None, level is str or None.
-    """
-    global _similarity_index, _similarity_metadata, _similarity_model
-
-    if _similarity_index is None:
-        _load_similarity_index()
-
-    if _similarity_index is None or _similarity_metadata is None or _similarity_model is None:
-        return None, None
-
-    try:
-        # Encode the problem
-        import numpy as np
-        import faiss
-
-        query = _similarity_model.encode([problem], convert_to_numpy=True)
-        faiss.normalize_L2(query)
-
-        # Search
-        scores, indices = _similarity_index.search(query, k=1)
-
-        if scores[0][0] >= threshold:
-            idx = indices[0][0]
-            if idx >= 0 and idx < len(_similarity_metadata):
-                meta = _similarity_metadata[idx]
-                return meta.get("complexity"), meta.get("level")
-    except Exception as e:
-        logger.warning(f"Similarity search failed: {e}")
-
-    return None, None
-
-
-def classify_complexity(example: dict, avg_token_length: float | None = None) -> tuple[int, str | None]:
+def classify_complexity(example: dict, avg_token_length: float | None = None) -> tuple[int, int | None]:
     """
     Canonical decision flow:
     1. Exact match: same problem text already classified → reuse
     2. GSM8K: always C=0 (immediate; no further heuristics)
-    3. MATH with level: level-based classification
+    3. MATH with level: L1 → Easy, L2–L5 → Hard
     4. Augmented MATH: similarity search → find similar original → use its complexity
     5. Unknown: token fallback → default Easy
 
@@ -185,24 +186,14 @@ def classify_complexity(example: dict, avg_token_length: float | None = None) ->
 
     # 2. Original MATH with known level
     if source == "math":
-        level_str = _normalize_level(example.get("level"))
-        if level_str in _VALID_MATH_LEVELS:
-            if level_str in ("1", "2"):
-                return 0, level_str
-            if level_str in ("4", "5"):
-                return 1, level_str
-            # Level 3: similarity search first, then token fallback
-            if level_str == "3" and problem:
-                complexity, matched_level = find_similar_math_problem(problem, threshold=0.7)
-                if complexity is not None:
-                    return complexity, matched_level
-            # No similar match → token fallback using HARD_TOKEN_THRESHOLD
-            tokens = avg_token_length if avg_token_length is not None else _get_teacher_token_count(example)
-            return (1 if tokens > HARD_TOKEN_THRESHOLD else 0), level_str
+        level = _normalize_level(example.get("level"))
+        if level and level > 1:
+            return 1, level
+        return 0, level
 
     # 3. Augmented MATH - use similarity search
     if source == "augmented_math" and problem:
-        complexity, matched_level = find_similar_math_problem(problem, threshold=0.7)
+        complexity, matched_level = _similarity_index.find_similar(problem)
         if complexity is not None:
             return complexity, matched_level
 
@@ -213,40 +204,144 @@ def classify_complexity(example: dict, avg_token_length: float | None = None) ->
     return 0, None  # Default Easy
 
 
-# TODO - improve the logic (maybe use tokens-length quantiles per problem (based on complexity))
-def label_preference(example: dict, complexity: int) -> tuple[str, int | None]:
+def normalize_problem(text: str) -> str:
+    """Normalize problem text for matching: collapse whitespace, strip. Improves level lookup for MATH-origin problems."""
+    if not text:
+        return ""
+    return " ".join(str(text).split())
+
+
+def _pct_to_token_bounds(sorted_tokens: list[int], pct_low: float, pct_high: float) -> tuple[int, int]:
+    """Convert percentile band (0-100) to token count bounds using pre-sorted token list.
+
+    Matches _percentile_rank semantics: rank = 100 * bisect_right(tokens, value) / n.
+    - low bound: smallest value where rank >= pct_low
+    - high bound: largest value where rank <= pct_high
     """
-    Returns "preferred" or "rejected" (witt rejection reason) for this solution.
-    Uses Qwen tokenizer and same thresholds (70/130) as classify_complexity.
+    from bisect import bisect_right
+
+    n = len(sorted_tokens)
+    if n == 0:
+        return 0, 0
+    # bisect_right gives count of values <= target; invert to get value for percentile
+    low_idx = max(0, int(pct_low * n / 100) - 1)
+    high_idx = min(int(pct_high * n / 100), n) - 1
+    # Handle edge case where pct_high=100 (use last index)
+    if high_idx < 0:
+        high_idx = n - 1
+    return sorted_tokens[low_idx], sorted_tokens[high_idx]
+
+
+def _band_for_complexity(complexity: int) -> tuple[float, float]:
+    """Resolve the (low, high) preferred-percentile band for a complexity flag."""
+    if complexity == 0:
+        low = EASY_PREF_PCT_LOW
+        high = EASY_PREF_PCT_HIGH
+    else:
+        low = HARD_PREF_PCT_LOW
+        high = HARD_PREF_PCT_HIGH
+    return float(low), float(high)
+
+
+def label_preference(
+    example: dict,
+    low_tokens: int,
+    high_tokens: int,
+) -> tuple[str, int | None]:
+    """Label a solution as preferred/rejected.
+
+    a solution is *preferred* iff its token count's percentile rank within
+    the same problem's teacher-solution distribution falls inside the band
+    configured for its complexity.
+    Everything else correct becomes "rejected" by length — this catches both
+    too-short/degenerate solutions and verbose/outlier solutions.
     """
     correct = _verify_correctness(example)
-    tokens = _get_teacher_token_count(example)
-
     if not correct:
         return "rejected", REJECTION_REASONS["incorrect"]
 
-    if complexity == 0:  # Easy
-        if tokens <= EASY_TOKEN_THRESHOLD:
-            return "preferred", None
-        return "rejected", REJECTION_REASONS["length"]
-
-    # Hard
-    if tokens >= HARD_TOKEN_THRESHOLD:
+    tokens = _get_teacher_token_count(example)
+    if low_tokens <= tokens <= high_tokens:
         return "preferred", None
+
     return "rejected", REJECTION_REASONS["length"]
 
 
-def load_problem_index(path: Path | str) -> dict[str, dict]:
+def load_problem_index(path: Path) -> dict[str, dict]:
     """Load problem index from JSON and build problem_text -> problem data mapping."""
     with open(path) as f:
         index = json.load(f)
-    return {item["problem"]: item for item in index}
+    return {normalize_problem(item["problem"]): item for item in index}
+
+
+def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int) -> list[dict]:
+    """Stratified sampling by rejection_reason to limit pairs per problem."""
+    by_reason: dict[int, list[dict]] = defaultdict(list)
+    for p in pairs:
+        by_reason[p["rejection_reason"]].append(p)
+
+    total = len(pairs)
+    selected: list[dict] = []
+    remaining = max_per_problem
+
+    # TODO - should we add a bias for incorrect pairs ???
+    for reason, group in by_reason.items():
+        quota = max(1, round(len(group) / total * max_per_problem))
+        quota = min(quota, len(group), remaining)
+        selected.extend(random.sample(group, quota))
+        remaining -= quota
+        if remaining <= 0:
+            break
+
+    return selected
+
+
+def filter_pairs_by_length_ratio(pairs: list[dict], length_ratio: float | int = 2) -> list[dict]:
+    """Filter pairs by length_ratio.
+
+    Easy (complexity 0): filter if chosen_length * length_ratio > rejected_length AND rejection_reason == 0 (length)
+    Hard (complexity 1): filter if rejected_length * length_ratio > chosen_length AND rejection_reason == 0
+    Keep all pairs where rejection_reason != 0 (incorrect).
+    """
+    if length_ratio <= 1.0:
+        return pairs
+
+    filtered = []
+    for p in pairs:
+        complexity = p["complexity"]
+        rejection_reason = p["rejection_reason"]
+        chosen_length = p["chosen_length"]
+        rejected_length = p["rejected_length"]
+
+        if rejection_reason != 0:
+            filtered.append(p)
+            continue
+
+        if complexity == 0:
+            if chosen_length * length_ratio <= rejected_length:
+                filtered.append(p)
+        elif complexity == 1:
+            if rejected_length * length_ratio <= chosen_length:
+                filtered.append(p)
+
+    return filtered
+
+
+def compute_pair_length_ratio(complexity: int, preferred_length: int, rejected_length: int) -> float:
+    if complexity == 0:
+        if preferred_length > 0:
+            return rejected_length / preferred_length
+    else:
+        if rejected_length > 0:
+            return preferred_length / rejected_length
+    return 0.0
 
 
 def build_dpo_pairs(
     raw_data: list[dict],
-    problem_index_path: Path | str | None = None,
-    strict: bool = False,
+    problem_index_path: Path,
+    max_per_problem: int | None = None,
+    length_ratio: float | int = 1,
 ) -> list[dict]:
     """
     Group by problem and build preferred/rejected pairs.
@@ -258,50 +353,54 @@ def build_dpo_pairs(
     Args:
         raw_data: List of examples with problem, generated_solution, etc.
         problem_index_path: Path to problem_index.json. If provided, uses existing IDs and complexity.
-        strict: If True, raises error when problem not found in index. If False, generates new IDs.
+        max_per_problem: If set (and not -1), limit number of pairs per problem using stratified sampling by rejection_reason.
     """
-    problem_index: dict[str, dict] | None = None
-    if problem_index_path:
-        problem_index = load_problem_index(problem_index_path)
-        logger.info(f"Loaded problem index with {len(problem_index)} problems")
+    problem_index = load_problem_index(problem_index_path)
+    logger.info(f"Loaded problem index with {len(problem_index)} problems")
 
+    # Pass 1: group raw examples by problem (no labeling yet — we need the whole
+    # group to compute per-problem percentile ranks).
+    raw_groups: dict[str, list[dict]] = defaultdict(list)
+    problem_meta: dict[str, dict] = {}
+    for ex in tqdm(raw_data, desc="Grouping by problem", unit=" examples"):
+        problem = normalize_problem(ex["problem"])
+        problem_data = problem_index.get(problem)
+        if problem_data is None:
+            raise ValueError(f"Problem not found in problem index:\n{problem}")
+        raw_groups[problem].append(ex)
+        problem_meta[problem] = problem_data
+
+    # Pass 2: label each solution using precomputed token bounds per problem.
+    # Instead of calculating percentile rank per example (O(log N) per example),
+    # compute bounds once per problem (O(1)) then simple comparison.
     groups: dict[str, list[dict]] = defaultdict(list)
-    for ex in tqdm(raw_data, desc="Classifying & labeling", unit=" examples"):
-        problem = ex.get("problem", "")
-        
-        if problem_index:
-            problem_data = problem_index.get(problem)
-            if problem_data is None:
-                if strict:
-                    raise ValueError(f"Problem not found in problem index: {problem[:50]}...")
-                # Fall back to generate new ID
-                c, _ = classify_complexity(ex)
-            else:
-                c = problem_data.get("complexity", 0)
-        else:
-            c, _ = classify_complexity(ex)
-        
-        label, rejection_reason = label_preference(ex, c)
-        tc = _get_teacher_token_count(ex)
-        groups[problem].append({**ex, "complexity": c, "label": label, "rejection_reason": rejection_reason, "_token_count": tc})
+    for problem, items in tqdm(raw_groups.items(), desc="Labeling by per-problem percentile", unit=" problems"):
+        problem_data = problem_meta[problem]
+        problem_id = problem_data["problem_id"]
+        level = problem_data["level"]
+        # complexity = problem_data["complexity"] # TODO - bring back after running load_real_data.py
+        complexity, _ = classify_complexity(problem_data, problem_data['avg_token_length'])
 
-    # Assign unique problem_id to each unique problem
-    unique_problems = list(groups.keys())
-    if problem_index:
-        problem_to_id = {}
-        existing_ids = []
-        for prob in unique_problems:
-            if prob in problem_index:
-                problem_to_id[prob] = problem_index[prob]["problem_id"]
-                existing_ids.append(problem_index[prob]["problem_id"])
-        # Add new IDs for problems not in index
-        max_existing_id = max(existing_ids) if existing_ids else -1
-        for prob in unique_problems:
-            if prob not in problem_to_id:
-                max_existing_id += 1
-                problem_to_id[prob] = max_existing_id
-    else:
-        problem_to_id = {prob: idx for idx, prob in enumerate(unique_problems)}
+        index_lengths = problem_data.get("token_lengths")
+        if index_lengths:
+            sorted_tokens = sorted(int(t) for t in index_lengths)
+        else:
+            sorted_tokens = sorted(_get_teacher_token_count(ex) for ex in items)
+
+        pct_low, pct_high = _band_for_complexity(complexity)
+        low_tokens, high_tokens = _pct_to_token_bounds(sorted_tokens, pct_low, pct_high)
+
+        for ex in items:
+            label, rejection_reason = label_preference(ex, low_tokens, high_tokens)
+
+            groups[problem].append({
+                "problem_id": problem_id,
+                **ex,
+                "level": level,
+                "complexity": complexity,
+                "label": label,
+                "rejection_reason": rejection_reason,
+            })
 
     pairs: list[dict] = []
 
@@ -310,24 +409,34 @@ def build_dpo_pairs(
         for x in items:
             (preferred if x["label"] == "preferred" else rejected).append(x)
 
-        problem_id = problem_to_id.get(problem, 0)
+        problem_id = items[0]["problem_id"]
         complexity = items[0]["complexity"]
 
         if preferred and rejected:
+            problem_pairs = []
             for pw in preferred:
                 for rj in rejected:
-                    pairs.append({
+                    # Skip pairs where the length ratio condition is not satisfied
+                    if compute_pair_length_ratio(complexity, pw["teacher_token_count"], rj["teacher_token_count"]) < length_ratio:
+                        continue
+
+                    problem_pairs.append({
                         "problem": problem,
                         "problem_id": problem_id,
                         "chosen": pw["generated_solution"],
                         "rejected": rj["generated_solution"],
                         "complexity": complexity,
                         "rejection_reason": rj["rejection_reason"],
-                        "chosen_length": pw["_token_count"],
-                        "rejected_length": rj["_token_count"],
+                        "chosen_length": pw["teacher_token_count"],
+                        "rejected_length": rj["teacher_token_count"],
                     })
 
-    logger.info(f'Created a total of {len(pairs)} pairs')
+            if max_per_problem and max_per_problem > 0 and len(problem_pairs) > max_per_problem:
+                problem_pairs = stratified_max_pairs_per_problem_sampling(problem_pairs, max_per_problem)
+
+            pairs.extend(problem_pairs)
+
+    logger.info(f'Created a total of {len(pairs):,} pairs')
 
     return pairs
 
@@ -350,7 +459,8 @@ def split_pairs_by_problem(
     val_split: float,
     seed: int = 42,
     filtered_indices: list[int] | None = None,
-) -> tuple[list[int], list[int]] | tuple[list[dict], list[dict]]:
+    max_unique_problems: int = 100_000
+) -> tuple[list[int], list[int]]:
     """
     Split pairs into train/val by unique problem to prevent data leakage.
     Ensures the same problem doesn't appear in both sets.
@@ -394,7 +504,15 @@ def split_pairs_by_problem(
 
     problem_complexities = np.array([problem_to_complexity[p] for p in unique_problems])
 
+    # TODO - stratify by problem_source too
     # Stratified split
+    if len(unique_problems) > max_unique_problems:
+        unique_problems, discarded_problems, problem_complexities, discarded_problem_complexities = train_test_split(
+        unique_problems,
+        train_size=max_unique_problems,
+        stratify=problem_complexities,
+        random_state=seed,
+    )
     unique_train_problem_ids, unique_val_problem_ids = train_test_split(
         unique_problems,
         test_size=val_split,
@@ -406,36 +524,12 @@ def split_pairs_by_problem(
     train_indices = []
     val_indices = []
     for i, pid in enumerate(problem_ids):
-        if pid in unique_val_problem_ids:
-            if isinstance(pairs, dict):
-                val_indices.append(filtered_indices[i])
-            else: # TODO - deprecate
-                val_indices.append(pairs[filtered_indices[i]]) # NOT indices, but the actual pairs (temporary)
-        else:
-            if isinstance(pairs, dict):
-                train_indices.append(filtered_indices[i])
-            else: # TODO - deprecate
-                train_indices.append(pairs[filtered_indices[i]]) # NOT indices, but the actual pairs (temporary)
+        if pid in unique_train_problem_ids:
+            train_indices.append(filtered_indices[i])
+        elif pid in unique_val_problem_ids:
+            val_indices.append(filtered_indices[i])
 
     return train_indices, val_indices
-
-
-def compute_pair_length_ratio(pair: dict[str, Any]) -> float | None:
-    rejection_reason = pair['rejection_reason']
-    if rejection_reason != REJECTION_REASONS['length']:
-        return None
-
-    complexity = pair["complexity"]
-    chosen_length = pair["chosen_length"]
-    rejected_length = pair["rejected_length"]
-
-    if complexity == 0:
-        if chosen_length > 0:
-            return rejected_length / chosen_length
-    else:
-        if rejected_length > 0:
-            return chosen_length / rejected_length
-    return 0.0
 
 
 def compute_statistics(
@@ -446,8 +540,10 @@ def compute_statistics(
 
     if total == 0:
         return {
-            "easy_token_threshold": EASY_TOKEN_THRESHOLD,
-            "hard_token_threshold": HARD_TOKEN_THRESHOLD,
+            'easy_preferred_percentile_low': EASY_PREF_PCT_LOW,
+            'easy_preferred_percentile_high': EASY_PREF_PCT_HIGH,
+            'hard_preferred_percentile_low': HARD_PREF_PCT_LOW,
+            'hard_preferred_percentile_high': HARD_PREF_PCT_HIGH,
             "total_pairs": 0,
         }
 
@@ -491,12 +587,12 @@ def compute_statistics(
                 count_correct_easy += 1
                 chosen_length_sum_easy += chosen_length
                 rejected_length_sum_easy += rejected_length
-                ratios_easy.append(compute_pair_length_ratio(p))
+                ratios_easy.append(compute_pair_length_ratio(p['complexity'], p['chosen_length'], p['rejected_length']))
             else:
                 count_correct_hard += 1
                 chosen_length_sum_hard += chosen_length
                 rejected_length_sum_hard += rejected_length
-                ratios_hard.append(compute_pair_length_ratio(p))
+                ratios_hard.append(compute_pair_length_ratio(p['complexity'], p['chosen_length'], p['rejected_length']))
         else:
             raise ValueError('All pairs must be rejected by either incorrect/length')
 
@@ -551,8 +647,10 @@ def compute_statistics(
     cumulative_hard = compute_reverse_cumulative(histogram_hard) if ratios_hard else {f"ratio_gte_{b}": 0 for b in histogram_bins}
 
     return {
-        "easy_token_threshold": EASY_TOKEN_THRESHOLD,
-        "hard_token_threshold": HARD_TOKEN_THRESHOLD,
+        "easy_preferred_percentile_low": EASY_PREF_PCT_LOW,
+        "easy_preferred_percentile_high": EASY_PREF_PCT_HIGH,
+        "hard_preferred_percentile_low": HARD_PREF_PCT_LOW,
+        "hard_preferred_percentile_high": HARD_PREF_PCT_HIGH,
         "total_pairs": total,
         "rejected_by_correctness": rej_correctness,
         "rejected_by_length": rej_length,
