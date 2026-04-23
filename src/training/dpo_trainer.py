@@ -4,11 +4,10 @@ Optimized for GPU utilization and training efficiency.
 """
 
 import json
-import math
 import os
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Optional, Any, Callable, Literal
+from typing import Optional, Callable, Literal
 
 from tqdm import tqdm
 
@@ -23,10 +22,10 @@ import wandb
 from src.config import (
     CHECKPOINT_DIR,
     MODEL_NAME,
+    get_tokens_path,
     get_processed_dataset_path,
-    get_tokenized_train_path,
-    get_tokenized_val_path,
 )
+from src.data.preprocessing import split_pairs_by_problem
 from src.evaluation.run_evaluation import (
     generate_and_evaluate,
     compute_metrics,
@@ -61,7 +60,8 @@ class TrainingConfig:
     early_stopping_threshold: float = 0.0
     dpo_beta: float = 0.1
     lambda_easy: float = 0.05
-    lambda_hard: float = 0.001
+    # lambda_hard: float = 0.001
+    lambda_hard: float = 0.03
     kl_penalty_weight: float = 0.0
     gradient_accumulation_steps: int = 1
     use_mixed_precision: bool = True
@@ -122,54 +122,143 @@ def log_prob(logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torc
     return (token_log_probs * shift_mask).sum(-1) / shift_mask.sum(-1).clamp(min=1)
 
 
-class DPODataset(Dataset):
-    def __init__(self, pairs: list[dict]):
-        self.pairs = pairs
-
-    def __len__(self) -> int:
-        return len(self.pairs)
-
-    def __getitem__(self, idx: int) -> dict:
-        return self.pairs[idx]
-
-
 class TokenizedDPODataset(Dataset):
-    def __init__(self, tokens_path: Path):
-        self.data = torch.load(tokens_path)
-        self.length = self.data["chosen_input_ids"].shape[0]
+    """Simple dataset with pre-computed indices."""
+
+    def __init__(self, data: dict, indices: list[int]):
+        self.data = data
+        self.indices = indices
+        self.length = len(indices)
 
     def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> dict:
+        real_idx = self.indices[idx]
         return {
-            "chosen_input_ids": self.data["chosen_input_ids"][idx],
-            "chosen_attention_mask": self.data["chosen_attention_mask"][idx],
-            "rejected_input_ids": self.data["rejected_input_ids"][idx],
-            "rejected_attention_mask": self.data["rejected_attention_mask"][idx],
-            "complexity": self.data["complexities"][idx],
+            "chosen_input_ids": self.data["chosen_input_ids"][real_idx],
+            "chosen_attention_mask": self.data["chosen_attention_mask"][real_idx],
+            "rejected_input_ids": self.data["rejected_input_ids"][real_idx],
+            "rejected_attention_mask": self.data["rejected_attention_mask"][real_idx],
+            "complexity": self.data["complexities"][real_idx],
         }
 
 
-def load_tokenized_dataset(tokens_path: Path) -> TokenizedDPODataset:
+def _cap_pairs_per_problem(
+    data: dict,
+    indices: list[int],
+    max_pairs_per_problem: int,
+    seed: int,
+) -> list[int]:
+    """Cap pairs per problem_id using stratified sampling by rejection_reason."""
+    import numpy as np
+    from collections import defaultdict
+
+    rng = np.random.default_rng(seed)
+    problem_ids = data["problem_ids"].numpy()
+    rejection_reason = data["rejection_reason"].numpy()
+
+    # Group the *filtered* indices by problem_id
+    by_problem: dict[int, list[int]] = defaultdict(list)
+    for i in indices:
+        by_problem[int(problem_ids[i])].append(i)
+
+    kept: list[int] = []
+    for pid, idxs in by_problem.items():
+        if len(idxs) <= max_pairs_per_problem:
+            kept.extend(idxs)
+            continue
+
+        # Stratified by rejection_reason
+        by_reason: dict[int, list[int]] = defaultdict(list)
+        for i in idxs:
+            by_reason[int(rejection_reason[i])].append(i)
+
+        total = len(idxs)
+        remaining = max_pairs_per_problem
+        for reason, group in by_reason.items():
+            if remaining <= 0:
+                break
+            quota = max(1, round(len(group) / total * max_pairs_per_problem))
+            quota = min(quota, len(group), remaining)
+            chosen = rng.choice(group, size=quota, replace=False).tolist()
+            kept.extend(int(x) for x in chosen)
+            remaining -= quota
+
+    return sorted(kept)
+
+
+def _filter_by_length_ratio(data: dict, length_ratio: float) -> list[int]:
+    """Vectorized filtering using numpy."""
+    import numpy as np
+
+    if length_ratio <= 1.0:
+        return np.arange(len(data["chosen_input_ids"])).tolist()
+
+    complexities = data["complexities"].numpy()
+    rejection_reason = data["rejection_reason"].numpy()
+    chosen_length = data["chosen_length"].numpy()
+    rejected_length = data["rejected_length"].numpy()
+
+    mask_easy = ((complexities == 0) & (chosen_length * length_ratio <= rejected_length))
+    mask_hard = ((complexities == 1) & (rejected_length * length_ratio <= chosen_length))
+    not_rejected_by_length = rejection_reason != 0
+
+    valid_mask = mask_easy | mask_hard | not_rejected_by_length
+
+    return np.where(valid_mask)[0].tolist()
+
+
+def load_tokenized_datasets(
+    tokens_path: Path,
+    length_ratio: float = 1.0,
+    val_split: float = 0.2,
+    seed: int = 42,
+    max_pairs_per_problem: Optional[int] = None,
+    max_unique_problems: int = 100_000
+) -> tuple[TokenizedDPODataset, TokenizedDPODataset]:
+    """
+    Load all tokenized pairs, filter by length_ratio, optionally cap pairs per
+    problem, then split by problem_id. Returns (train_dataset, val_dataset).
+
+    Processing order:
+    1. Load all data from tokens_path
+    2. Apply length_ratio filter to all pairs
+    3. Apply max_pairs_per_problem cap (stratified by rejection_reason)
+    4. Split filtered pairs by problem_id (stratified by complexity)
+    """
     if not tokens_path.exists():
-        logger.error("Tokenized dataset not found at %s. Run preprocess_dpo_data.py first.", tokens_path)
         raise FileNotFoundError(
             f"Tokenized dataset not found at {tokens_path}. "
             "Run preprocess_dpo_data.py first."
         )
-    return TokenizedDPODataset(tokens_path)
 
+    data = torch.load(tokens_path)
 
-def load_pairs(limit: Optional[int] = None) -> list[dict]:
-    pairs = []
-    path = get_processed_dataset_path() / "dataset.jsonl"
-    with open(path) as f:
-        for line in f:
-            pairs.append(json.loads(line))
-            if limit and len(pairs) >= limit:
-                break
-    return pairs
+    # 1. Apply length_ratio filter (vectorized)
+    filtered_indices = _filter_by_length_ratio(data, length_ratio)
+
+    # 2. Cap pairs per problem (stratified by rejection_reason)
+    if max_pairs_per_problem is not None and max_pairs_per_problem > 0:
+        filtered_indices = _cap_pairs_per_problem(
+            data, filtered_indices, max_pairs_per_problem, seed
+        )
+
+    # 3. Split by problem_id (stratified by complexity of filtered data)
+    train_indices, val_indices = split_pairs_by_problem(
+        data, val_split, seed, filtered_indices, max_unique_problems
+    )
+
+    train_dataset = TokenizedDPODataset(data, train_indices)
+    val_dataset = TokenizedDPODataset(data, val_indices)
+
+    logger.info(
+        f"Data split (length_ratio={length_ratio}, "
+        f"max_pairs_per_problem={max_pairs_per_problem}): "
+        f"Train={len(train_indices)}, Val={len(val_indices)}"
+    )
+
+    return train_dataset, val_dataset
 
 
 def collate_fn_tokenized(batch):
@@ -590,16 +679,6 @@ def _build_lora_config() -> LoraConfig:
     )
 
 
-def _load_val_split() -> float:
-    processed_path = get_processed_dataset_path()
-    meta_path = processed_path / "metadata.json"
-    if meta_path.exists():
-        with open(meta_path) as f:
-            metadata = json.load(f)
-        return metadata.get("val_split", 0.2)
-    return 0.2
-
-
 def _build_dataloaders(
     train_dataset: TokenizedDPODataset,
     val_dataset: TokenizedDPODataset,
@@ -633,6 +712,7 @@ def train_dpo(
     *,
     use_budget_aware: bool,
     output_dir: Path,
+    val_split: float = 0.2,
     max_epochs: int = 10,
     batch_size: int = 4,
     lr: float = 1e-5,
@@ -646,7 +726,7 @@ def train_dpo(
     early_stopping_threshold: float = 0.0,
     dpo_beta: float = 0.1,
     lambda_easy: float = 0.05,
-    lambda_hard: float = 0.001,
+    lambda_hard: float = 0.03,
     kl_penalty_weight: float = 0.0,
     gradient_accumulation_steps: int = 1,
     use_mixed_precision: bool = True,
@@ -654,44 +734,35 @@ def train_dpo(
     num_workers: int = 4,
     model_name: Optional[str] = None,
     loss_type: str = "dpo",
+    length_ratio: float = 1.0,
+    max_pairs_per_problem: Optional[int] = 3,
     best_model_metric: BestModelMetric = "val_loss",
     accuracy_floor: Optional[float] = None,
+    max_unique_problems: int = 65_000
 ) -> dict:
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    val_split = _load_val_split()
 
-    train_tokens_path = get_tokenized_train_path()
-    val_tokens_path = get_tokenized_val_path()
-    _validate_datasets_exist(train_tokens_path, val_tokens_path)
-
-    pin_memory = device == "cuda"
-    effective_model_name = model_name or MODEL_NAME
-    logger.info("Using model: %s (loss_type=%s)", effective_model_name, loss_type)
-    model, tokenizer = create_model(
-        effective_model_name,
-        device,
-        lora_config=_build_lora_config(),
-        resume_from=resume_from,
-        use_compile=compile_model and device == "cuda",
+    # Load, filter, and split in one call
+    all_tokens_path = get_tokens_path()
+    train_dataset, val_dataset = load_tokenized_datasets(
+        all_tokens_path,
+        length_ratio=length_ratio,
+        val_split=val_split,
+        seed=seed,
+        max_pairs_per_problem=max_pairs_per_problem,
+        max_unique_problems=max_unique_problems
     )
-    ref_model = create_ref_model(effective_model_name, device)
 
-    train_dataset = load_tokenized_dataset(train_tokens_path)
-    val_dataset = load_tokenized_dataset(val_tokens_path)
     num_train = len(train_dataset)
     num_val = len(val_dataset)
-    logger.info("Data split: Train=%s, Val=%s", num_train, num_val)
+    logger.info("Data split: Train=%s, Val=%s (length_ratio=%.1f)", num_train, num_val, length_ratio)
+
+    pin_memory = device == "cuda"
 
     train_loader, val_loader = _build_dataloaders(
         train_dataset, val_dataset, batch_size, num_workers, pin_memory
     )
-
-    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
-
-    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda"))
 
     steps_per_epoch = len(train_loader)
     effective_batch_size = batch_size * gradient_accumulation_steps
@@ -735,9 +806,6 @@ def train_dpo(
             run_name = f"{mode}_{variant}_s{seed}"
         _init_wandb(config, run_name=run_name)
 
-    # Load generation eval problems once (50 easy + 50 hard)
-    gen_eval_problems = _load_gen_eval_problems(n_easy=50, n_hard=50)
-
     metrics_log = []
     best_val_loss = float("inf")
     best_model_state: Optional[dict] = None
@@ -749,6 +817,24 @@ def train_dpo(
         threshold_mode="rel",
     )
     autocast_dtype = torch.float16 if device == "cuda" else torch.float32
+
+    effective_model_name = model_name or MODEL_NAME
+    logger.info("Using model: %s (loss_type=%s)", effective_model_name, loss_type)
+    model, tokenizer = create_model(
+        effective_model_name,
+        device,
+        lora_config=_build_lora_config(),
+        resume_from=resume_from,
+        use_compile=compile_model and device == "cuda"
+    )
+    ref_model = create_ref_model(effective_model_name, device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
+    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda"))
+
+    # Load generation eval problems once (50 easy + 50 hard)
+    gen_eval_problems = _load_gen_eval_problems(n_easy=50, n_hard=50)
 
     for epoch in range(1, max_epochs + 1):
         epoch_metrics = _run_epoch(
@@ -936,15 +1022,6 @@ def _run_gen_eval(
         )
 
     return gen_metrics
-
-
-def _validate_datasets_exist(train_path: Path, val_path: Path) -> None:
-    if not train_path.exists() or not val_path.exists():
-        logger.error("Tokenized datasets not found. Expected train: %s, val: %s. Run preprocess_dpo_data.py first.", train_path, val_path)
-        raise FileNotFoundError(
-            f"Tokenized datasets not found. Run preprocess_dpo_data.py first.\n"
-            f"Expected: {train_path}, {val_path}"
-        )
 
 
 def _run_epoch(
