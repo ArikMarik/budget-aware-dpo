@@ -1,8 +1,8 @@
 """
 Budget-Aware DPO Loss: R_budget(x,y) = beta * log(pi_theta(y|x)/pi_ref(y|x)) - lambda(C) * |y|
 
-- lambda high when C=0 (Easy): penalize length
-- lambda near zero when C=1 (Hard): accuracy primary
+- lambda_easy (C=0): penalize length
+- lambda_hard (C=1): penalize length (smaller than lambda_easy — conservative)
 """
 
 import torch
@@ -10,8 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def get_lambda(complexity: int, lambda_easy: float = 0.1, lambda_hard: float = 0.001) -> float:
-    """Dynamic lambda: high for Easy (C=0), near zero for Hard (C=1)."""
+# def get_lambda(complexity: int, lambda_easy: float = 0.1, lambda_hard: float = 0.001) -> float:
+def get_lambda(complexity: int, lambda_easy: float = 0.05, lambda_hard: float = 0.03) -> float:
+    """Dynamic lambda: high for Easy (C=0), smaller for Hard (C=1)."""
     return lambda_easy if complexity == 0 else lambda_hard
 
 
@@ -24,8 +25,10 @@ def budget_aware_dpo_loss(
     rejected_lengths: torch.Tensor,
     complexities: torch.Tensor,
     beta: float = 0.1,
-    lambda_easy: float = 0.1,
-    lambda_hard: float = 0.001,
+    # lambda_easy: float = 0.1,
+    # lambda_hard: float = 0.001,
+    lambda_easy: float = 0.05,
+    lambda_hard: float = 0.03,
     kl_penalty_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -37,6 +40,7 @@ def budget_aware_dpo_loss(
     For preference: we want chosen > rejected in reward.
     So: (R_chosen - R_rejected) = beta*(log_ratio_c - log_ratio_r) - lambda*(|y_c| - |y_r|)
     For Easy: lambda high, so we penalize length difference. Short chosen gets boosted.
+    For Hard: lambda smaller than Easy — conservative shortening to avoid step-skipping.
     """
     log_ratio_chosen = policy_chosen_logps - reference_chosen_logps
     log_ratio_rejected = policy_rejected_logps - reference_rejected_logps
