@@ -7,7 +7,7 @@ Hard prompts should yield full chain-of-thought.
 import json
 from pathlib import Path
 
-from src.config import CHECKPOINT_DIR, MODEL_NAME, PROCESSED_DATASET_PATH
+from src.config import CHECKPOINT_DIR, MODEL_NAME, DUMMY_PROCESSED_DATASET_PATH
 from src.utils import get_logger, set_seed
 
 logger = get_logger(__name__)
@@ -17,7 +17,7 @@ set_seed(42)
 
 def load_sample_pairs(limit_easy: int = 3, limit_hard: int = 3):
     """Load Easy and Hard pairs from processed dataset."""
-    path = PROCESSED_DATASET_PATH / "dataset.jsonl"
+    path = DUMMY_PROCESSED_DATASET_PATH / "dataset.jsonl"
     if not path.exists():
         raise FileNotFoundError(f"Processed dataset not found: {path}")
     easy, hard = [], []

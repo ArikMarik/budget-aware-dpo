@@ -15,8 +15,19 @@ from tqdm import tqdm
 SEED = 42
 USE_DUMMY_DATA = os.environ.get("USE_DUMMY_DATA", "0") == "1"
 
-EASY_TOKEN_THRESHOLD = 70
-HARD_TOKEN_THRESHOLD = 130
+EASY_TOKEN_THRESHOLD = int(os.environ.get("EASY_TOKEN_THRESHOLD", 70))
+HARD_TOKEN_THRESHOLD = int(os.environ.get("HARD_TOKEN_THRESHOLD", 130))
+
+# Per-problem percentile-band defaults (see reports/token_length_percentiles_by_group.md
+# for the analysis that motivates these values).
+#   Easy (C=0): preferred = short-and-clean → [10, 40]
+#   Hard (C=1): preferred = full CoT minus outlier tail → [60, 95]
+EASY_PREF_PCT_LOW = float(os.environ.get("EASY_PREF_PCT_LOW", 10))
+EASY_PREF_PCT_HIGH = float(os.environ.get("EASY_PREF_PCT_HIGH", 40))
+HARD_PREF_PCT_LOW = float(os.environ.get("HARD_PREF_PCT_LOW", 60))
+HARD_PREF_PCT_HIGH = float(os.environ.get("HARD_PREF_PCT_HIGH", 95))
+USE_PERCENTILE_LABELING = os.environ.get("USE_PERCENTILE_LABELING", "1") == "1"
+
 _VALID_MATH_LEVELS = {"1", "2", "3", "4", "5"}
 
 
@@ -120,7 +131,7 @@ def classify_complexity(example: dict) -> tuple[int, str | None]:
         if level_str in _VALID_MATH_LEVELS:
             if level_str in ("1", "2"):
                 return 0, level_str
-            if level_str in ("4", "5"):
+            if level_str in ("3,","4", "5"):
                 return 1, level_str
     
     # Token fallback
@@ -132,40 +143,85 @@ def classify_complexity(example: dict) -> tuple[int, str | None]:
     return 0, None
 
 
-def label_preference(example: dict, complexity: int) -> tuple[str, str]:
-    """Label a solution as preferred or rejected."""
+def _percentile_rank(value: float, sorted_values: list[int]) -> float:
+    """Return percentile rank (0-100) of ``value`` within ``sorted_values``."""
+    from bisect import bisect_right
+
+    n = len(sorted_values)
+    if n == 0:
+        return 50.0
+    return 100.0 * bisect_right(sorted_values, value) / n
+
+
+def _band_for_complexity(complexity: int, bands: dict | None = None) -> tuple[float, float]:
+    if bands is None:
+        bands = {}
+    if complexity == 0:
+        return float(bands.get("easy_low", EASY_PREF_PCT_LOW)), float(bands.get("easy_high", EASY_PREF_PCT_HIGH))
+    return float(bands.get("hard_low", HARD_PREF_PCT_LOW)), float(bands.get("hard_high", HARD_PREF_PCT_HIGH))
+
+
+def label_preference(
+    example: dict,
+    complexity: int,
+    percentile_rank: float | None = None,
+    bands: dict | None = None,
+) -> tuple[str, str]:
+    """Label a solution as preferred or rejected.
+
+    When ``percentile_rank`` is supplied (and ``USE_PERCENTILE_LABELING=1``), a
+    correct solution is preferred iff its token count's percentile rank within
+    its problem's teacher-solution distribution is inside the configured band
+    (defaults: Easy [10, 40], Hard [60, 95]). Otherwise falls back to the
+    static EASY/HARD_TOKEN_THRESHOLD bounds.
+    """
     correct = _verify_correctness_with_fallback(example)
-    tokens = _get_teacher_token_count(example)
-    
     if not correct:
         return "rejected", "incorrect"
-    
+
+    if percentile_rank is not None and USE_PERCENTILE_LABELING:
+        low, high = _band_for_complexity(complexity, bands)
+        if low <= percentile_rank <= high:
+            return "preferred", "length"
+        return "rejected", "length"
+
+    tokens = _get_teacher_token_count(example)
     if complexity == 0:  # Easy
         if tokens <= EASY_TOKEN_THRESHOLD:
             return "preferred", "length"
         return "rejected", "length"
-    
     # Hard
     if tokens >= HARD_TOKEN_THRESHOLD:
         return "preferred", "length"
     return "rejected", "length"
 
 
-def build_dpo_pairs(raw_data: list[dict]) -> list[dict]:
-    """Build DPO pairs from raw data."""
+def build_dpo_pairs(raw_data: list[dict], bands: dict | None = None) -> list[dict]:
+    """Build DPO pairs from raw data using per-problem percentile-band labeling."""
+    # Pass 1: group raw rows by problem so we can compute per-problem ranks.
+    raw_groups: dict[str, list[dict]] = defaultdict(list)
+    for ex in tqdm(raw_data, desc="Grouping by problem", unit=" examples"):
+        raw_groups[ex["problem"]].append(ex)
+
+    # Pass 2: label each solution by its percentile rank within its group.
     groups: dict[str, list[dict]] = defaultdict(list)
-    
-    for ex in tqdm(raw_data, desc="Classifying & labeling", unit=" examples"):
-        c, _ = classify_complexity(ex)
-        label, rejection_reason = label_preference(ex, c)
-        tc = _get_teacher_token_count(ex)
-        groups[ex["problem"]].append({
-            **ex,
-            "complexity": c,
-            "label": label,
-            "rejection_reason": rejection_reason,
-            "_token_count": tc
-        })
+    for problem, items in tqdm(raw_groups.items(), desc="Labeling by percentile", unit=" problems"):
+        c, _ = classify_complexity(items[0])
+        sorted_tokens = sorted(_get_teacher_token_count(ex) for ex in items)
+        for ex in items:
+            tc = _get_teacher_token_count(ex)
+            pct_rank = _percentile_rank(tc, sorted_tokens)
+            label, rejection_reason = label_preference(
+                ex, c, percentile_rank=pct_rank, bands=bands
+            )
+            groups[problem].append({
+                **ex,
+                "complexity": c,
+                "label": label,
+                "rejection_reason": rejection_reason,
+                "_token_count": tc,
+                "_percentile_rank": pct_rank,
+            })
     
     unique_problems = list(groups.keys())
     problem_to_id = {prob: idx for idx, prob in enumerate(unique_problems)}
@@ -229,6 +285,9 @@ def compute_statistics(pairs: list[dict]) -> dict:
     return {
         "easy_token_threshold": EASY_TOKEN_THRESHOLD,
         "hard_token_threshold": HARD_TOKEN_THRESHOLD,
+        "use_percentile_labeling": USE_PERCENTILE_LABELING,
+        "easy_pref_pct_band": [EASY_PREF_PCT_LOW, EASY_PREF_PCT_HIGH],
+        "hard_pref_pct_band": [HARD_PREF_PCT_LOW, HARD_PREF_PCT_HIGH],
         "total_pairs": total,
         "rejected_by_correctness": rej_correctness,
         "rejected_by_length": rej_length,

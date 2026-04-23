@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 from tqdm import tqdm
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer
 
 from src.config import (
     DUMMY_DATASET_PATH,
@@ -22,7 +22,6 @@ from src.config import (
     USE_DUMMY_DATA,
     MODEL_NAME,
     get_tokens_path,
-    DATA_PATH,
 )
 from src.data.preprocessing import (
     build_dpo_pairs,
@@ -66,72 +65,84 @@ def tokenize_and_save(
     pairs: list[dict],
     output_path: Path,
     max_length: int = MAX_LENGTH,
-    batch_size: int = 1000,
+    batch_size: int = 10_000,
 ) -> None:
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    chosen_ids_acc, chosen_masks_acc = [], []
-    rejected_ids_acc, rejected_masks_acc = [], []
-    complexities_all = []
-    rejection_reason_all = []
-    chosen_length_all = []
-    rejected_length_all = []
-    problem_ids_all = []
+    num_pairs = len(pairs)
+    chosen_input_ids = torch.empty((num_pairs, max_length), dtype=torch.long)
+    chosen_attention_mask = torch.empty((num_pairs, max_length), dtype=torch.long)
+    rejected_input_ids = torch.empty((num_pairs, max_length), dtype=torch.long)
+    rejected_attention_mask = torch.empty((num_pairs, max_length), dtype=torch.long)
+    complexities = torch.empty(num_pairs, dtype=torch.long)
+    rejection_reason = torch.empty(num_pairs, dtype=torch.long)
+    chosen_length = torch.empty(num_pairs, dtype=torch.long)
+    rejected_length = torch.empty(num_pairs, dtype=torch.long)
+    problem_ids = torch.empty(num_pairs, dtype=torch.long)
 
-    num_batches = (len(pairs) + batch_size - 1) // batch_size
+    num_batches = (num_pairs + batch_size - 1) // batch_size
 
     for batch_idx in tqdm(range(num_batches), desc="Tokenizing batches", unit=" batches"):
         start_idx = batch_idx * batch_size
-        end_idx = start_idx + batch_size
+        end_idx = min(start_idx + batch_size, num_pairs)
         batch_pairs = pairs[start_idx:end_idx]
 
         chosen_combined, rejected_combined = [], []
+        complexities_batch, rejection_reason_batch = [], []
+        chosen_length_batch, rejected_length_batch = [], []
+        problem_ids_batch = []
+
         for pair in batch_pairs:
             prompt_text = _format_prompt(pair["problem"])
             chosen_combined.append(prompt_text + pair["chosen"])
             rejected_combined.append(prompt_text + pair["rejected"])
-            complexities_all.append(pair.get("complexity", 0))
-            rejection_reason_all.append(pair["rejection_reason"])
-            chosen_length_all.append(pair.get("chosen_length", 0))
-            rejected_length_all.append(pair.get("rejected_length", 0))
-            problem_ids_all.append(pair.get("problem_id", 0))
+            complexities_batch.append(pair.get("complexity", 0))
+            rejection_reason_batch.append(pair["rejection_reason"])
+            chosen_length_batch.append(pair.get("chosen_length", 0))
+            rejected_length_batch.append(pair.get("rejected_length", 0))
+            problem_ids_batch.append(pair.get("problem_id", 0))
 
         chosen_tok = tokenizer(chosen_combined, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
         rejected_tok = tokenizer(rejected_combined, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
 
-        chosen_ids_acc.append(chosen_tok.input_ids)
-        chosen_masks_acc.append(chosen_tok.attention_mask)
-        rejected_ids_acc.append(rejected_tok.input_ids)
-        rejected_masks_acc.append(rejected_tok.attention_mask)
+        chosen_input_ids[start_idx:end_idx] = chosen_tok.input_ids
+        chosen_attention_mask[start_idx:end_idx] = chosen_tok.attention_mask
+        rejected_input_ids[start_idx:end_idx] = rejected_tok.input_ids
+        rejected_attention_mask[start_idx:end_idx] = rejected_tok.attention_mask
+        complexities[start_idx:end_idx] = torch.tensor(complexities_batch, dtype=torch.long)
+        rejection_reason[start_idx:end_idx] = torch.tensor(rejection_reason_batch, dtype=torch.long)
+        chosen_length[start_idx:end_idx] = torch.tensor(chosen_length_batch, dtype=torch.long)
+        rejected_length[start_idx:end_idx] = torch.tensor(rejected_length_batch, dtype=torch.long)
+        problem_ids[start_idx:end_idx] = torch.tensor(problem_ids_batch, dtype=torch.long)
 
     torch.save(
         {
-            "chosen_input_ids": torch.cat(chosen_ids_acc),
-            "chosen_attention_mask": torch.cat(chosen_masks_acc),
-            "rejected_input_ids": torch.cat(rejected_ids_acc),
-            "rejected_attention_mask": torch.cat(rejected_masks_acc),
-            "complexities": torch.tensor(complexities_all, dtype=torch.long),
-            "rejection_reason": torch.tensor(rejection_reason_all, dtype=torch.long),
-            "chosen_length": torch.tensor(chosen_length_all, dtype=torch.long),
-            "rejected_length": torch.tensor(rejected_length_all, dtype=torch.long),
-            "problem_ids": torch.tensor(problem_ids_all, dtype=torch.long),
+            "chosen_input_ids": chosen_input_ids,
+            "chosen_attention_mask": chosen_attention_mask,
+            "rejected_input_ids": rejected_input_ids,
+            "rejected_attention_mask": rejected_attention_mask,
+            "complexities": complexities,
+            "rejection_reason": rejection_reason,
+            "chosen_length": chosen_length,
+            "rejected_length": rejected_length,
+            "problem_ids": problem_ids,
         },
         output_path,
     )
 
-    logger.info("      Tokenized a total of %s problems", len(problem_ids_all))
+    logger.info(f"      Tokenized a total of {len(problem_ids):,} problems")
 
 
-def parse_args():
+def main():
     parser = argparse.ArgumentParser(description="Preprocess DPO data - tokenize all pairs")
     parser.add_argument("--force", action="store_true", help="Force regeneration even if files exist")
-    parser.add_argument("--problem-index", type=str, default=None, help="Path to problem_index.json")
-    return parser.parse_args()
+    parser.add_argument("--problem-index", type=str, default='data/problem_index.json', help="Path to problem_index.json")
+    parser.add_argument("--max-pairs-per-problem", type=int, default=100, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
+    parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 1.5 (1.0 = no filter)")
+    args = parser.parse_args()
 
-
-def main(args=None):
     set_seed(SEED)
     output_dir = get_output_path()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,17 +172,14 @@ def main(args=None):
     logger.info("      Loaded %s examples", f"{len(raw_data):,}")
 
     logger.info("[2/4] Building DPO pairs (classify, label, group)...")
-    problem_index_path = Path(args.problem_index) if args.problem_index else DATA_PATH / "problem_index.json"
-    if problem_index_path.exists():
-        pairs = build_dpo_pairs(raw_data, problem_index_path=problem_index_path, strict=True)
-        logger.info("      Using problem index: %s", problem_index_path)
-    else:
-        logger.warning("Problem index not found at %s, generating new IDs", problem_index_path)
-        pairs = build_dpo_pairs(raw_data)
+    problem_index_path = Path(args.problem_index)
+    assert problem_index_path.exists(), f'You must first run the load_real_data.py script, to generate the {problem_index_path.name} file'
+    pairs = build_dpo_pairs(raw_data, problem_index_path=problem_index_path, max_per_problem=args.max_pairs_per_problem, length_ratio=args.length_ratio)
+    logger.info("      Using problem index: %s", problem_index_path)
     logger.info("      Built %s total pairs", f"{len(pairs):,}")
 
     num_unique_problems = len(set(p.get("problem_id", 0) for p in pairs))
-    logger.info("      Unique problem IDs: %s", num_unique_problems)
+    logger.info(f"      Unique problem IDs: {num_unique_problems:,}")
 
     logger.info("[3/4] Tokenizing all pairs...")
     tokens_path = tokenize_and_save(MODEL_NAME, pairs, tokens_path)
@@ -192,5 +200,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()

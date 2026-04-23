@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from src.config import CHECKPOINT_DIR, MODEL_NAME, PROCESSED_DATASET_PATH
+from src.config import CHECKPOINT_DIR, MODEL_NAME, DUMMY_PROCESSED_DATASET_PATH
 from src.utils import get_logger, set_seed
 
 logger = get_logger(__name__)
@@ -18,7 +18,7 @@ set_seed(42)
 
 def load_pairs(limit: int = 30):
     pairs = []
-    path = PROCESSED_DATASET_PATH / "dataset.jsonl"
+    path = DUMMY_PROCESSED_DATASET_PATH / "dataset.jsonl"
     with open(path) as f:
         for line in f:
             if len(pairs) >= limit:

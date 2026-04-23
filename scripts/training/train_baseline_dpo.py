@@ -13,6 +13,7 @@ from src.training.dpo_trainer import train_dpo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--val-split", type=float, default=0.2, help='Validation fraction size, must be in (0, 1) (default 0.2)')
     parser.add_argument("--max-epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -56,6 +57,7 @@ def main():
     train_dpo(
         use_budget_aware=False,
         output_dir=output_dir,
+        val_split=args.val_split,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         lr=args.lr,

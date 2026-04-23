@@ -11,7 +11,7 @@ from collections import defaultdict
 from tqdm import tqdm
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, DATASET_PATH
-from src.data.preprocessing import classify_complexity
+from src.data.preprocessing import classify_complexity, normalize_problem
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer, verify_correctness
 from src.utils import count_tokens, get_logger, set_seed, setup_global_exception_handler
 
@@ -31,13 +31,6 @@ OPENMATH_SIZES = {
     "train_5M": 5_000_000,
     "train": 14_000_000,
 }
-
-
-def normalize_problem(text: str) -> str:
-    """Normalize problem text for matching: collapse whitespace, strip. Improves level lookup for MATH-origin problems."""
-    if not text:
-        return ""
-    return " ".join(str(text).split())
 
 
 def convert_openmath_instruct(item: dict, problem_to_level: dict | None = None) -> dict:
@@ -165,7 +158,7 @@ def get_source_rank(source: str) -> int:
 
 def build_problem_index(raw_data: list[dict]) -> list[dict]:
     """Build a problem index by grouping solutions by normalized problem text.
-    
+
     For each unique problem:
     - Assign a unique integer problem_id
     - Collect all solution token lengths from all sources
@@ -179,19 +172,19 @@ def build_problem_index(raw_data: list[dict]) -> list[dict]:
         norm_problem = normalize_problem(ex.get("problem", ""))
         if norm_problem:
             groups[norm_problem].append(ex)
-    
+
     result = []
     for problem_id, examples in enumerate(tqdm(groups.values(), desc="Building problem index", unit=" problems")):
         token_lengths = [ex.get("teacher_token_count", 0) for ex in examples]
         avg_tokens = sum(token_lengths) / len(token_lengths) if token_lengths else 0
-        
+
         examples_sorted = sorted(examples, key=lambda ex: get_source_rank(ex.get("problem_source", "")))
         primary = examples_sorted[0]
-        
+
         complexity, matched_level = classify_complexity(primary, avg_token_length=avg_tokens)
-        
+
         level = matched_level or primary.get("level", "")
-        
+
         result.append({
             "problem_id": problem_id,
             "problem": primary.get("problem", ""),
@@ -201,7 +194,7 @@ def build_problem_index(raw_data: list[dict]) -> list[dict]:
             "avg_token_length": avg_tokens,
             "complexity": complexity,
         })
-    
+
     return result
 
 
@@ -231,7 +224,7 @@ def main():
             logger.info("Building problem index...")
             problem_index = build_problem_index(train_data)
             logger.info("Built index for %s unique problems", len(problem_index))
-            
+
             DATA_PATH.mkdir(parents=True, exist_ok=True)
             problem_index_path = DATA_PATH / "problem_index.json"
             with open(problem_index_path, "w", encoding="utf-8") as f:

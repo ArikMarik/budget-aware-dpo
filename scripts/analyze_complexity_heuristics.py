@@ -21,7 +21,7 @@ from src.config import (
     GSM8K_TEST_PATH,
     MATH_TEST_PATH,
     PROJECT_ROOT,
-    REAL_DATASET_PATH,
+    DATASET_PATH,
 )
 from src.utils import count_tokens, get_logger, set_seed
 
@@ -755,7 +755,7 @@ def main():
         "--training",
         type=Path,
         default=None,
-        help="Training data JSONL (default: real_openmathinstruct.jsonl or dummy)",
+        help="Training data JSONL (default: openmathinstruct.jsonl or dummy)",
     )
     parser.add_argument("--training-limit", type=int, default=50000, help="Max training examples to analyze")
     parser.add_argument("--no-training", action="store_true", help="Skip training data analysis")
@@ -766,7 +766,7 @@ def main():
     from src.config import DUMMY_DATASET_PATH, USE_DUMMY_DATA
 
     training_path = args.training or (
-        DUMMY_DATASET_PATH if USE_DUMMY_DATA else REAL_DATASET_PATH
+        DUMMY_DATASET_PATH if USE_DUMMY_DATA else DATASET_PATH
     )
 
     stats = None
