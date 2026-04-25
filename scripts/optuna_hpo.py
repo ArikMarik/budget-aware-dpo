@@ -141,7 +141,7 @@ def _sample_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
         "batch_size":                  trial.suggest_categorical("batch_size", [4, 8, 12]),
         "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
         "loss_type":                   trial.suggest_categorical("loss_type", LOSS_TYPES),
-        "length_ratio":                trial.suggest_float("length_ratio", 1.5, 10.0),
+        "length_ratio":                trial.suggest_float("length_ratio", 1.5, 4.0),
         "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 1, 5),
     }
 
@@ -231,7 +231,7 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool):
                 num_workers=search.num_workers,
                 model_name=search.model_name,
                 loss_type=str(params["loss_type"]),
-                best_model_metric="gen_tpca",
+                best_model_metric="val_loss",
                 accuracy_floor=None,
                 length_ratio=float(params["length_ratio"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
@@ -287,7 +287,7 @@ def _build_sampler(name: str, seed: int):
 
 
 def _build_pruner(enabled: bool):
-    return MedianPruner(n_warmup_steps=1) if enabled else NopPruner()
+    return MedianPruner(n_warmup_steps=5) if enabled else NopPruner()
 
 
 def _make_storage(study_name: str, storage_arg: Optional[str]) -> str:
@@ -343,7 +343,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--max-epochs", type=int, default=3)
     p.add_argument("--data-limit", type=int, default=None)
     p.add_argument("--model", type=str, default=None)
-    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--no-mixed-precision", action="store_true")
     p.add_argument("--baseline", action="store_true",
                    help="Tune baseline DPO (no length penalty) instead of budget-aware")
@@ -351,7 +351,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     # Objective
     p.add_argument("--objective",
                    choices=["tpca", "tokens_easy", "accuracy", "val_loss", "composite"],
-                   default="tpca")
+                   default="val_loss")
     p.add_argument("--accuracy-floor", type=float, default=0.10,
                    help="Trials with gen/accuracy_easy below this are infeasible (+inf).")
 
