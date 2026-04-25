@@ -193,6 +193,7 @@ def build_problem_index(raw_data: list[dict]) -> list[dict]:
             "token_lengths": token_lengths,
             "avg_token_length": avg_tokens,
             "complexity": complexity,
+            "expected_answer": primary.get("expected_answer", ""),
         })
 
     return result
@@ -230,6 +231,18 @@ def main():
             with open(problem_index_path, "w", encoding="utf-8") as f:
                 json.dump(problem_index, f, ensure_ascii=False)
             logger.info("Saved problem index to %s", problem_index_path)
+
+            problem_index_dict = {item["problem_id"]: item for item in problem_index}
+            problem_index_dict_path = DATA_PATH / "problem_index_dict.json"
+            with open(problem_index_dict_path, "w", encoding="utf-8") as f:
+                json.dump(problem_index_dict, f, ensure_ascii=False)
+            logger.info("Saved problem index (Dict) to %s", problem_index_dict_path)
+
+            reverse_index = {item["problem"]: item for item in problem_index}
+            reverse_index_path = DATA_PATH / "problem_index_reverse.json"
+            with open(reverse_index_path, "w", encoding="utf-8") as f:
+                json.dump(reverse_index, f, ensure_ascii=False)
+            logger.info("Saved reverse index to %s", reverse_index_path)
 
     if args.test_sets_only or not args.skip_test_sets:
         logger.info("Loading GSM8K test...")
