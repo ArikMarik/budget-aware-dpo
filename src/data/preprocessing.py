@@ -508,7 +508,7 @@ def split_pairs_by_problem(
     # Stratified split
     if len(unique_problems) > max_unique_problems:
         unique_problems, discarded_problems, problem_complexities, discarded_problem_complexities = train_test_split(
-        unique_problems,
+        unique_problems, problem_complexities,
         train_size=max_unique_problems,
         stratify=problem_complexities,
         random_state=seed,
@@ -528,6 +528,12 @@ def split_pairs_by_problem(
             train_indices.append(filtered_indices[i])
         elif pid in unique_val_problem_ids:
             val_indices.append(filtered_indices[i])
+
+    logger.info(
+        f"Data split, filtered indices: {len(filtered_indices):,} out of {len(pairs):,} pairs\n\t"
+        f"max_unique_problems={max_unique_problems}): "
+        f"Train (unique problems)={len(unique_train_problem_ids)}, Val (unique problems)={len(unique_val_problem_ids)}"
+    )
 
     return train_indices, val_indices
 
