@@ -54,7 +54,7 @@ def extract_answer(text: str) -> str | None:
     ans = extract_gsm8k_answer(text)
     if ans:
         return ans
-    
+
     # "The answer is 8." or "The answer is 8"
     m = re.search(r"[Tt]he answer is\s*[:=]?\s*([^\s.,;]+)", text, re.IGNORECASE)
     if m:
@@ -85,6 +85,7 @@ def verify_correctness(
     expected_answer: str,
     problem: str = "",
     use_llm_judge: bool = True,
+    logs: bool = True
 ) -> bool:
     """Verify if generated_solution matches expected_answer using tiered checking.
 
@@ -109,7 +110,8 @@ def verify_correctness(
         problem=problem,
         solution=generated_solution,
         use_llm_judge=use_llm_judge,
+        logs=logs
     )
-    if not is_correct:
+    if logs and not is_correct:
         logger.info(f"Incorrect answer: {pred} != {expected_answer}")
     return is_correct

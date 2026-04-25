@@ -38,13 +38,13 @@ def is_trivially_equal(pred: str, expected: str) -> bool:
     e_clean = expected.replace(" ", "").replace(",", "").replace("\\$", "")
     if p_clean.lower() == e_clean.lower():
         return True
-        
+
     # 2. Try checking if they are just unequal numbers (handles 3.50 vs 350)
     try:
         return abs(float(p_clean) - float(e_clean)) < 1e-6
     except ValueError:
         pass
-        
+
     return False
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ def _verify_symbolic(pred: str, expected: str) -> bool | None:
 @functools.lru_cache(maxsize=1)
 def _load_llm_judge():
     """Lazy-load the judge model once per process."""
-    # Note: Added @functools.lru_cache(maxsize=1) to ensure the model 
+    # Note: Added @functools.lru_cache(maxsize=1) to ensure the model
     # actually only loads once and caches in memory.
     logger.info("Loading LLM judge: %s", LLM_JUDGE_MODEL)
     tokenizer = AutoTokenizer.from_pretrained(LLM_JUDGE_MODEL, trust_remote_code=True)
@@ -90,7 +90,7 @@ def _load_llm_judge():
     return model, tokenizer
 
 
-def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
+def _verify_llm(problem: str, solution: str, pred: str, expected: str, logs: bool = True) -> bool:
     """
     Ask the LLM whether pred and expected represent the same answer, given the
     full solution context (critical for e.g. base-N notation, implicit units).
@@ -101,7 +101,7 @@ def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
     if len(solution) > _MAX_SOLUTION_CHARS:
         half = _MAX_SOLUTION_CHARS // 2
         solution = solution[:half] + "\n...[truncated]...\n" + solution[-half:]
-        
+
     # System Instructions
     system_content = (
         "You are an expert math grading judge. Your ONLY task is to compare a student's extracted final answer against the expected correct answer and determine if they are mathematically equivalent.\n"
@@ -125,7 +125,7 @@ def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
         {"role": "assistant", "content": "According to the Pythagorean trigonometric identity, 1 - \\cos^2t is algebraically identical to \\sin^2t. They represent the exact same value.\nVERDICT: yes"},
         {"role": "user", "content": "Student's Final Answer: 10.196\nExpected Answer: 3\\sqrt{3}+5\n\nAre they equivalent?"},
         {"role": "assistant", "content": "The expected answer is 3\\sqrt{3}+5. Since \\sqrt{3} is approximately 1.732, 3(1.732) + 5 = 5.196 + 5 = 10.196. The student's decimal correctly approximates the expected exact value.\nVERDICT: yes"},
-        
+
         # Final Query: Context clearly labeled as "Student's Full Solution" and isolated.
         {"role": "user", "content": (
             f"<context>\nProblem:\n{problem}\n\n"
@@ -154,7 +154,7 @@ def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
     # Decode only the newly generated tokens
     new_tokens = output[0][inputs["input_ids"].shape[1]:]
     response = tokenizer.decode(new_tokens, skip_special_tokens=True).strip().lower()
-    
+
     # Robust Regex parsing to catch "Verdict: yes", "Verdiction: yes", "verdical: yes"
     match = re.search(r"(?i)verd[a-z]*:\s*(yes|no)", response)
     if match:
@@ -163,10 +163,11 @@ def _verify_llm(problem: str, solution: str, pred: str, expected: str) -> bool:
         # Extreme Fallback: find the very last occurrence of 'yes' or 'no'
         words = re.findall(r"\b(yes|no)\b", response.lower())
         is_correct = (words[-1] == "yes") if words else False
-    
-    logger.info(
-        "LLM judge: pred=%r expected=%r\n → %r\n(correct=%s)", pred, expected, response, is_correct
-    )
+
+    if logs:
+        logger.info(
+            "LLM judge: pred=%r expected=%r\n → %r\n(correct=%s)", pred, expected, response, is_correct
+        )
     return is_correct
 
 
@@ -180,6 +181,7 @@ def verify_answer(
     problem: str = "",
     solution: str = "",
     use_llm_judge: bool = True,
+    logs: bool = True
 ) -> bool:
     """
     Tiered verification:
@@ -201,7 +203,7 @@ def verify_answer(
     if not expected or not str(expected).strip():
         logger.info(f"Expected answer is empty: {expected}")
         return False
-    
+
     # Tier 0
     if is_trivially_equal(pred, expected):
         return True
@@ -213,4 +215,4 @@ def verify_answer(
     # Tier 2
     if not use_llm_judge:
         return False
-    return _verify_llm(problem, solution, pred, expected)
+    return _verify_llm(problem, solution, pred, expected, logs=logs)
