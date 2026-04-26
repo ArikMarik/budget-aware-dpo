@@ -13,6 +13,7 @@ from src.training.dpo_trainer import train_dpo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--val-split", type=float, default=0.2, help='Validation fraction size, must be in (0, 1) (default 0.2)')
     parser.add_argument("--max-epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -31,12 +32,32 @@ def main():
     parser.add_argument("--run-name", type=str, default=None, help="WandB run name (auto-generated if omitted)")
     parser.add_argument("--model", type=str, default=None, help="Model name/path (default: Qwen/Qwen2.5-0.5B)")
     parser.add_argument("--kl-penalty", type=float, default=0.0, help="KL divergence penalty weight")
+    parser.add_argument(
+        "--best-model-metric",
+        type=str,
+        default="val_loss",
+        choices=[
+            "val_loss",
+            "gen_tokens_easy",
+            "gen_tpca",
+            "gen_tokens_easy_with_accuracy_floor",
+        ],
+        help="Metric used to select the best epoch/checkpoint.",
+    )
+    parser.add_argument(
+        "--accuracy-floor",
+        type=float,
+        default=None,
+        help="Only used with --best-model-metric=gen_tokens_easy_with_accuracy_floor. "
+             "Requires gen/accuracy_easy >= this threshold to be eligible.",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir or str(get_baseline_output_dir()))
     train_dpo(
         use_budget_aware=False,
         output_dir=output_dir,
+        val_split=args.val_split,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         lr=args.lr,
@@ -55,6 +76,8 @@ def main():
         compile_model=args.compile_model,
         num_workers=args.num_workers,
         model_name=args.model,
+        best_model_metric=args.best_model_metric,
+        accuracy_floor=args.accuracy_floor,
     )
 
 

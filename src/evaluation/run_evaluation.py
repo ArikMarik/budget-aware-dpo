@@ -80,18 +80,25 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
     return problems
 
 
+def default_prompt_fn(problem: str) -> str:
+    return f"Problem: {problem}\nSolution:"
+
+
 def generate_and_evaluate(
     model,
     tokenizer,
     problems: list[dict],
     max_new_tokens: int = 256,
     use_llm_judge: bool = True,
+    prompt_fn: Optional[callable] = None,
 ) -> dict:
     """Generate for each problem, extract answer, compute metrics."""
+    if prompt_fn is None:
+        prompt_fn = default_prompt_fn
     device = next(model.parameters()).device
     results = []
     for p in problems:
-        prompt = f"Problem: {p['problem']}\nSolution:"
+        prompt = prompt_fn(p["problem"])
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         with torch.no_grad():
             out = model.generate(
@@ -165,6 +172,7 @@ def evaluate_checkpoint(
     problems: list[dict],
     output_path: Optional[Path] = None,
     base_model: Optional[str] = None,
+    prompt_fn: Optional[callable] = None,
 ) -> dict:
     """Load model, run evaluation, return metrics."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -181,7 +189,7 @@ def evaluate_checkpoint(
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model.eval()
 
-    results = generate_and_evaluate(model, tokenizer, problems)
+    results = generate_and_evaluate(model, tokenizer, problems, prompt_fn=prompt_fn)
     metrics = compute_metrics(results)
 
     out = {"metrics": metrics, "results": results}

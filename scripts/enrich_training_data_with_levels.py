@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enrich existing real_openmathinstruct.jsonl with MATH levels.
+Enrich existing openmathinstruct.jsonl with MATH levels.
 Loads MATH train split, builds problem->level map, adds level to each row where problem_source has math.
 Use when you have existing JSONL and don't want to re-download from HuggingFace.
 """
@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-from src.config import REAL_DATASET_PATH
+from src.config import DATASET_PATH
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
@@ -52,7 +52,7 @@ def load_math_problem_to_level() -> dict[str, str]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=Path, default=REAL_DATASET_PATH)
+    parser.add_argument("--input", type=Path, default=DATASET_PATH)
     parser.add_argument("--output", type=Path, default=None, help="Default: overwrite input")
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()

@@ -1,4 +1,4 @@
-# Iteration 4 — Lower LR + KL Penalty (KL=0.1 Too Strong)
+# Iteration 4 — Added KL Penalty (0.1), Too Restrictive (Phase 1)
 
 **Date**: 2026-03-27
 **Status**: Preparing to launch

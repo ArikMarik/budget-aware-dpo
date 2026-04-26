@@ -1,4 +1,4 @@
-# Iteration 5 — KL=0.01 Breakthrough (Phase 1 Best: 22% Post-Train)
+# Iteration 5 — KL=0.01 Breakthrough, 22% Accuracy Best Result (Phase 1)
 
 **Date**: 2026-03-27
 **Status**: Preparing to launch

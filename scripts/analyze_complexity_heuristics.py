@@ -5,7 +5,7 @@ Analyze dataset complexity heuristics for informed threshold decisions.
 Computes statistics per docs/next_update_considerations.md:
 1. MATH vs GSM8k counts
 2. MATH level distribution (1-5)
-3. Token counts (tiktoken cl100k_base) per category and per level
+3. Token counts per category and per level
 4. Percentile-based thresholds per category
 5. CoT indicators and sentence count (optional heuristics)
 
@@ -21,7 +21,7 @@ from src.config import (
     GSM8K_TEST_PATH,
     MATH_TEST_PATH,
     PROJECT_ROOT,
-    REAL_DATASET_PATH,
+    DATASET_PATH,
 )
 from src.utils import count_tokens, get_logger, set_seed
 
@@ -391,9 +391,7 @@ def write_report(stats: dict | None, training_stats: dict | None, output_path: P
 
     # 3. Token statistics
     lines.extend([
-        "## 3. Token Count Statistics (tiktoken cl100k_base)",
-        "",
-        "Using `tiktoken` cl100k_base (GPT-4/Claude compatible) for accurate token counts.",
+        "## 3. Token Count Statistics",
         "",
     ])
     if stats:
@@ -627,7 +625,7 @@ def write_report(stats: dict | None, training_stats: dict | None, output_path: P
             f"- **Training MATH:** P25 ≈ {training_stats['math_percentiles'].get(25, 0):.0f}, P50 ≈ {training_stats['math_percentiles'].get(50, 0):.0f}, P75 ≈ {training_stats['math_percentiles'].get(75, 0):.0f} tokens",
             f"- **Training GSM8k:** P25 ≈ {training_stats['gsm8k_percentiles'].get(25, 0):.0f}, P50 ≈ {training_stats['gsm8k_percentiles'].get(50, 0):.0f}, P75 ≈ {training_stats['gsm8k_percentiles'].get(75, 0):.0f} tokens",
         ])
-    obs_lines.append("- Token count (tiktoken) differs from word count; math LaTeX uses more tokens.")
+    obs_lines.append("- Token count differs from word count; math LaTeX uses more tokens.")
     lines.extend([
         "## 6. Recommendations for Threshold Decisions",
         "",
@@ -642,7 +640,7 @@ def write_report(stats: dict | None, training_stats: dict | None, output_path: P
     lines.extend([
         "",
         "### Suggested Approaches",
-        "1. **Replace word count with tiktoken** for `teacher_token_count`.",
+        "1. **Replace word count with `teacher_token_count`.",
         "2. **Per-category percentiles:** Easy = below P25, Hard = above P75. Use **training** percentiles when preprocessing training data.",
         "3. **Level-based (MATH):** Level 1-2 → Easy, Level 3 → Medium, Level 4-5 → Hard.",
         "4. **CoT indicators:** Secondary signal only.",
@@ -657,8 +655,8 @@ def write_report(stats: dict | None, training_stats: dict | None, output_path: P
         "",
         "| Heuristic | Value | Notes |",
         "|-----------|-------|-------|",
-        "| EASY_TOKEN_THRESHOLD | **70** | Below = short/direct (tiktoken) |",
-        "| HARD_TOKEN_THRESHOLD | **130** | Above = long CoT (tiktoken) |",
+        "| EASY_TOKEN_THRESHOLD | **70** | Below = short/direct |",
+        "| HARD_TOKEN_THRESHOLD | **130** | Above = long CoT |",
         "| MATH Level 1-2 | C=0 | Easy |",
         "| MATH Level 4-5 | C=1 | Hard |",
         "| MATH Level 3 | Token fallback | Use P25/P75 |",
@@ -755,7 +753,7 @@ def main():
         "--training",
         type=Path,
         default=None,
-        help="Training data JSONL (default: real_openmathinstruct.jsonl or dummy)",
+        help="Training data JSONL (default: openmathinstruct.jsonl or dummy)",
     )
     parser.add_argument("--training-limit", type=int, default=50000, help="Max training examples to analyze")
     parser.add_argument("--no-training", action="store_true", help="Skip training data analysis")
@@ -766,7 +764,7 @@ def main():
     from src.config import DUMMY_DATASET_PATH, USE_DUMMY_DATA
 
     training_path = args.training or (
-        DUMMY_DATASET_PATH if USE_DUMMY_DATA else REAL_DATASET_PATH
+        DUMMY_DATASET_PATH if USE_DUMMY_DATA else DATASET_PATH
     )
 
     stats = None

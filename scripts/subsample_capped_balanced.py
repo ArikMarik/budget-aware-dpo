@@ -34,7 +34,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import MODEL_NAME, PROCESSED_DATASET_PATH_REAL
+from src.config import MODEL_NAME, PROCESSED_DATASET_PATH
 from src.data.preprocessing import split_pairs_by_problem
 from src.utils import count_tokens, get_logger, set_seed, setup_global_exception_handler
 
@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=PROCESSED_DATASET_PATH_REAL,
+        default=PROCESSED_DATASET_PATH,
         help="Source processed dataset directory (default: processed_dpo_dataset_real)",
     )
     parser.add_argument(
@@ -323,7 +323,7 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
 
-    source_path = args.source_dir / "dataset.jsonl"
+    source_path = Path(args.source_dir) / "dataset.jsonl"
     if not source_path.exists():
         logger.error("Source dataset not found: %s", source_path)
         raise FileNotFoundError(f"Source dataset not found: {source_path}")

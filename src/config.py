@@ -17,13 +17,13 @@ DATA_PATH = Path(
 )
 
 DUMMY_DATASET_PATH = DATA_PATH / "dummy_openmathinstruct.jsonl"
-PROCESSED_DATASET_PATH = DATA_PATH / "processed_dpo_dataset"
+DUMMY_PROCESSED_DATASET_PATH = DATA_PATH / "dummy_processed_dpo_dataset"
 
 # Real data (Phase 7+)
-REAL_DATASET_PATH = DATA_PATH / "real_openmathinstruct.jsonl"
-REAL_DATASET_PATH_LIMITED = DATA_PATH / "real_openmathinstruct.jsonl.limited"
+DATASET_PATH = DATA_PATH / "openmathinstruct.jsonl"
+DATASET_PATH_LIMITED = DATA_PATH / "openmathinstruct.jsonl.limited"
 
-PROCESSED_DATASET_PATH_REAL = DATA_PATH / "processed_dpo_dataset_real"
+PROCESSED_DATASET_PATH = DATA_PATH / "processed_dpo_dataset"
 PROCESSED_DATASET_PATH_LIMITED = DATA_PATH / "processed_dpo_dataset_limited"
 PROCESSED_DATASET_PATH_BALANCED = DATA_PATH / "processed_dpo_dataset_balanced"
 
@@ -39,17 +39,12 @@ def get_processed_dataset_path() -> Path:
     variant = os.environ.get("DATASET_VARIANT", "")
     if variant == "balanced":
         return PROCESSED_DATASET_PATH_BALANCED
-    return PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH_REAL
+    return DUMMY_PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH
 
 
-def get_tokenized_train_path() -> Path:
-    """Return path to pre-tokenized training data."""
-    return get_processed_dataset_path() / "train_tokens.pt"
-
-
-def get_tokenized_val_path() -> Path:
-    """Return path to pre-tokenized validation data."""
-    return get_processed_dataset_path() / "val_tokens.pt"
+def get_tokens_path() -> Path:
+    """Return path to all tokenized pairs."""
+    return get_processed_dataset_path() / "tokens.pt"
 
 
 def get_train_pairs_path() -> Path:
@@ -78,7 +73,7 @@ def get_budget_aware_output_dir() -> Path:
     suffix = "_limited"
     # suffix = "" if USE_DUMMY_DATA else "_real"
     return CHECKPOINT_DIR / f"budget_aware_dpo{suffix}"
-    
+
 
 # Model
 MODEL_NAME = "Qwen/Qwen2.5-0.5B"

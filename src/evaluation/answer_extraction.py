@@ -38,11 +38,12 @@ def extract_gsm8k_answer(answer: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def extract_answer(text: str) -> str | None:
+def extract_answer(text: str, logs: bool = True) -> str | None:
     """Extract final answer from model output. Returns None if not found."""
     text = text.strip()
     if not text:
-        logger.info(f"No answer found in text: {text}")
+        if logs:
+            logger.info(f"No answer found in text: {text}")
         return None
 
     # \boxed{...} — handles nested braces, uses last occurrence
@@ -54,7 +55,7 @@ def extract_answer(text: str) -> str | None:
     ans = extract_gsm8k_answer(text)
     if ans:
         return ans
-    
+
     # "The answer is 8." or "The answer is 8"
     m = re.search(r"[Tt]he answer is\s*[:=]?\s*([^\s.,;]+)", text, re.IGNORECASE)
     if m:
@@ -64,7 +65,8 @@ def extract_answer(text: str) -> str | None:
     numbers = re.findall(r"-?\d+\.?\d*", text)
     if numbers:
         return numbers[-1]
-    logger.info(f"No answer found in text: {text}")
+    if logs:
+        logger.info(f"No answer found in text: {text}")
     return None
 
 
@@ -85,6 +87,7 @@ def verify_correctness(
     expected_answer: str,
     problem: str = "",
     use_llm_judge: bool = True,
+    logs: bool = True
 ) -> bool:
     """Verify if generated_solution matches expected_answer using tiered checking.
 
@@ -99,7 +102,7 @@ def verify_correctness(
     """
     if not expected_answer or not str(expected_answer).strip():
         return False
-    pred = extract_answer(generated_solution)
+    pred = extract_answer(generated_solution, logs=logs)
     if pred is None:
         logger.info(f"No answer found in generated solution: {generated_solution}")
         return False
@@ -109,7 +112,8 @@ def verify_correctness(
         problem=problem,
         solution=generated_solution,
         use_llm_judge=use_llm_judge,
+        logs=logs
     )
-    if not is_correct:
+    if logs and not is_correct:
         logger.info(f"Incorrect answer: {pred} != {expected_answer}")
     return is_correct

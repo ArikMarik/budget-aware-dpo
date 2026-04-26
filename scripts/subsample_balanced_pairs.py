@@ -24,7 +24,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 from src.config import (
     MODEL_NAME,
     PROCESSED_DATASET_PATH_BALANCED,
-    PROCESSED_DATASET_PATH_REAL,
+    PROCESSED_DATASET_PATH,
 )
 from src.data.preprocessing import split_pairs_by_problem
 from src.utils import count_tokens, get_logger, set_seed, setup_global_exception_handler
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=PROCESSED_DATASET_PATH_REAL,
+        default=PROCESSED_DATASET_PATH,
         help="Source processed dataset directory (default: processed_dpo_dataset_real)",
     )
     parser.add_argument(

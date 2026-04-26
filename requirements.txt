@@ -1,13 +1,17 @@
 # Budget-Aware DPO Project Dependencies
-tiktoken>=0.5.0
-wandb>=0.16.0
-tqdm>=4.65.0
-torch>=2.0.0
-transformers>=4.36.0
-datasets>=2.14.0
-peft>=0.7.0
 accelerate>=0.25.0
-unsloth
-vllm>=0.4.0
+datasets>=2.14.0
+faiss-cpu>=1.13.2
+math-verify>=0.9.0
 matplotlib>=3.7.0
+numpy>=1.23.0
+optuna>=4.8.0
+pandas>=3.0.1
+peft>=0.7.0
 scikit-learn>=1.3.0
+sentence-transformers>=5.4.1
+torch>=2.0.0
+tqdm>=4.65.0
+transformers>=4.36.0
+unsloth
+wandb>=0.16.0

@@ -1,78 +1,107 @@
-# Autoresearch Handoff — Phase 2
+# Autoresearch Handoff — Phase 4
 
-**Last updated**: 2026-03-28 09:05 UTC
-**Phase**: Phase 2 — autonomous experimentation with 3 GPUs for 24 hours
+**Last updated**: 2026-03-29 11:45 UTC
+**Phase**: Phase 4 — Baseline Establishment & SFT Accuracy Push
 **Branch**: `autoresearch/mar26`
+**GPU**: 1 GPU available (GPU 0)
 
 ---
 
 ## Start Here
 
-You are the Phase 2 agent. Read these files in order:
-1. **This file** — current state and what to do first
-2. **`autoresearch/PHASE1_SUMMARY.md`** — full Phase 1 findings, hypotheses A-G, technical reference, and Phase 2 experiment plan
-3. **`autoresearch/RULES.md`** — operational rules (polling, GPU assignment, commit protocol, etc.)
-4. **`program.md`** — master experiment protocol (training commands, eval commands, monitoring)
+You are the Phase 4 agent. Read these files in order:
+1. **This file** — current state and what to do next
+2. **`autoresearch/PHASE4_PRD.md`** — the "bible" for this phase, all goals and tasks
+3. **`autoresearch/RULES.md`** — operational rules (polling, commit protocol, etc.)
+4. **`program.md`** — master experiment protocol
+5. **`autoresearch/iteration11.md`** — current iteration (in progress)
 
 ---
 
 ## Current State
 
-- **All 3 GPUs are FREE** (no processes running)
-- Phase 1 is complete (6 iterations, all evaluated)
-- Last iteration number: **6**. Start Phase 2 from **iteration 7**.
+### What's Running
+- Nothing — GPU 0 is FREE
+
+### What's Done (Iterations 11-12)
+- ✅ **Easy 0-shot eval**: GSM8K=30.4%, MATH L1=42.8%, MATH L2=27.6% (2,650 problems)
+- ✅ **Hard 0-shot eval**: MATH L3=18.0%, L4=10.2%, L5=4.6% (3,669 problems)
+- ✅ **8-shot base eval**: GSM8K=40.7%, overall=36.4% (500 problems) — closes gap to published 44%
+- ✅ **8-shot budget iter5 eval**: Easy=41.2% (matches base), Hard=16.8% (collapsed)
+- ✅ **Easy-only budget DPO trained** (iter12): E3 42% easy gen-eval
+- ✅ **8-shot easy-only eval**: Easy=41.6%, Hard=16.4% — nearly identical to iter5
+- ✅ Easy-only dataset created, 8-shot support, zero data leakage confirmed, files renamed
+
+### What's Done
+- ✅ `scripts/eval_base_model.py` written — base model eval with raw/LoRA-init modes
+- ✅ `scripts/training/train_sft.py` written — SFT training script (cross-entropy on chosen solutions)
+- ✅ `autoresearch/iteration11.md` started (needs results filled in)
+
+### What's Next
+- Awaiting user direction. Key findings documented in iteration 11 and 12.
+- Options: increase λ, reduce epochs for token efficiency, SFT-then-DPO, few-shot in training
+
+Easy-only training command:
+   ```bash
+   CUDA_VISIBLE_DEVICES=0 DATASET_PATH=data/processed_dpo_dataset_balanced_v4_capped \
+     PYTHONUNBUFFERED=1 nohup .venv/bin/python -m scripts.training.train_sft \
+     --output-dir checkpoints/sft_v1 --max-epochs 3 --batch-size 4 --lr 2e-5 \
+     --run-name sft_v1 --wandb > logs/sft_v1.log 2>&1 &
+   ```
+6. **Evaluate SFT** and iterate hyperparameters
 
 ---
 
-## Phase 1 Bottom Line
+## Phase 4 Goals (from PRD)
 
-The length penalty (lambda_easy=5.0) produces **marginal** improvement over KL-only baseline:
-- **2 fewer tokens** on easy problems (177 vs 179)
-- **5% better TPCA** (846 vs 891)
-- **Same accuracy** (22% vs 21.2%)
+| Priority | Goal |
+|----------|------|
+| P0 | Evaluate base Qwen2.5-0.5B on our eval pipeline — get ground truth |
+| P0 | Understand any gap vs published 44% GSM8K |
+| P1 | SFT fine-tune, maximize accuracy (standard cross-entropy, NOT DPO) |
+| P1 | Hyperparameter sweep until accuracy plateaus |
 
-This is real but too small for a paper. Phase 2 needs a **stronger mechanism** to shorten easy tokens.
-
----
-
-## Phase 2 Goals
-
-**Primary**: Shorten token count on easy problems (avg_tokens_easy ↓↓).
-**Secondary**: Maintain or improve accuracy. Hard problem improvement is a bonus.
-**Constraint**: DPO must be part of the approach.
+**What NOT to do**: No token optimization, no DPO, no budget-aware, no multi-GPU.
 
 ---
 
-## Recommended First Actions
+## Key Scripts
 
-1. **Read PHASE1_SUMMARY.md** (especially Sections 6-9) for full hypothesis details
-2. **Pick 2-3 hypotheses** to test in parallel on 3 GPUs
-3. **Document your plan** in `autoresearch/iteration7.md` before launching
-4. **Launch experiments** on all 3 GPUs
-
-### Top hypotheses (see PHASE1_SUMMARY Section 6 for details):
-
-| ID | Hypothesis | Expected Impact | Effort |
-|----|-----------|----------------|--------|
-| A | Per-token penalty (not per-sequence) | High — directly shapes generation | Medium (code change) |
-| B | Larger model (1.5B) | High — more room to show budget effect | Low (download + same code) |
-| D | SimPO (length-normalized DPO, no ref model) | High — built-in length control | Medium (new loss function) |
-| E | Two-phase training (accuracy then efficiency) | Medium | Low (run sequentially) |
-| C | More/better hard data | Low for our goal | Medium |
-
-### Suggested Block 1 (hours 0-8, parallel on 3 GPUs):
-- **GPU 0**: 0.5B + SimPO (new loss, no reference model, built-in length normalization)
-- **GPU 1**: 0.5B + stronger per-token penalty (modify `budget_aware_dpo_loss.py`)
-- **GPU 2**: 1.5B baseline DPO (download Qwen2.5-1.5B, establish new baseline)
+| Script | Purpose |
+|--------|---------|
+| `scripts/eval_base_model.py` | Eval raw base model (supports --with-lora-init) |
+| `scripts/training/train_sft.py` | SFT training (cross-entropy on chosen solutions) |
+| `scripts/eval_checkpoint.py` | Eval any LoRA checkpoint (existing) |
 
 ---
 
-## Available Checkpoints (for reference, don't overwrite)
+## Eval Commands
 
-| Checkpoint | Description | Post-train Accuracy | Easy Tokens |
-|-----------|-------------|--------------------:|------------:|
-| `budget_aware_balanced_iter5/` | Best budget (λ=5.0, KL=0.01) | 22.0% | 177.4 |
-| `baseline_kl_iter6/` | Best baseline (KL=0.01 only) | 21.2% | 179.4 |
+```bash
+# Base model eval (raw, full dataset)
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/storage/arik/nlp_final_project PYTHONUNBUFFERED=1 \
+  .venv/bin/python scripts/eval_base_model.py \
+  --output eval_results/base_qwen_0.5b_full_256.json --use-real --max-new-tokens 256
+
+# Base model eval (with untrained LoRA)
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/storage/arik/nlp_final_project PYTHONUNBUFFERED=1 \
+  .venv/bin/python scripts/eval_base_model.py \
+  --output eval_results/base_qwen_0.5b_lora_init_256.json --use-real --with-lora-init --max-new-tokens 256
+
+# SFT checkpoint eval
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/storage/arik/nlp_final_project PYTHONUNBUFFERED=1 \
+  .venv/bin/python scripts/eval_checkpoint.py \
+  --checkpoint checkpoints/sft_v1/best-model --limit 500 \
+  --output eval_results/sft_v1.json --use-real
+```
+
+---
+
+## Iteration Numbering
+
+- Iterations 0-10: Phase 1-3 (DPO experiments)
+- **Iteration 11**: Base model evaluation (IN PROGRESS)
+- Iteration 12+: SFT experiments
 
 ---
 
@@ -81,7 +110,6 @@ This is real but too small for a paper. Phase 2 needs a **stronger mechanism** t
 - Use `.venv/bin/python` (NOT system python)
 - Set `PYTHONUNBUFFERED=1` for all training/eval
 - Set `PYTHONPATH=/storage/arik/nlp_final_project` for eval scripts
-- Eval command: `scripts/eval_checkpoint.py --use-real --limit 500`
-- Kill `keep_alive.py` before training, start when idle
 - Poll every 20 min, /compact at 200K context
 - Commit after each completed iteration
+- **Always update this HANDOFF.md** before /compact or when state changes significantly

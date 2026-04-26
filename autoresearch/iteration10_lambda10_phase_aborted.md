@@ -1,4 +1,4 @@
-# Iteration 10 — Phase 3: 0.5B All-In on Easy Accuracy (λ=10, 6 Epochs)
+# Iteration 10 — λ=10 All-In on Accuracy, 29.2% but Phase Aborted (Phase 3)
 
 **Date**: 2026-03-28
 **Branch**: `autoresearch/mar26`
