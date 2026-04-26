@@ -38,11 +38,12 @@ def extract_gsm8k_answer(answer: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def extract_answer(text: str) -> str | None:
+def extract_answer(text: str, logs: bool = True) -> str | None:
     """Extract final answer from model output. Returns None if not found."""
     text = text.strip()
     if not text:
-        logger.info(f"No answer found in text: {text}")
+        if logs:
+            logger.info(f"No answer found in text: {text}")
         return None
 
     # \boxed{...} — handles nested braces, uses last occurrence
@@ -64,7 +65,8 @@ def extract_answer(text: str) -> str | None:
     numbers = re.findall(r"-?\d+\.?\d*", text)
     if numbers:
         return numbers[-1]
-    logger.info(f"No answer found in text: {text}")
+    if logs:
+        logger.info(f"No answer found in text: {text}")
     return None
 
 
@@ -100,7 +102,7 @@ def verify_correctness(
     """
     if not expected_answer or not str(expected_answer).strip():
         return False
-    pred = extract_answer(generated_solution)
+    pred = extract_answer(generated_solution, logs=logs)
     if pred is None:
         logger.info(f"No answer found in generated solution: {generated_solution}")
         return False
