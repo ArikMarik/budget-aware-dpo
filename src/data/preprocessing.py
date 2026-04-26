@@ -455,7 +455,7 @@ def load_jsonl(path: Path) -> list[dict]:
 
 
 def split_pairs_by_problem(
-    pairs: list[dict] | dict,
+    pairs: dict,
     val_split: float,
     seed: int = 42,
     filtered_indices: list[int] | None = None,
@@ -473,25 +473,11 @@ def split_pairs_by_problem(
     set_seed(seed)
 
 
-    if isinstance(pairs, dict):
-        if filtered_indices is None:
-            filtered_indices = np.arange(len(pairs)).tolist()
-        problem_ids = pairs["problem_ids"].numpy()[filtered_indices]
-        complexities = pairs["complexities"].numpy()[filtered_indices]
-    else: # TODO - deprecate the list[dict] options
-        problem_ids, complexities = [], []
-        for i, pair in enumerate(pairs):
-            if filtered_indices and i not in filtered_indices:
-                continue
+    if filtered_indices is None:
+        filtered_indices = np.arange(len(pairs)).tolist()
 
-            problem_ids.append(pair["problem_ids"])
-            complexities.append(pair["complexities"])
-
-        problem_ids = np.array(problem_ids)
-        complexities = np.array(complexities)
-
-        if filtered_indices is None:
-                filtered_indices = np.arange(len(pairs)).tolist()
+    problem_ids = pairs["problem_ids"].numpy()[filtered_indices]
+    complexities = pairs["complexities"].numpy()[filtered_indices]
 
     # Get unique problems
     unique_problems = np.unique(problem_ids)
