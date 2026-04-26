@@ -388,10 +388,14 @@ def load_tokenized_datasets(
             "Run preprocess_dpo_data.py first."
         )
 
+    logger.debug(f'{" START LOAD TOKENS ":#^100}')
     data = torch.load(tokens_path)
+    logger.debug(f'{" END LOAD TOKENS ":#^100}')
 
+    logger.debug(f'{" START FILTER BY LENGTH ":#^100}')
     # 1. Apply length_ratio filter (vectorized)
     filtered_indices = _filter_by_length_ratio(data, length_ratio)
+    logger.debug(f'{" END FILTER BY LENGTH ":#^100}')
 
     # 2. Cap pairs per problem (stratified by rejection_reason)
     if max_pairs_per_problem is not None and max_pairs_per_problem > 0:
@@ -399,10 +403,12 @@ def load_tokenized_datasets(
             data, filtered_indices, max_pairs_per_problem, seed
         )
 
+    logger.debug(f'{" START SPLIT BY PROBLEM ":#^100}')
     # 3. Split by problem_id (stratified by complexity of filtered data)
     train_indices, val_indices = split_pairs_by_problem(
         data, val_split, seed, filtered_indices, max_unique_problems
     )
+    logger.debug(f'{" END SPLIT BY PROBLEM ":#^100}')
 
     train_dataset = TokenizedDPODataset(data, train_indices)
     val_dataset = TokenizedDPODataset(data, val_indices)
@@ -911,7 +917,7 @@ def train_dpo(
     max_unique_problems: int = 65_000,
     problem_index_path: Path = DATA_PATH / "problem_index_dict.json",
 ) -> dict:
-    print(f'{" STARTED DPO TRAINER ":#^100}')
+    logger.debug(f'{" STARTED DPO TRAINER ":#^100}')
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -936,9 +942,12 @@ def train_dpo(
         train_dataset, val_dataset, batch_size, num_workers, pin_memory
     )
 
+    logger.debug(f'{" START CREATE TOKENIZER ":#^100}')
     effective_model_name = model_name or MODEL_NAME
     tokenizer = create_tokenizer(effective_model_name)
+    logger.debug(f'{" END CREATE TOKENIZER ":#^100}')
 
+    logger.debug(f'{" START BUILD VALIDATION PROBLEMS ":#^100}')
     # Build validation problems with pre-tokenized prompts
     if problem_index_path.exists():
         with open(problem_index_path) as f:
@@ -947,6 +956,7 @@ def train_dpo(
     else:
         logger.warning(f"Problem index not found at {problem_index_path}, skipping val_problems")
         val_problems = []
+    logger.debug(f'{" END BUILD VALIDATION PROBLEMS ":#^100}')
 
     steps_per_epoch = len(train_loader)
     effective_batch_size = batch_size * gradient_accumulation_steps

@@ -52,7 +52,7 @@ def get_logger(name: str) -> logging.Logger:
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
 
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG)
     console_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
 
     logger.addHandler(file_handler)

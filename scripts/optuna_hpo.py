@@ -235,6 +235,7 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool):
                 accuracy_floor=None,
                 length_ratio=float(params["length_ratio"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
+                # max_unique_problems=50,  # TODO - VERY TEMPORARY (CHECK THE A SMALL FULL RUN)
             )
         except torch.cuda.OutOfMemoryError:
             _cleanup_gpu()
