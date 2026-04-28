@@ -372,8 +372,7 @@ def build_dpo_pairs(
         problem_data = problem_meta[problem]
         problem_id = problem_data["problem_id"]
         level = problem_data["level"]
-        # complexity = problem_data["complexity"] # TODO - bring back after running load_real_data.py
-        complexity, _ = classify_complexity(problem_data, problem_data['avg_token_length'])
+        complexity = problem_data["complexity"]
 
         index_lengths = problem_data.get("token_lengths")
         if index_lengths:
