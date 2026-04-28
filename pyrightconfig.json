@@ -1,0 +1,20 @@
+{
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/venv",
+    "**/.venv",
+    "**/env",
+    "**/site-packages",
+    "**/dist",
+    "**/build", "**/.*"
+  ],
+  "include": ["src", "scripts"],
+  "analysis": {
+    "typeCheckingMode": "basic",
+    "autoSearchPaths": false,
+    "useLibraryCodeForTypes": false
+  },
+  "reportMissingImports": true,
+  "typeCheckingMode": "basic"
+}

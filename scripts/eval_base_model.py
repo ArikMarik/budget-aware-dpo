@@ -17,7 +17,6 @@ Usage:
     --output eval_results/base_qwen_1.5b_math_lora_init.json --with-lora-init --max-new-tokens 1024
 """
 import argparse
-from functools import partial
 import json
 import time
 from pathlib import Path

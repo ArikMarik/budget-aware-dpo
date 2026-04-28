@@ -76,6 +76,14 @@ class TrainingConfig:
         return asdict(self)
 
 
+@dataclass
+class StaticTrainingContext:
+    raw_data: dict
+    tokenizer: PreTrainedTokenizer
+    problem_index: dict
+    ref_model: nn.Module
+
+
 class EarlyStopping:
     def __init__(self, patience: int = 5, threshold: float = 0.0, threshold_mode: str = "rel"):
         self.patience = patience
@@ -268,10 +276,21 @@ class MetricsAccumulator:
         }
 
 
-def log_prob(logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+def log_prob(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_lengths: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Mean log-prob over response tokens only. Prompt positions are masked out."""
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = input_ids[..., 1:].contiguous()
     shift_mask = attention_mask[..., 1:].contiguous().float()
+    if prompt_lengths is not None:
+        for i, pl in enumerate(prompt_lengths):
+            # prompt_length computed with add_special_tokens=False; full sequence has BOS.
+            # The BOS shifts the first response token by 1, so :pl zeros exactly the prompt.
+            shift_mask[i, :pl] = 0.0
     log_probs = F.log_softmax(shift_logits, dim=-1)
     token_log_probs = torch.gather(log_probs, -1, shift_labels.unsqueeze(-1)).squeeze(-1)
     return (token_log_probs * shift_mask).sum(-1) / shift_mask.sum(-1).clamp(min=1)
@@ -297,6 +316,7 @@ class TokenizedDPODataset(Dataset):
             "rejected_attention_mask": self.data["rejected_attention_mask"][real_idx],
             "complexity": self.data["complexities"][real_idx],
             "problem_id": self.data["problem_ids"][real_idx],
+            "prompt_length": self.data["prompt_lengths"][real_idx],
         }
 
 
@@ -364,6 +384,8 @@ def _filter_by_length_ratio(data: dict, length_ratio: float) -> list[int]:
 
 def load_tokenized_datasets(
     tokens_path: Path,
+    *,
+    raw_data: Optional[dict] = None,
     length_ratio: float = 1.0,
     val_split: float = 0.2,
     seed: int = 42,
@@ -375,19 +397,19 @@ def load_tokenized_datasets(
     problem, then split by problem_id. Returns (train_dataset, val_dataset).
 
     Processing order:
-    1. Load all data from tokens_path
+    1. Load all data from tokens_path (or use raw_data if provided to skip torch.load)
     2. Apply length_ratio filter to all pairs
     3. Apply max_pairs_per_problem cap (stratified by rejection_reason)
     4. Split filtered pairs by problem_id (stratified by complexity)
     """
-    if not tokens_path.exists():
+    if raw_data is None and not tokens_path.exists():
         raise FileNotFoundError(
             f"Tokenized dataset not found at {tokens_path}. "
             "Run preprocess_dpo_data.py first."
         )
 
     logger.debug(f'{" START LOAD TOKENS ":#^100}')
-    data = torch.load(tokens_path)
+    data = raw_data if raw_data is not None else torch.load(tokens_path)
     logger.debug(f'{" END LOAD TOKENS ":#^100}')
 
     logger.debug(f'{" START FILTER BY LENGTH ":#^100}')
@@ -421,7 +443,7 @@ def load_tokenized_datasets(
 
 
 def collate_fn_tokenized(batch: list[dict]) -> dict:
-    keys = ["chosen_input_ids", "chosen_attention_mask", "rejected_input_ids", "rejected_attention_mask", "complexity", "problem_id"]
+    keys = ["chosen_input_ids", "chosen_attention_mask", "rejected_input_ids", "rejected_attention_mask", "complexity", "problem_id", "prompt_length"]
     collated_batch = {key: [] for key in keys}
     for item in batch:
         for key, value in item.items():
@@ -486,13 +508,39 @@ def create_ref_model(model_name: str, device: str) -> PeftModel:
     return model
 
 
-def _move_batch_to_device(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def build_static_context(
+    tokens_path: Path,
+    model_name: str,
+    device: str,
+    problem_index_path: Path,
+) -> StaticTrainingContext:
+    """Load all trial-invariant state once. Pass the result to every train_dpo call."""
+    raw_data = torch.load(tokens_path)
+    tokenizer = create_tokenizer(model_name)
+    if problem_index_path.exists():
+        with open(problem_index_path) as f:
+            problem_index = json.load(
+                f, object_hook=lambda obj: {int(k) if k.isdigit() else k: v for k, v in obj.items()}
+            )
+    else:
+        problem_index = {}
+    ref_model = create_ref_model(model_name, device)
+    return StaticTrainingContext(
+        raw_data=raw_data,
+        tokenizer=tokenizer,
+        problem_index=problem_index,
+        ref_model=ref_model,
+    )
+
+
+def _move_batch_to_device(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     chosen_ids = batch['chosen_input_ids'].cuda(non_blocking=True)
     chosen_mask = batch['chosen_attention_mask'].cuda(non_blocking=True)
     rejected_ids = batch['rejected_input_ids'].cuda(non_blocking=True)
     rejected_mask = batch['rejected_attention_mask'].cuda(non_blocking=True)
     complexities = batch['complexity'].cuda(non_blocking=True)
-    return chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities
+    prompt_lengths = batch['prompt_length'].cuda(non_blocking=True)
+    return chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities, prompt_lengths
 
 
 def _compute_batch_forward(
@@ -503,6 +551,7 @@ def _compute_batch_forward(
     rejected_ids: torch.Tensor,
     rejected_mask: torch.Tensor,
     tokenizer: PreTrainedTokenizer,
+    prompt_lengths: Optional[torch.Tensor] = None,
 ) -> tuple:
     _pad_token_if_needed(tokenizer)
 
@@ -513,10 +562,10 @@ def _compute_batch_forward(
     policy_chosen = model(input_ids=chosen_ids, attention_mask=chosen_mask).logits
     policy_rejected = model(input_ids=rejected_ids, attention_mask=rejected_mask).logits
 
-    policy_chosen_lp = log_prob(policy_chosen, chosen_ids, chosen_mask)
-    policy_rejected_lp = log_prob(policy_rejected, rejected_ids, rejected_mask)
-    ref_chosen_lp = log_prob(ref_chosen, chosen_ids, chosen_mask)
-    ref_rejected_lp = log_prob(ref_rejected, rejected_ids, rejected_mask)
+    policy_chosen_lp = log_prob(policy_chosen, chosen_ids, chosen_mask, prompt_lengths)
+    policy_rejected_lp = log_prob(policy_rejected, rejected_ids, rejected_mask, prompt_lengths)
+    ref_chosen_lp = log_prob(ref_chosen, chosen_ids, chosen_mask, prompt_lengths)
+    ref_rejected_lp = log_prob(ref_rejected, rejected_ids, rejected_mask, prompt_lengths)
 
     chosen_lens = (chosen_ids != tokenizer.pad_token_id).sum(dim=-1).float()
     rejected_lens = (rejected_ids != tokenizer.pad_token_id).sum(dim=-1).float()
@@ -532,10 +581,10 @@ def compute_batch_loss_train(
     loss_fn: Callable,
     use_compile: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-    chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities = _move_batch_to_device(batch)
+    chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities, prompt_lengths = _move_batch_to_device(batch)
 
     policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens = _compute_batch_forward(
-        model, ref_model, chosen_ids, chosen_mask, rejected_ids, rejected_mask, tokenizer
+        model, ref_model, chosen_ids, chosen_mask, rejected_ids, rejected_mask, tokenizer, prompt_lengths
     )
 
     loss, extra = loss_fn(
@@ -606,10 +655,10 @@ def compute_batch_loss_eval(
     dpo_beta: float,
     metrics_accumulator: MetricsAccumulator
 ) -> torch.Tensor:
-    chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities = _move_batch_to_device(batch)
+    chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities, prompt_lengths = _move_batch_to_device(batch)
 
     policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens = _compute_batch_forward(
-        model, ref_model, chosen_ids, chosen_mask, rejected_ids, rejected_mask, tokenizer
+        model, ref_model, chosen_ids, chosen_mask, rejected_ids, rejected_mask, tokenizer, prompt_lengths
     )
 
     loss, extra = loss_fn(
@@ -893,15 +942,24 @@ def train_dpo(
     accuracy_floor: Optional[float] = None,
     max_unique_problems: int = 65_000,
     problem_index_path: Path = DATA_PATH / "problem_index_dict.json",
+    ctx: Optional[StaticTrainingContext] = None,
 ) -> dict:
     logger.debug(f'{" STARTED DPO TRAINER ":#^100}')
     set_seed(seed)
+    effective_model_name = model_name or MODEL_NAME
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    if ctx is None:
+        ctx = build_static_context(get_tokens_path(), effective_model_name, device, problem_index_path)
+
+    tokenizer = ctx.tokenizer
+    problem_index = ctx.problem_index
+    ref_model = ctx.ref_model
+
     # Load, filter, and split in one call
-    all_tokens_path = get_tokens_path()
     train_dataset, val_dataset = load_tokenized_datasets(
-        all_tokens_path,
+        get_tokens_path(),
+        raw_data=ctx.raw_data,
         length_ratio=length_ratio,
         val_split=val_split,
         seed=seed,
@@ -919,16 +977,8 @@ def train_dpo(
         train_dataset, val_dataset, batch_size, num_workers, pin_memory
     )
 
-    logger.debug(f'{" START CREATE TOKENIZER ":#^100}')
-    effective_model_name = model_name or MODEL_NAME
-    tokenizer = create_tokenizer(effective_model_name)
-    logger.debug(f'{" END CREATE TOKENIZER ":#^100}')
-
     logger.debug(f'{" START BUILD VALIDATION PROBLEMS ":#^100}')
-    # Build validation problems with pre-tokenized prompts
-    if problem_index_path.exists():
-        with open(problem_index_path) as f:
-            problem_index = json.load(f, object_hook=lambda obj: {int(k) if k.isdigit() else k: v for k, v in obj.items()})
+    if problem_index:
         val_problems = build_val_problems(val_loader, problem_index)
     else:
         logger.warning(f"Problem index not found at {problem_index_path}, skipping val_problems")
@@ -997,7 +1047,6 @@ def train_dpo(
         resume_from=resume_from,
         use_compile=compile_model and device == "cuda"
     )
-    ref_model = create_ref_model(effective_model_name, device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
     loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)

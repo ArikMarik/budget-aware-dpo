@@ -1,28 +1,209 @@
 {
-  "easy_token_threshold": 70,
-  "hard_token_threshold": 130,
-  "total_real_pairs": 13,
-  "total_synthesized_pairs": 0,
-  "total_pairs": 13,
-  "real_pairs_pct": 100.0,
-  "synthesized_pairs_pct": 0.0,
-  "rejected_by_correctness": 0,
-  "rejected_by_length": 13,
-  "rejected_by_correctness_pct": 0.0,
-  "rejected_by_length_pct": 100.0,
-  "rejected_by_correctness_real": 0,
-  "rejected_by_correctness_synthesized": 0,
-  "rejected_by_length_real": 13,
-  "rejected_by_length_synthesized": 0,
-  "easy_pairs": 13,
-  "hard_pairs": 0,
-  "easy_pairs_pct": 100.0,
-  "hard_pairs_pct": 0.0,
-  "skipped_groups": 0,
-  "val_split": 0.2,
+  "easy_preferred_percentile_low": 10.0,
+  "easy_preferred_percentile_high": 40.0,
+  "hard_preferred_percentile_low": 20.0,
+  "hard_preferred_percentile_high": 45.0,
+  "total_pairs": 11747728,
+  "rejected_by_correctness": 1212,
+  "rejected_by_length": 11746516,
+  "rejected_by_correctness_pct": 0.01,
+  "rejected_by_length_pct": 99.99,
+  "easy_pairs": 9910484,
+  "hard_pairs": 1837244,
+  "correct_easy_pairs": 9910326,
+  "correct_hard_pairs": 1836190,
+  "incorrect_easy_pairs": 158,
+  "incorrect_hard_pairs": 1054,
+  "correct_easy_pairs_pct": 84.37,
+  "correct_hard_pairs_pct": 15.63,
+  "incorrect_easy_pairs_pct": 13.04,
+  "incorrect_hard_pairs_pct": 86.96,
+  "avg_chosen_length_easy": 169.36,
+  "avg_rejected_length_easy": 328.56,
+  "avg_chosen_length_hard": 317.82,
+  "avg_rejected_length_hard": 175.09,
+  "avg_length_ratio_easy": 1.97,
+  "avg_length_ratio_hard": 1.88,
+  "length_ratio_histogram": {
+    "complexity_easy": {
+      "bins": [
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1.5
+        ],
+        [
+          1.5,
+          2
+        ],
+        [
+          2,
+          2.5
+        ],
+        [
+          2.5,
+          3
+        ],
+        [
+          3,
+          3.5
+        ],
+        [
+          3.5,
+          4
+        ],
+        [
+          4,
+          5
+        ],
+        [
+          5.5,
+          Infinity
+        ]
+      ],
+      "counts": [
+        0,
+        0,
+        7123316,
+        1613142,
+        560796,
+        254715,
+        133685,
+        127140,
+        66780
+      ]
+    },
+    "complexity_hard": {
+      "bins": [
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1.5
+        ],
+        [
+          1.5,
+          2
+        ],
+        [
+          2,
+          2.5
+        ],
+        [
+          2.5,
+          3
+        ],
+        [
+          3,
+          3.5
+        ],
+        [
+          3.5,
+          4
+        ],
+        [
+          4,
+          5
+        ],
+        [
+          5.5,
+          Infinity
+        ]
+      ],
+      "counts": [
+        0,
+        0,
+        1411399,
+        275308,
+        82735,
+        33042,
+        14800,
+        11633,
+        4666
+      ]
+    }
+  },
+  "length_ratio_cumulative": {
+    "complexity_easy": {
+      "ratio_gte_[5.5, inf)": 66780,
+      "ratio_gte_[4, inf)": 193920,
+      "ratio_gte_[3.5, inf)": 327605,
+      "ratio_gte_[3, inf)": 582320,
+      "ratio_gte_[2.5, inf)": 1143116,
+      "ratio_gte_[2, inf)": 2756258,
+      "ratio_gte_[1.5, inf)": 9879574,
+      "ratio_gte_[1, inf)": 9879574,
+      "ratio_gte_[0, inf)": 9879574
+    },
+    "complexity_hard": {
+      "ratio_gte_[5.5, inf)": 4666,
+      "ratio_gte_[4, inf)": 16299,
+      "ratio_gte_[3.5, inf)": 31099,
+      "ratio_gte_[3, inf)": 64141,
+      "ratio_gte_[2.5, inf)": 146876,
+      "ratio_gte_[2, inf)": 422184,
+      "ratio_gte_[1.5, inf)": 1833583,
+      "ratio_gte_[1, inf)": 1833583,
+      "ratio_gte_[0, inf)": 1833583
+    }
+  },
+  "pairs_per_problem": {
+    "unique_problems": 348166,
+    "avg_pairs_per_problem": 33.74,
+    "max_pairs_per_problem": 100,
+    "min_pairs_per_problem": 1,
+    "histogram": {
+      "bins": [
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          5,
+          10
+        ],
+        [
+          10,
+          20
+        ],
+        [
+          20,
+          50
+        ],
+        [
+          50,
+          100
+        ],
+        [
+          100,
+          200
+        ],
+        [
+          200,
+          Infinity
+        ]
+      ],
+      "counts": [
+        17574,
+        52533,
+        49561,
+        55317,
+        78570,
+        50539,
+        44072,
+        0
+      ]
+    }
+  },
   "seed": 42,
-  "num_train_pairs": 10,
-  "num_val_pairs": 3,
-  "num_train_problems": 10,
-  "num_val_problems": 3
+  "num_unique_problems": 348166
 }

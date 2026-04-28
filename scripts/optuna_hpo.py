@@ -45,8 +45,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import CHECKPOINT_DIR  # noqa: E402
-from src.training.dpo_trainer import train_dpo  # noqa: E402
+from src.config import CHECKPOINT_DIR, DATA_PATH, MODEL_NAME  # noqa: E402
+from src.training.dpo_trainer import (  # noqa: E402
+    train_dpo,
+    build_static_context,
+    StaticTrainingContext,
+    get_tokens_path,
+)
 from src.utils import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
@@ -183,7 +188,7 @@ def _cleanup_gpu() -> None:
         torch.cuda.ipc_collect()
 
 
-def _build_objective_fn(search: SearchConfig, use_grid: bool):
+def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainingContext):
     def objective(trial: optuna.Trial) -> float:
         params = _sample_from_grid(trial) if use_grid else _sample_hyperparams(trial)
         output_dir = _trial_output_dir(search, trial.number)
@@ -236,6 +241,7 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool):
                 length_ratio=float(params["length_ratio"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
                 # max_unique_problems=50,  # TODO - VERY TEMPORARY (CHECK THE A SMALL FULL RUN)
+                ctx=ctx,
             )
         except torch.cuda.OutOfMemoryError:
             _cleanup_gpu()
@@ -405,7 +411,16 @@ def main(argv: Optional[list[str]] = None) -> None:
         args.study_name, args.sampler, args.n_trials, args.timeout, storage,
     )
 
-    objective_fn = _build_objective_fn(search, use_grid=(args.sampler == "grid"))
+    effective_model = args.model or MODEL_NAME
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    ctx = build_static_context(
+        get_tokens_path(),
+        effective_model,
+        device,
+        DATA_PATH / "problem_index_dict.json",
+    )
+
+    objective_fn = _build_objective_fn(search, use_grid=(args.sampler == "grid"), ctx=ctx)
 
     try:
         study.optimize(
