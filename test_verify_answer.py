@@ -1,4 +1,5 @@
 from src.evaluation.math_grader import remove_spaces, strip_text_commands, verify_answer
+from src.qwen_evaluation.grader import math_equal
 from src.qwen_evaluation.parser import strip_string
 
 
@@ -18,28 +19,28 @@ def show_all_permutations(pred, expected) -> None:
     print(f"Original:")
     print(f"pred={pred:>30}")
     print(f"expected={expected:>26}")
-    print(pred == expected)
+    print(pred == expected, math_equal(pred, expected))
     print("-" * 20)
     print(f"No text:")
     print(f"pred={no_text_pred:>30}")
     print(f"expected={no_text_expected:>26}")
-    print(no_text_pred == no_text_expected)
+    print(no_text_pred == no_text_expected, math_equal(no_text_pred, no_text_expected))
     print("-" * 20)
     print(f"No space:")
     print(f"pred={no_space_pred:>30}")
     print(f"expected={no_space_expected:>26}")
-    print(no_space_pred == no_space_expected)
+    print(no_space_pred == no_space_expected, math_equal(no_space_pred, no_space_expected))
     print(f"Stripped no space:")
     print(f"pred={stripped_no_space_pred:>30}")
     print(f"expected={stripped_no_space_expected:>26}")
-    print(stripped_no_space_pred == stripped_no_space_expected)
+    print(stripped_no_space_pred == stripped_no_space_expected, math_equal(stripped_no_space_pred, stripped_no_space_expected))
     print("-" * 20)
     print(f"Stripped no text:")
     print(f"pred={stripped_no_text_pred:>30}")
     print(f"expected={stripped_no_text_expected:>26}")
-    print(stripped_no_text_pred == stripped_no_text_expected)
-    print("-" * 20)
-    print(verify_answer(pred, expected))
+    print(stripped_no_text_pred == stripped_no_text_expected, math_equal(stripped_no_text_pred, stripped_no_text_expected))
+    print("-" * 20, '\n')
+    print('Final Answer:', verify_answer(pred, expected))
 
 
 if __name__ == "__main__":
@@ -63,5 +64,17 @@ if __name__ == "__main__":
 
     pred = r"100\,000"
     expected = r"100000"
+
+    pred = r"a + b + c"
+    expected = r"a+b+c"
+
+    pred = r"- ab - ac - bc"
+    expected = r"-(ab+ac+bc)"
+
+    pred = r"12^\frac{1}{7}"
+    expected = r"12^{1/7}"
+
+    pred = r"\frac{2469}{20000}"
+    expected = r"\dfrac{2469}{20,000}"
 
     show_all_permutations(pred, expected)

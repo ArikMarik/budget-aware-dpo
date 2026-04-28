@@ -115,13 +115,15 @@ def verify_answer(
     stripped_no_text_pred = remove_spaces(strip_string(strip_text_commands(pred)))
     stripped_no_text_expected = remove_spaces(strip_string(strip_text_commands(expected)))
 
+    if math_equal(no_space_pred, no_space_expected) or math_equal(stripped_no_space_pred, stripped_no_space_expected) or \
+        math_equal(remove_spaces(no_text_pred), remove_spaces(no_text_expected))or \
+        math_equal(no_space_pred, stripped_no_space_expected) or math_equal(stripped_no_space_pred, no_space_expected) or \
+        math_equal(strip_string(no_space_pred), strip_string(no_space_expected)) or \
+        math_equal(stripped_no_text_pred, stripped_no_text_expected):
+        return True
+
     try:
         return verify(parse(_wrap(no_text_expected)), parse(_wrap(no_text_pred))) or verify(parse(_wrap(stripped_no_space_pred)), parse(_wrap(stripped_no_space_expected)))
     except Exception as exc:
         logger.debug("math-verify inconclusive for %r vs %r: %s", pred, expected, exc)
-
-    return math_equal(no_space_pred, no_space_expected) or math_equal(stripped_no_space_pred, stripped_no_space_expected) or \
-        math_equal(remove_spaces(no_text_pred), remove_spaces(no_text_expected))or \
-        math_equal(no_space_pred, stripped_no_space_expected) or math_equal(stripped_no_space_pred, no_space_expected) or \
-        math_equal(strip_string(no_space_pred), strip_string(no_space_expected)) or \
-        math_equal(stripped_no_text_pred, stripped_no_text_expected)
+    return False
