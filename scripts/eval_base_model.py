@@ -155,6 +155,7 @@ def main():
         model, tokenizer, problems,
         max_new_tokens=args.max_new_tokens,
         prompt_fn=prompt_fn,
+        batch_size=32,
     )
     elapsed = time.time() - start
     logger.info("Evaluation completed in %.1f minutes", elapsed / 60)

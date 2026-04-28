@@ -216,14 +216,6 @@ def fix_mixed_latex(s):
         w = int(m.group(1))
         n = int(m.group(2))
         d = int(m.group(3))
-        return r"\frac{%d}{%d}" % (w * d + n, d)
-
-    return re.sub(r'(\d+)\s*\\frac\{(\d+)\}\{(\d+)\}', repl, s)
-def fix_mixed_latex(s):
-    def repl(m):
-        w = int(m.group(1))
-        n = int(m.group(2))
-        d = int(m.group(3))
         if (n < 0 and d > 0) or (n > 0 and d < 0):
            n = -abs(n)
         else:

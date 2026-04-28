@@ -4,10 +4,10 @@ Supports dummy data (processed DPO dataset) and real data (Phase 9: GSM8K, MATH)
 """
 
 import json
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 
-from sklearn import metrics
 import torch
 from tqdm import tqdm
 
@@ -20,7 +20,7 @@ from src.config import (
 from src.data.preprocessing import classify_complexity
 from src.evaluation.answer_extraction import extract_answer, verify_correctness
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
-from src.utils import set_seed
+from src.utils import count_tokens, set_seed
 
 set_seed(42)
 
@@ -84,46 +84,101 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
     return problems
 
 
+def _process_result(args: tuple) -> dict:
+    """Worker function for parallel post-processing (extract answer + verify correctness)."""
+    idx, response, num_tokens, expected, complexity, level, source, problem_text = args
+    pred = extract_answer(response)
+    correct = verify_correctness(response, expected, logs=False)
+    return {
+        "idx": idx,
+        "problem": problem_text[:60] + " ...",
+        "complexity": complexity,
+        "predicted": pred,
+        "expected": expected,
+        "correct": correct,
+        "level": level,
+        "source": source,
+        "tokens": num_tokens,
+    }
+
+
+def _generate_batch(
+    model,
+    tokenizer,
+    prompts: list[str],
+    max_new_tokens: int,
+    device: torch.device,
+) -> list[tuple[str, int]]:
+    """Generate responses for a batch of prompts. Returns list of (response, num_tokens)."""
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True, padding_side='left').to(device)
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
+
+    with torch.inference_mode():
+        outputs = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=[151645, 151643],
+        )
+
+    results = []
+    for out in outputs:
+        prompt_len = input_ids.shape[1]
+        response = tokenizer.decode(out[prompt_len:], skip_special_tokens=True)
+        response = response.split("\n\nQuestion:")[0]
+        num_tokens = count_tokens(response, tokenizer)
+        results.append((response, num_tokens))
+    return results
+
+
 def generate_and_evaluate(
     model,
     tokenizer,
     problems: list[dict],
-    max_new_tokens: int = 2048,
+    max_new_tokens: int = 1024,
     prompt_fn: Optional[Callable] = None,
+    batch_size: int = 8,
+    num_workers: int = 4,
 ) -> list[dict]:
-    """Generate for each problem, extract answer, compute metrics."""
+    """Generate for each problem, extract answer, compute metrics.
+
+    Uses batched generation for GPU parallelism and parallel post-processing
+    for CPU-bound tasks (answer extraction + verification).
+    """
     if prompt_fn is None:
         prompt_fn = build_zero_shot_prompt
     device = next(model.parameters()).device
-    results = []
 
-    for problem in tqdm(problems, desc="Evaluating"):
-        prompt = prompt_fn(problem["problem"], problem_source=problem.get("source", problem.get("problem_source")))
+    prompts = [
+        prompt_fn(p["problem"], p.get("source", p.get("problem_source")))
+        for p in problems
+    ]
 
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        with torch.no_grad():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=[151645, 151643],
-            )
-        response = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        response = response.split("\n\nQuestion:")[0]
-        num_tokens = out.shape[1] - inputs["input_ids"].shape[1]
-        pred = extract_answer(response)
-        correct = verify_correctness(response, problem["expected"], logs=False)
-        results.append({
-            "problem": problem["problem"][:60] + " ...",
-            "complexity": problem["complexity"],
-            "tokens": num_tokens,
-            "predicted": pred,
-            "expected": problem["expected"],
-            "correct": correct,
-            "level": problem.get("level"),
-            "source": problem.get("source"),
-        })
+    all_responses = []
+    all_num_tokens = []
+
+    for i in tqdm(range(0, len(prompts), batch_size), desc="Generating"):
+        batch_prompts = prompts[i:i + batch_size]
+        batch_results = _generate_batch(model, tokenizer, batch_prompts, max_new_tokens, device)
+        for response, num_tokens in batch_results:
+            all_responses.append(response)
+            all_num_tokens.append(num_tokens)
+
+    post_process_args = [
+        (idx, all_responses[idx], all_num_tokens[idx], p["expected"], p["complexity"], p.get("level"), p.get("source"), p["problem"])
+        for idx, p in enumerate(problems)
+    ]
+
+    if num_workers > 1:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            processed_results = list(executor.map(_process_result, post_process_args))
+        results = processed_results
+    else:
+        results = [_process_result(args) for args in post_process_args]
+
     return results
 
 

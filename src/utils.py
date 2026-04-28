@@ -10,7 +10,7 @@ from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from src.config import MODEL_NAME
 
@@ -117,11 +117,12 @@ def _get_model_tokenizer():
     return AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
 
-def count_tokens(text: str) -> int:
+def count_tokens(text: str, tokenizer: PreTrainedTokenizer | None = None) -> int:
     """Token count using Qwen2.5-0.5B tokenizer.
 
     Note: Only works for Qwen model tokenization. Uses model's tokenizer
     to ensure token counts match what the model sees during training/inference.
     """
-    tokenizer = _get_model_tokenizer()
+    if tokenizer is None:
+        tokenizer = _get_model_tokenizer()
     return len(tokenizer.encode(str(text) if text else "", add_special_tokens=False))

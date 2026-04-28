@@ -25,8 +25,6 @@ def budget_aware_dpo_loss(
     rejected_lengths: torch.Tensor,
     complexities: torch.Tensor,
     beta: float = 0.1,
-    # lambda_easy: float = 0.1,
-    # lambda_hard: float = 0.001,
     lambda_easy: float = 0.05,
     lambda_hard: float = 0.03,
     kl_penalty_weight: float = 0.0,
