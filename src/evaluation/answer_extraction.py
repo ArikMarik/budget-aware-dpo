@@ -13,7 +13,6 @@ logger = get_logger(__name__)
 
 def extract_boxed_answer(text: str) -> str | None:
     """Extract content of the last \\boxed{...}, handling nested braces."""
-    # Find the last occurrence of \boxed{
     marker = r"\boxed{"
     idx = text.rfind(marker)
     if idx == -1:
@@ -38,35 +37,42 @@ def extract_gsm8k_answer(answer: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def extract_answer(text: str, logs: bool = True) -> str | None:
+def extract_answer(text: str) -> str | None:
     """Extract final answer from model output. Returns None if not found."""
+    def string_cleanup(s):
+        # Pre-return cleanup + strip_string normalization (unconditional)
+        s = re.sub(r"\n\s*", "", s).strip()
+        if s and s[0] == ":":
+            s = s[1:]
+        if s and s[-1] in [".", "/"]:
+            s = s[:-1]
+        return s
+
+    # Cyrillic artifact strip (some model outputs contain these)
+    text = text.replace("ки", "")
     text = text.strip()
     if not text:
-        if logs:
-            logger.info(f"No answer found in text: {text}")
         return None
 
     # \boxed{...} — handles nested braces, uses last occurrence
     ans = extract_boxed_answer(text)
     if ans is not None:
-        return ans
+        return string_cleanup(ans)
 
     # #### 8 (GSM8K format)
     ans = extract_gsm8k_answer(text)
     if ans:
-        return ans
+        return string_cleanup(ans)
 
-    # "The answer is 8." or "The answer is 8"
+    # "The answer is X" or "the answer is X"
     m = re.search(r"[Tt]he answer is\s*[:=]?\s*([^\s.,;]+)", text, re.IGNORECASE)
     if m:
-        return m.group(1).strip()
+        return string_cleanup(m.group(1).strip())
 
-    # Last number in sentence (fallback)
+    # Last number fallback
     numbers = re.findall(r"-?\d+\.?\d*", text)
     if numbers:
-        return numbers[-1]
-    if logs:
-        logger.info(f"No answer found in text: {text}")
+        return string_cleanup(numbers[-1])
     return None
 
 
@@ -75,9 +81,7 @@ def normalize_answer(a: str | None) -> str:
     if a is None:
         return ""
     s = str(a).strip().lower()
-    # Remove all internal whitespace (handles \frac{289 \pi} vs \frac{289\pi})
     s = re.sub(r"\s+", "", s)
-    # Normalize \% → % (handles 56\% vs 56%)
     s = s.replace("\\%", "%")
     return s
 
@@ -85,35 +89,17 @@ def normalize_answer(a: str | None) -> str:
 def verify_correctness(
     generated_solution: str,
     expected_answer: str,
-    problem: str = "",
-    use_llm_judge: bool = True,
-    logs: bool = True
+    logs: bool = True,
 ) -> bool:
-    """Verify if generated_solution matches expected_answer using tiered checking.
-
-    Tier 0: trivial string equality.
-    Tier 1: math-verify symbolic equivalence (handles LaTeX format differences).
-    Tier 2: LLM judge with full solution context (handles base notation, etc.).
-    Returns False when expected_answer is empty (cannot verify).
-
-    Args:
-        use_llm_judge: If False, skip Tier 2 (LLM judge). Useful during training
-                       to avoid loading a second model onto the GPU.
-    """
+    """Verify if generated_solution matches expected_answer."""
     if not expected_answer or not str(expected_answer).strip():
         return False
-    pred = extract_answer(generated_solution, logs=logs)
+    pred = extract_answer(generated_solution)
     if pred is None:
-        logger.info(f"No answer found in generated solution: {generated_solution}")
+        if logs:
+            logger.info(f"No answer found in generated solution: {generated_solution}")
         return False
-    is_correct = verify_answer(
-        pred=pred,
-        expected=str(expected_answer),
-        problem=problem,
-        solution=generated_solution,
-        use_llm_judge=use_llm_judge,
-        logs=logs
-    )
+    is_correct = verify_answer(pred, expected_answer)
     if logs and not is_correct:
-        logger.info(f"Incorrect answer: {pred} != {expected_answer}")
+        logger.info(f"Incorrect answer: {pred} != {expected_answer} (expected)")
     return is_correct
