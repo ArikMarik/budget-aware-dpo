@@ -76,5 +76,5 @@ def get_budget_aware_output_dir() -> Path:
 
 
 # Model
-MODEL_NAME = "Qwen/Qwen2.5-0.5B"
-UNSLOTH_MODEL_NAME = "unsloth/Qwen2.5-0.5B"
+MODEL_NAME = "Qwen/Qwen2.5-Math-1.5B"
+UNSLOTH_MODEL_NAME = "unsloth/Qwen2.5-Math-1.5B"
