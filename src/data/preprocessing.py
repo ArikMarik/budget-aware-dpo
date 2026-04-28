@@ -17,6 +17,7 @@ See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessin
 
 import json
 import os
+import pickle
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -267,9 +268,9 @@ def label_preference(
 
 
 def load_problem_index(path: Path) -> dict[str, dict]:
-    """Load problem index from JSON and build problem_text -> problem data mapping."""
-    with open(path) as f:
-        index = json.load(f)
+    """Load problem index from pickle and build problem_text -> problem data mapping."""
+    with open(path, "rb") as f:
+        index = pickle.load(f)
     return {normalize_problem(item["problem"]): item for item in index}
 
 

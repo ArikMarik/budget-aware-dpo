@@ -262,21 +262,17 @@ def main():
             logger.info("Built index for %s unique problems", len(problem_index))
 
             DATA_PATH.mkdir(parents=True, exist_ok=True)
-            problem_index_path = DATA_PATH / "problem_index.json"
-            with open(problem_index_path, "w", encoding="utf-8") as f:
-                json.dump(problem_index, f, ensure_ascii=False)
-            logger.info("Saved problem index to %s", problem_index_path)
 
             problem_index_dict = {item["problem_id"]: item for item in problem_index}
-            problem_index_dict_path = DATA_PATH / "problem_index_dict.json"
-            with open(problem_index_dict_path, "w", encoding="utf-8") as f:
-                json.dump(problem_index_dict, f, ensure_ascii=False)
+            problem_index_dict_path = DATA_PATH / "problem_index_dict.pkl"
+            with open(problem_index_dict_path, "wb") as f:
+                pickle.dump(problem_index_dict, f)
             logger.info("Saved problem index (Dict) to %s", problem_index_dict_path)
 
             reverse_index = {item["problem"]: item for item in problem_index}
-            reverse_index_path = DATA_PATH / "problem_index_reverse.json"
-            with open(reverse_index_path, "w", encoding="utf-8") as f:
-                json.dump(reverse_index, f, ensure_ascii=False)
+            reverse_index_path = DATA_PATH / "problem_index_reverse.pkl"
+            with open(reverse_index_path, "wb") as f:
+                pickle.dump(reverse_index, f)
             logger.info("Saved reverse index to %s", reverse_index_path)
 
     if args.test_sets_only or not args.skip_test_sets:

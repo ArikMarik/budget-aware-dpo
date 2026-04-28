@@ -143,7 +143,7 @@ def tokenize_and_save(
 def main():
     parser = argparse.ArgumentParser(description="Preprocess DPO data - tokenize all pairs")
     parser.add_argument("--force", action="store_true", help="Force regeneration even if files exist")
-    parser.add_argument("--problem-index", type=str, default='data/problem_index.json', help="Path to problem_index.json")
+    parser.add_argument("--problem-index", type=str, default='data/problem_index_dict.pkl', help="Path to problem_index.pkl")
     parser.add_argument("--max-pairs-per-problem", type=int, default=100, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
     parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 1.5 (1.0 = no filter)")
     args = parser.parse_args()

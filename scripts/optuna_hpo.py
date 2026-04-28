@@ -420,7 +420,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         get_tokens_path(),
         effective_model,
         device,
-        DATA_PATH / "problem_index_dict.json",
+        DATA_PATH / "problem_index_dict.pkl",
     )
 
     objective_fn = _build_objective_fn(search, use_grid=(args.sampler == "grid"), ctx=ctx)

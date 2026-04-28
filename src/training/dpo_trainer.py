@@ -5,6 +5,7 @@ Optimized for GPU utilization and training efficiency.
 
 from collections import defaultdict
 import json
+import pickle
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -529,10 +530,8 @@ def build_static_context(
     raw_data = torch.load(tokens_path)
     tokenizer = create_tokenizer(model_name)
     if problem_index_path.exists():
-        with open(problem_index_path) as f:
-            problem_index = json.load(
-                f, object_hook=lambda obj: {int(k) if k.isdigit() else k: v for k, v in obj.items()}
-            )
+        with open(problem_index_path, "rb") as f:
+            problem_index = pickle.load(f)
     else:
         problem_index = {}
     ref_model = create_ref_model(model_name, device)
@@ -953,7 +952,7 @@ def train_dpo(
     best_model_metric: BestModelMetric = "val_loss",
     accuracy_floor: Optional[float] = None,
     max_unique_problems: int = 65_000,
-    problem_index_path: Path = DATA_PATH / "problem_index_dict.json",
+    problem_index_path: Path = DATA_PATH / "problem_index_dict.pkl",
     ctx: Optional[StaticTrainingContext] = None,
 ) -> dict:
     logger.debug(f'{" STARTED DPO TRAINER ":#^100}')
