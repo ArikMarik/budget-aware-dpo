@@ -7,10 +7,12 @@ Usage:
     --limit 500 --output eval_results/budget_iter5_tier012.json
 """
 import argparse
+from functools import partial
 import json
 import random
 from pathlib import Path
 
+from src.evaluation.few_shot_exemplars import build_few_shots_prompt, build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
     evaluate_checkpoint,
     load_eval_problems,
@@ -29,8 +31,7 @@ def main():
     parser.add_argument("--output", type=str, required=True, help="Output JSON path")
     parser.add_argument("--use-real", action="store_true", help="Use GSM8K+MATH test sets (not training data)")
     parser.add_argument("--base-model", type=str, default=None, help="Base model name (default: Qwen/Qwen2.5-0.5B)")
-    parser.add_argument("--few-shot", type=int, default=0, choices=[0, 8],
-                        help="Number of few-shot exemplars (0=zero-shot, 8=standard GSM8K 8-shot)")
+    parser.add_argument("--zero-shot", action="store_true", help="Use zero-shot prompting instead of few-shot exemplars")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint)
@@ -65,11 +66,12 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    prompt_fn = None
-    if args.few_shot == 8:
-        from src.evaluation.few_shot_exemplars import build_8shot_prompt
-        prompt_fn = build_8shot_prompt
-        logger.info("Using 8-shot chain-of-thought prompting")
+    if not args.zero_shot:
+        prompt_fn = build_few_shots_prompt
+        logger.info("Using 8-shot chain-of-thought prompting (GSM8K exemplars) and 4-shot MATH exemplars")
+    else:
+        prompt_fn = build_zero_shot_prompt
+        logger.info("Using 0-shot prompting (no exemplars)")
 
     logger.info("Evaluating %s with %d problems (Tier 0+1+2, LLM judge ON)...", checkpoint_path, len(sampled))
     metrics = evaluate_checkpoint(

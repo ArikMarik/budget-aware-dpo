@@ -5,9 +5,11 @@ Supports dummy data (processed DPO dataset) and real data (Phase 9: GSM8K, MATH)
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from sklearn import metrics
 import torch
+from tqdm import tqdm
 
 from src.config import (
     GSM8K_TEST_PATH,
@@ -15,7 +17,9 @@ from src.config import (
     MODEL_NAME,
     get_processed_dataset_path,
 )
-from src.evaluation.answer_extraction import extract_answer, normalize_answer, verify_correctness
+from src.data.preprocessing import classify_complexity
+from src.evaluation.answer_extraction import extract_answer, verify_correctness
+from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.utils import set_seed
 
 set_seed(42)
@@ -49,7 +53,7 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
                 problems.append({
                     "problem": p["problem"],
                     "expected": p.get("expected_answer", ""),
-                    "complexity": 0,
+                    "complexity": classify_complexity(p),
                     "source": "gsm8k",
                     "level": None,
                 })
@@ -66,7 +70,7 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
                 problems.append({
                     "problem": p["problem"],
                     "expected": p.get("expected_answer", ""),
-                    "complexity": 1,
+                    "complexity": classify_complexity(p),
                     "source": "math",
                     "level": level,
                 })
@@ -80,25 +84,22 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
     return problems
 
 
-def default_prompt_fn(problem: str) -> str:
-    return f"Problem: {problem}\nSolution:"
-
-
 def generate_and_evaluate(
     model,
     tokenizer,
     problems: list[dict],
-    max_new_tokens: int = 256,
-    use_llm_judge: bool = True,
-    prompt_fn: Optional[callable] = None,
-) -> dict:
+    max_new_tokens: int = 2048,
+    prompt_fn: Optional[Callable] = None,
+) -> list[dict]:
     """Generate for each problem, extract answer, compute metrics."""
     if prompt_fn is None:
-        prompt_fn = default_prompt_fn
+        prompt_fn = build_zero_shot_prompt
     device = next(model.parameters()).device
     results = []
-    for p in problems:
-        prompt = prompt_fn(p["problem"])
+
+    for problem in tqdm(problems, desc="Evaluating"):
+        prompt = prompt_fn(problem["problem"], problem_source=problem.get("source", problem.get("problem_source")))
+
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         with torch.no_grad():
             out = model.generate(
@@ -106,41 +107,75 @@ def generate_and_evaluate(
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=[151645, 151643],
             )
         response = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        response = response.split("\n\nQuestion:")[0]
         num_tokens = out.shape[1] - inputs["input_ids"].shape[1]
         pred = extract_answer(response)
-        correct = (
-            verify_correctness(
-                response, p["expected"],
-                problem=p["problem"],
-                use_llm_judge=use_llm_judge,
-            )
-            if p["expected"] else None
-        )
+        correct = verify_correctness(response, problem["expected"], logs=False)
         results.append({
-            "problem": p["problem"][:60] + "...",
-            "complexity": p["complexity"],
+            "problem": problem["problem"][:60] + " ...",
+            "complexity": problem["complexity"],
             "tokens": num_tokens,
             "predicted": pred,
-            "expected": p["expected"],
+            "expected": problem["expected"],
             "correct": correct,
-            "level": p.get("level"),
-            "source": p.get("source"),
+            "level": problem.get("level"),
+            "source": problem.get("source"),
         })
     return results
 
 
 def compute_metrics(results: list[dict]) -> dict:
     """Compute accuracy, TPCA, avg tokens by complexity. MATH level 4-5 when available."""
-    with_expected = [r for r in results if r.get("expected") is not None]
-    correct = [r for r in with_expected if r["correct"]]
-    total_tokens = sum(r["tokens"] for r in results)
-    easy = [r for r in results if r["complexity"] == 0]
-    hard = [r for r in results if r["complexity"] == 1]
+    # MATH level 4-5 retention (Phase 9)
+    def is_math_level_45(level) -> bool:
+        s = str(level or "").strip()
+        return s in ("4", "5", "Level 4", "Level 5")
+
+    with_expected, correct, easy_results, hard_results = [],  [], [], []
+    easy_correct, hard_correct = [], []
+    total_tokens = 0
+    math_by_level = {}
+    math_45_with_exp, math_45_correct = [], []
+
+    for r in results:
+        if r.get("expected") is not None:
+            with_expected.append(r)
+            if r["correct"]:
+                correct.append(r)
+        total_tokens += r["tokens"]
+        if r["complexity"] == 0:
+            easy_results.append(r)
+            if r["correct"]:
+                easy_correct.append(r)
+        elif r["complexity"] == 1:
+            hard_results.append(r)
+            if r["correct"]:
+                hard_correct.append(r)
+
+        level = r.get("level")
+        if level is None:
+            continue
+        level_str = str(level).strip()
+        if level_str not in math_by_level:
+            math_by_level[level_str] = {"total": 0, "correct": 0}
+        math_by_level[level_str]["total"] += 1
+        if r["correct"]:
+            math_by_level[level_str]["correct"] += 1
+
+        if is_math_level_45(level):
+            if r.get("expected") is not None:
+                math_45_with_exp.append(r)
+                if r["correct"]:
+                    math_45_correct.append(r)
 
     accuracy = len(correct) / len(with_expected) if with_expected else 0
     tpca = total_tokens / len(correct) if correct else float("inf")
+
+    for v in math_by_level.values():
+        v["accuracy"] = v["correct"] / v["total"] if v["total"] > 0 else 0
 
     out = {
         "accuracy": accuracy,
@@ -148,22 +183,21 @@ def compute_metrics(results: list[dict]) -> dict:
         "num_total": len(with_expected),
         "tpca": tpca,
         "total_tokens": total_tokens,
-        "avg_tokens_easy": sum(r["tokens"] for r in easy) / len(easy) if easy else 0,
-        "avg_tokens_hard": sum(r["tokens"] for r in hard) / len(hard) if hard else 0,
-        "num_easy": len(easy),
-        "num_hard": len(hard),
+        "avg_tokens_easy": sum(r["tokens"] for r in easy_results) / len(easy_results) if easy_results else 0,
+        "avg_tokens_hard": sum(r["tokens"] for r in hard_results) / len(hard_results) if hard_results else 0,
+        "num_easy": len(easy_results),
+        "num_hard": len(hard_results),
+        "num_easy_correct": len(easy_correct),
+        "num_hard_correct": len(hard_correct),
+        "easy_accuracy": len(easy_correct) / len(easy_results) if easy_results else 0,
+        "hard_accuracy": len(hard_correct) / len(hard_results) if hard_results else 0,
+        "math_by_level": math_by_level
     }
-    # MATH level 4-5 retention (Phase 9)
-    def is_math_level_45(level) -> bool:
-        s = str(level or "").strip()
-        return s in ("4", "5", "Level 4", "Level 5")
 
-    math_45 = [r for r in results if is_math_level_45(r.get("level"))]
-    if math_45:
-        math_45_with_exp = [r for r in math_45 if r.get("expected") is not None]
-        math_45_correct = [r for r in math_45_with_exp if r["correct"]]
-        out["math_level_4_5_accuracy"] = len(math_45_correct) / len(math_45_with_exp) if math_45_with_exp else 0
+    if math_45_with_exp:
+        out["math_level_4_5_accuracy"] = len(math_45_correct) / len(math_45_with_exp)
         out["math_level_4_5_num"] = len(math_45_with_exp)
+
     return out
 
 

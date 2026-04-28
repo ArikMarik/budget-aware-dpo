@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Evaluate the base Qwen2.5-0.5B model (no LoRA, no training) on the full eval pipeline.
+Evaluate the base Qwen2.5-Math-1.5B model (no LoRA, no training) on the full eval pipeline.
 Supports two modes:
   1. Raw base model (default)
   2. Base model + untrained LoRA adapter (--with-lora-init)
@@ -9,14 +9,15 @@ Usage:
   # Raw base model, full dataset
   CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/storage/arik/nlp_final_project PYTHONUNBUFFERED=1 \
     .venv/bin/python scripts/eval_base_model.py \
-    --output eval_results/base_qwen_0.5b_full.json --use-real --max-new-tokens 256
+    --output eval_results/base_qwen_1.5b_math_full.json --max-new-tokens 1024
 
   # With untrained LoRA (diagnostic)
   CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/storage/arik/nlp_final_project PYTHONUNBUFFERED=1 \
     .venv/bin/python scripts/eval_base_model.py \
-    --output eval_results/base_qwen_0.5b_lora_init.json --use-real --with-lora-init --max-new-tokens 256
+    --output eval_results/base_qwen_1.5b_math_lora_init.json --with-lora-init --max-new-tokens 1024
 """
 import argparse
+from functools import partial
 import json
 import time
 from pathlib import Path
@@ -25,10 +26,11 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import MODEL_NAME
+from src.evaluation.few_shot_exemplars import build_few_shots_prompt, build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
     compute_metrics,
     generate_and_evaluate,
-    load_eval_problems,
+    load_eval_problems_real,
 )
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
@@ -40,9 +42,8 @@ set_seed(42)
 def main():
     parser = argparse.ArgumentParser(description="Evaluate base model (no training)")
     parser.add_argument("--output", type=str, required=True, help="Output JSON path")
-    parser.add_argument("--use-real", action="store_true", help="Use GSM8K+MATH test sets")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of problems (default: all)")
-    parser.add_argument("--max-new-tokens", type=int, default=256, help="Max generation tokens")
+    parser.add_argument("--max-new-tokens", type=int, default=1024, help="Max generation tokens")
     parser.add_argument("--with-lora-init", action="store_true",
                         help="Apply untrained LoRA adapter (diagnostic: does LoRA init degrade base?)")
     parser.add_argument("--model-name", type=str, default=None, help="Override model name")
@@ -52,15 +53,14 @@ def main():
                         help="Exclude GSM8K, only evaluate MATH problems")
     parser.add_argument("--math-limit", type=int, default=None,
                         help="Limit number of MATH problems per level (sample randomly)")
-    parser.add_argument("--few-shot", type=int, default=0, choices=[0, 8],
-                        help="Number of few-shot exemplars (0=zero-shot, 8=standard GSM8K 8-shot)")
+    parser.add_argument("--zero-shot", action="store_true", help="Use zero-shot prompting instead of few-shot exemplars")
     args = parser.parse_args()
 
     model_name = args.model_name or MODEL_NAME
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load problems
-    problems = load_eval_problems(limit=None, use_real=args.use_real)
+    problems = load_eval_problems_real()
 
     # Filter by level/source
     import random
@@ -138,14 +138,14 @@ def main():
     mode = "base+untrained_lora" if args.with_lora_init else "raw_base"
 
     # Setup prompt function
-    prompt_fn = None
-    if args.few_shot == 8:
-        from src.evaluation.few_shot_exemplars import build_8shot_prompt
-        prompt_fn = build_8shot_prompt
-        mode += "+8shot"
-        logger.info("Using 8-shot chain-of-thought prompting (GSM8K exemplars)")
+    if not args.zero_shot:
+        prompt_fn = build_few_shots_prompt
+        mode += "+few-shot"
+        logger.info("Using 8-shot chain-of-thought prompting (GSM8K exemplars) and 4-shot MATH exemplars")
     else:
-        mode += "+0shot"
+        prompt_fn = build_zero_shot_prompt
+        mode += "+zero-shot"
+        logger.info("Using 0-shot prompting (no exemplars)")
 
     logger.info("Mode: %s | max_new_tokens=%d | problems=%d", mode, args.max_new_tokens, len(problems))
 
@@ -154,7 +154,6 @@ def main():
     results = generate_and_evaluate(
         model, tokenizer, problems,
         max_new_tokens=args.max_new_tokens,
-        use_llm_judge=True,
         prompt_fn=prompt_fn,
     )
     elapsed = time.time() - start
@@ -162,30 +161,6 @@ def main():
 
     # Compute metrics
     metrics = compute_metrics(results)
-
-    # Add easy/hard accuracy breakdown
-    easy_results = [r for r in results if r["complexity"] == 0]
-    hard_results = [r for r in results if r["complexity"] == 1]
-    easy_correct = [r for r in easy_results if r["correct"]]
-    hard_correct = [r for r in hard_results if r["correct"]]
-    metrics["easy_accuracy"] = len(easy_correct) / len(easy_results) if easy_results else 0
-    metrics["hard_accuracy"] = len(hard_correct) / len(hard_results) if hard_results else 0
-
-    # MATH by level breakdown
-    math_by_level = {}
-    for r in results:
-        level = r.get("level")
-        if level is None:
-            continue
-        level_str = str(level).strip()
-        if level_str not in math_by_level:
-            math_by_level[level_str] = {"total": 0, "correct": 0}
-        math_by_level[level_str]["total"] += 1
-        if r["correct"]:
-            math_by_level[level_str]["correct"] += 1
-    for k, v in math_by_level.items():
-        v["accuracy"] = v["correct"] / v["total"] if v["total"] > 0 else 0
-    metrics["math_by_level"] = math_by_level
 
     # Add metadata
     metrics["model"] = model_name
@@ -204,15 +179,15 @@ def main():
     logger.info("BASE MODEL EVALUATION — %s", mode)
     logger.info("=" * 60)
     logger.info("Overall accuracy:  %.2f%% (%d/%d)", metrics["accuracy"] * 100, metrics["num_correct"], metrics["num_total"])
-    logger.info("Easy (GSM8K) acc:  %.2f%% (%d/%d)", metrics["easy_accuracy"] * 100, len(easy_correct), len(easy_results))
-    logger.info("Hard (MATH) acc:   %.2f%% (%d/%d)", metrics["hard_accuracy"] * 100, len(hard_correct), len(hard_results))
+    logger.info("Easy (GSM8K) acc:  %.2f%% (%d/%d)", metrics["easy_accuracy"] * 100, metrics["num_easy_correct"], metrics["num_easy"])
+    logger.info("Hard (MATH) acc:   %.2f%% (%d/%d)", metrics["hard_accuracy"] * 100, metrics["num_hard_correct"], metrics["num_hard"])
     logger.info("Avg tokens easy:   %.1f", metrics["avg_tokens_easy"])
     logger.info("Avg tokens hard:   %.1f", metrics["avg_tokens_hard"])
     logger.info("TPCA:              %.1f", metrics["tpca"])
-    if math_by_level:
+    if metrics["math_by_level"]:
         logger.info("MATH by level:")
-        for level in sorted(math_by_level.keys()):
-            v = math_by_level[level]
+        for level in sorted(metrics["math_by_level"]):
+            v = metrics["math_by_level"][level]
             logger.info("  %s: %.2f%% (%d/%d)", level, v["accuracy"] * 100, v["correct"], v["total"])
     logger.info("Results saved to: %s", output_path)
 
