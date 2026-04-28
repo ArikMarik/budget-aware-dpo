@@ -53,7 +53,7 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
                 problems.append({
                     "problem": p["problem"],
                     "expected": p.get("expected_answer", ""),
-                    "complexity": classify_complexity(p),
+                    "complexity": classify_complexity(p)[0],
                     "source": "gsm8k",
                     "level": None,
                 })
@@ -70,7 +70,7 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
                 problems.append({
                     "problem": p["problem"],
                     "expected": p.get("expected_answer", ""),
-                    "complexity": classify_complexity(p),
+                    "complexity": classify_complexity(p)[0],
                     "source": "math",
                     "level": level,
                 })
