@@ -6,14 +6,17 @@ Saves training data for DPO preprocessing; holds out test sets for Phase 9 evalu
 
 import argparse
 import json
+import pickle
 from collections import defaultdict
 
+
 from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, DATASET_PATH
 from src.data.preprocessing import classify_complexity, normalize_problem
-from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer, verify_correctness
-from src.utils import count_tokens, get_logger, set_seed, setup_global_exception_handler
+from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer
+from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
@@ -29,12 +32,25 @@ OPENMATH_SIZES = {
     "train_1M": 1_000_000,
     "train_2M": 2_000_000,
     "train_5M": 5_000_000,
-    "train": 14_000_000,
+    "train": 13_972_791,
 }
+PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
+
+BATCH_SIZE = 100
+NUM_WORKERS = 25
 
 
-def convert_openmath_instruct(item: dict, problem_to_level: dict | None = None) -> dict:
+def convert_openmath_instruct_item(item: dict) -> dict:
     """Convert OpenMathInstruct-2 item to our format. Add level when problem_source has math and problem matches MATH train."""
+    from src.data.preprocessing import normalize_problem
+    from src.evaluation.answer_extraction import verify_correctness
+    from src.utils import count_tokens
+
+    if not hasattr(convert_openmath_instruct_item, '_problem_to_level'):
+        with open(PROBLEM_TO_LEVEL_PATH, "rb") as f:
+            convert_openmath_instruct_item._problem_to_level = pickle.load(f)
+    problem_to_level = convert_openmath_instruct_item._problem_to_level
+
     solution = item["generated_solution"]
     expected = item["expected_answer"]
     problem = item["problem"]
@@ -45,7 +61,7 @@ def convert_openmath_instruct(item: dict, problem_to_level: dict | None = None) 
         "expected_answer": expected,
         "problem_source": source,
         "teacher_token_count": count_tokens(solution),
-        "correctness_flag": verify_correctness(solution, expected, problem=problem),
+        "correctness_flag": verify_correctness(solution, expected),
     }
     if problem_to_level and "math" in source and problem:
         out["level"] = problem_to_level.get(normalize_problem(problem), "")
@@ -84,18 +100,37 @@ def load_openmath_instruct(split: str = "train_1M", limit: int | None = None) ->
     """Load OpenMathInstruct-2 from HuggingFace. Enriches MATH-origin problems with level from MATH train."""
     from datasets import load_dataset
 
-    logger.info("Loading MATH train for level mapping...")
-    problem_to_level = load_math_problem_to_level()
-    logger.info("Built level map for %s MATH problems", f"{len(problem_to_level):,}")
-
     dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split, streaming=True)
     total = min(limit, OPENMATH_SIZES[split]) if limit else OPENMATH_SIZES[split]
-    examples = []
+
+    logger.info("Loading MATH train for level mapping...")
+    if PROBLEM_TO_LEVEL_PATH.exists():
+        logger.info("Loaded problem to level mapping from %s", PROBLEM_TO_LEVEL_PATH)
+    else:
+        problem_to_level = load_math_problem_to_level()
+        with open(PROBLEM_TO_LEVEL_PATH, "wb") as f:
+            pickle.dump(problem_to_level, f)
+        logger.info("Built level map for %s MATH problems and saved to %s", f"{len(problem_to_level):,}", PROBLEM_TO_LEVEL_PATH)
+
+    items: list[dict] = []
     for i, item in enumerate(tqdm(dataset, total=total, desc="Loading OpenMathInstruct-2")):
         if limit and i >= limit:
             break
-        examples.append(convert_openmath_instruct(dict(item), problem_to_level))
-    return examples
+        items.append(dict(item))
+
+    if not items:
+        return []
+
+    results = process_map(
+        convert_openmath_instruct_item,
+        items,
+        total=len(items),
+        max_workers=NUM_WORKERS,
+        chunksize=BATCH_SIZE,
+        desc="Processing OpenMathInstruct-2 items",
+    )
+
+    return list(results)
 
 
 def load_gsm8k_test() -> list[dict]:
@@ -138,7 +173,7 @@ def load_math_test() -> list[dict]:
         solution = item.get("solution", item.get("answer", ""))
         expected = item.get("answer", "")
         if not expected and solution and "\\boxed{" in str(solution):
-            expected = extract_answer(str(solution)) or ""
+            expected = extract_answer(str(solution))
         examples.append({
             "problem": problem,
             "answer": solution,
