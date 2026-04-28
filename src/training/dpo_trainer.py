@@ -6,7 +6,7 @@ Optimized for GPU utilization and training efficiency.
 from collections import defaultdict
 import json
 import os
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Callable, Literal
 
@@ -27,10 +27,10 @@ from src.config import (
     get_tokens_path,
     get_processed_dataset_path,
 )
-from src.data.preprocessing import split_pairs_by_problem
-from src.evaluation.answer_extraction import extract_answer, verify_correctness
+from src.data.preprocessing import compute_pair_length_ratio, split_pairs_by_problem
+from src.evaluation.answer_extraction import verify_correctness
+from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
-    default_prompt_fn,
     generate_and_evaluate,
     compute_metrics,
     load_eval_problems,
@@ -350,16 +350,14 @@ def _filter_by_length_ratio(data: dict, length_ratio: float) -> list[int]:
     if length_ratio <= 1.0:
         return np.arange(len(data["chosen_input_ids"])).tolist()
 
-    complexities = data["complexities"].numpy()
     rejection_reason = data["rejection_reason"].numpy()
     chosen_length = data["chosen_length"].numpy()
     rejected_length = data["rejected_length"].numpy()
 
-    mask_easy = ((complexities == 0) & (chosen_length * length_ratio <= rejected_length))
-    mask_hard = ((complexities == 1) & (rejected_length * length_ratio <= chosen_length))
+    ratio_mask = compute_pair_length_ratio(chosen_length, rejected_length) >= length_ratio
     not_rejected_by_length = rejection_reason != 0
 
-    valid_mask = mask_easy | mask_hard | not_rejected_by_length
+    valid_mask = ratio_mask | not_rejected_by_length
 
     return np.where(valid_mask)[0].tolist()
 
@@ -450,7 +448,7 @@ def create_model(
 ) -> PeftModel:
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.bfloat16,
         device_map="auto" if device == "cuda" else None,
     )
     if device == "cpu":
@@ -477,7 +475,7 @@ def create_model(
 def create_ref_model(model_name: str, device: str) -> PeftModel:
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.bfloat16,
         device_map="auto" if device == "cuda" else None,
     )
     if device == "cpu":
@@ -560,7 +558,7 @@ def _compute_val_accuracy(
     epoch: int,
     use_wandb: bool,
     num_batches: int,
-    max_new_tokens: int = 256,
+    max_new_tokens: int = 512,
 ) -> dict[str, float]:
     """Run generation on val_problems and compute accuracy."""
     model.eval()
@@ -575,11 +573,12 @@ def _compute_val_accuracy(
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=[151645, 151643],
             )
         input_length = inputs["input_ids"].shape[1]
         new_tokens = out[0][input_length:]
         response = tokenizer.decode(new_tokens, skip_special_tokens=True)
-        correct = verify_correctness(response, problem_info["expected_answer"], problem=problem_info["problem"], logs=False) if problem_info["expected_answer"] else None
+        correct = verify_correctness(response, problem_info["expected_answer"], logs=False)
         results.append({
             "problem": problem_info["problem"],
             "complexity": problem_info["complexity"],
@@ -658,7 +657,8 @@ def build_val_problems(
     val_loader: DataLoader,
     problem_index: dict,
     tokenizer: PreTrainedTokenizer,
-    prompt_fn: Callable = default_prompt_fn,
+    prompt_fn: Callable = build_zero_shot_prompt,
+    max_val_problems: int = 250,
 ) -> list[dict]:
     """Build list of unique validation problems with pre-tokenized prompts."""
     seen_problem_ids = set()
@@ -680,6 +680,9 @@ def build_val_problems(
                     "expected_answer": info["expected_answer"],
                     "complexity": info["complexity"],
                 })
+                if len(val_problems) >= max_val_problems:
+                    logger.info(f"Built val_problems for {len(val_problems)} unique problems (capped)")
+                    return val_problems
 
     logger.info(f"Built val_problems for {len(val_problems)} unique problems")
     return val_problems
@@ -875,7 +878,7 @@ def _build_dataloaders(
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,  # Shuffle val for more even problem coverage during accuracy eval
         collate_fn=collate_fn_tokenized,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -952,7 +955,7 @@ def train_dpo(
     if problem_index_path.exists():
         with open(problem_index_path) as f:
             problem_index = json.load(f, object_hook=lambda obj: {int(k) if k.isdigit() else k: v for k, v in obj.items()})
-        val_problems = build_val_problems(val_loader, problem_index, tokenizer, default_prompt_fn)
+        val_problems = build_val_problems(val_loader, problem_index, tokenizer, build_zero_shot_prompt)
     else:
         logger.warning(f"Problem index not found at {problem_index_path}, skipping val_problems")
         val_problems = []
