@@ -228,7 +228,7 @@ def fix_mixed_latex(s):
 
 def is_number(s: str) -> bool:
     try:
-        float(s.replace(',', ''))
+        float(s.replace('\\,', '').replace(',', ''))
         return True
     except ValueError:
         return False
@@ -381,7 +381,9 @@ def strip_string(string, skip_unit=False):
     string = re.sub(r"_\d+$", "", string)
 
     if string.startswith('\\') and is_number(string[1:]):
-        string = string[1:].replace(",", "")
+        string = string[1:].replace("\\,", "").replace(",", "")
+    elif is_number(string):
+        string = string.replace("\\,", "").replace(",", "")
 
     return string
 
