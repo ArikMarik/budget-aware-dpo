@@ -160,6 +160,7 @@ def generate_and_evaluate(
     all_responses = []
     all_num_tokens = []
 
+    model.eval()
     for i in tqdm(range(0, len(prompts), batch_size), desc="Generating"):
         batch_prompts = prompts[i:i + batch_size]
         batch_results = _generate_batch(model, tokenizer, batch_prompts, max_new_tokens, device)

@@ -558,33 +558,12 @@ def _compute_val_accuracy(
     epoch: int,
     use_wandb: bool,
     num_batches: int,
-    max_new_tokens: int = 512,
+    max_new_tokens: int = 1024,
 ) -> dict[str, float]:
     """Run generation on val_problems and compute accuracy."""
     model.eval()
-    device = next(model.parameters()).device
-
-    results = []
-    for problem_info in tqdm(val_problems, desc=f"Val gen epoch {epoch}"):
-        inputs = problem_info['prompt']
-        with torch.inference_mode():
-            out = model.generate(
-                **inputs.to(device),
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=[151645, 151643],
-            )
-        input_length = inputs["input_ids"].shape[1]
-        new_tokens = out[0][input_length:]
-        response = tokenizer.decode(new_tokens, skip_special_tokens=True)
-        correct = verify_correctness(response, problem_info["expected_answer"], logs=False)
-        results.append({
-            "problem": problem_info["problem"],
-            "complexity": problem_info["complexity"],
-            "correct": correct,
-        })
-
+    results = generate_and_evaluate(
+        model, tokenizer, val_problems, max_new_tokens=max_new_tokens, prompt_fn=build_zero_shot_prompt, batch_size=32, num_workers=4)
     model.train()
 
     easy_results, hard_results = [], []
@@ -656,9 +635,7 @@ def compute_batch_loss_eval(
 def build_val_problems(
     val_loader: DataLoader,
     problem_index: dict,
-    tokenizer: PreTrainedTokenizer,
-    prompt_fn: Callable = build_zero_shot_prompt,
-    max_val_problems: int = 250,
+    max_val_problems: int = 1000,
 ) -> list[dict]:
     """Build list of unique validation problems with pre-tokenized prompts."""
     seen_problem_ids = set()
@@ -671,12 +648,9 @@ def build_val_problems(
                 seen_problem_ids.add(pid)
                 info = problem_index[pid]
                 problem_text = info["problem"]
-                prompt_text = prompt_fn(problem_text)
-                tokenized = tokenizer(prompt_text, return_tensors="pt")
                 val_problems.append({
                     "problem_id": pid,
                     "problem": problem_text,
-                    "prompt": tokenized,
                     "expected_answer": info["expected_answer"],
                     "complexity": info["complexity"],
                 })
@@ -955,7 +929,7 @@ def train_dpo(
     if problem_index_path.exists():
         with open(problem_index_path) as f:
             problem_index = json.load(f, object_hook=lambda obj: {int(k) if k.isdigit() else k: v for k, v in obj.items()})
-        val_problems = build_val_problems(val_loader, problem_index, tokenizer, build_zero_shot_prompt)
+        val_problems = build_val_problems(val_loader, problem_index)
     else:
         logger.warning(f"Problem index not found at {problem_index_path}, skipping val_problems")
         val_problems = []
