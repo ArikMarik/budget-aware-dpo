@@ -226,6 +226,14 @@ def fix_mixed_latex(s):
     return re.sub(r'(\d+)\s*\\frac\{(-?\d+)\}\{(-?\d+)\}', repl, s)
 
 
+def is_number(s: str) -> bool:
+    try:
+        float(s.replace(',', ''))
+        return True
+    except ValueError:
+        return False
+
+
 def strip_string(string, skip_unit=False):
     string = str(string).strip()
     # linebreaks
@@ -371,6 +379,9 @@ def strip_string(string, skip_unit=False):
 
     # remove trailing base representation (base 4 _4, base 8 _8 etc.)
     string = re.sub(r"_\d+$", "", string)
+
+    if string.startswith('\\') and is_number(string[1:]):
+        string = string[1:].replace(",", "")
 
     return string
 
