@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
+from torch import Tensor
 
 from src.evaluation.answer_extraction import verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
@@ -156,12 +157,10 @@ def _verify_correctness(example: dict) -> bool:
 
     generated_solution = example["generated_solution"]
     expected_answer = example["expected_answer"]
-    problem = example["problem"]
 
     return verify_correctness(
         generated_solution,
         expected_answer,
-        problem,
     )
 
 
@@ -327,14 +326,8 @@ def filter_pairs_by_length_ratio(pairs: list[dict], length_ratio: float | int = 
     return filtered
 
 
-def compute_pair_length_ratio(complexity: int, preferred_length: int, rejected_length: int) -> float:
-    if complexity == 0:
-        if preferred_length > 0:
-            return rejected_length / preferred_length
-    else:
-        if rejected_length > 0:
-            return preferred_length / rejected_length
-    return 0.0
+def compute_pair_length_ratio(preferred_length: Tensor | int, rejected_length: Tensor | int) -> Tensor | float:
+    return rejected_length / preferred_length
 
 
 def build_dpo_pairs(
@@ -417,7 +410,7 @@ def build_dpo_pairs(
             for pw in preferred:
                 for rj in rejected:
                     # Skip pairs where the length ratio condition is not satisfied
-                    if compute_pair_length_ratio(complexity, pw["teacher_token_count"], rj["teacher_token_count"]) < length_ratio:
+                    if compute_pair_length_ratio(pw["teacher_token_count"], rj["teacher_token_count"]) < length_ratio:
                         continue
 
                     problem_pairs.append({
@@ -579,12 +572,12 @@ def compute_statistics(
                 count_correct_easy += 1
                 chosen_length_sum_easy += chosen_length
                 rejected_length_sum_easy += rejected_length
-                ratios_easy.append(compute_pair_length_ratio(p['complexity'], p['chosen_length'], p['rejected_length']))
+                ratios_easy.append(compute_pair_length_ratio(p['chosen_length'], p['rejected_length']))
             else:
                 count_correct_hard += 1
                 chosen_length_sum_hard += chosen_length
                 rejected_length_sum_hard += rejected_length
-                ratios_hard.append(compute_pair_length_ratio(p['complexity'], p['chosen_length'], p['rejected_length']))
+                ratios_hard.append(compute_pair_length_ratio(p['chosen_length'], p['rejected_length']))
         else:
             raise ValueError('All pairs must be rejected by either incorrect/length')
 

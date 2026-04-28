@@ -28,6 +28,7 @@ from src.data.preprocessing import (
     compute_statistics,
     load_jsonl,
 )
+from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
@@ -54,10 +55,6 @@ def _write_jsonl(path: Path, pairs: list[dict], desc: str = "Saving") -> None:
     with open(path, "w", encoding="utf-8") as f:
         for p in pairs_iter:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
-
-
-def _format_prompt(problem: str) -> str:
-    return f"Problem: {problem}\nSolution: "
 
 
 def tokenize_and_save(
@@ -95,7 +92,7 @@ def tokenize_and_save(
         problem_ids_batch = []
 
         for pair in batch_pairs:
-            prompt_text = _format_prompt(pair["problem"])
+            prompt_text = build_zero_shot_prompt(pair["problem"])
             chosen_combined.append(prompt_text + pair["chosen"])
             rejected_combined.append(prompt_text + pair["rejected"])
             complexities_batch.append(pair.get("complexity", 0))
