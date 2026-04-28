@@ -32,7 +32,7 @@ def strip_text_commands(s: str) -> str:
             command = s[i+1:j]
 
             # Only process text-like commands
-            if command.startswith("text"):
+            if command.startswith("text") or command in ["overline", "underline"]:
                 k = j
 
                 # Skip optional argument [ ... ] if it exists
@@ -103,11 +103,11 @@ def verify_answer(
     if pred is None:
         return False
 
-    pred = strip_text_commands(pred)
-    expected = strip_text_commands(expected)
+    no_text_pred = strip_text_commands(pred)
+    no_text_expected = strip_text_commands(expected)
 
     try:
-        return verify(parse(_wrap(expected)), parse(_wrap(pred)))
+        return verify(parse(_wrap(no_text_expected)), parse(_wrap(no_text_pred)))
     except Exception as exc:
         logger.debug("math-verify inconclusive for %r vs %r: %s", pred, expected, exc)
 
@@ -118,5 +118,6 @@ def verify_answer(
     stripped_no_space_expected = remove_spaces(strip_string(expected))
 
     return math_equal(no_space_pred, no_space_expected) or math_equal(stripped_no_space_pred, no_space_expected) or \
+        math_equal(no_text_pred, no_text_expected)or \
         math_equal(no_space_pred, stripped_no_space_expected) or math_equal(stripped_no_space_pred, no_space_expected) or \
         math_equal(strip_string(no_space_pred), strip_string(no_space_expected))
