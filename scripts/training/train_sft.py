@@ -123,7 +123,7 @@ def run_gen_eval(model, tokenizer, epoch, step, use_wandb=False):
     random.shuffle(sample)
 
     model.eval()
-    results = generate_and_evaluate(model, tokenizer, sample, max_new_tokens=256, use_llm_judge=False)
+    results = generate_and_evaluate(model, tokenizer, sample, max_new_tokens=256)
     metrics = compute_metrics(results)
 
     easy_r = [r for r in results if r["complexity"] == 0]
