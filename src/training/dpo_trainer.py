@@ -363,20 +363,30 @@ def _cap_pairs_per_problem(
     return sorted(kept)
 
 
-def _filter_by_length_ratio(data: dict, length_ratio: float) -> list[int]:
-    """Vectorized filtering using numpy."""
+def _filter_by_length_ratio(
+    data: dict,
+    length_ratio_easy: float,
+    length_ratio_hard: float,
+) -> list[int]:
+    """Vectorized per-complexity filtering using numpy."""
     import numpy as np
 
-    if length_ratio <= 1.0:
+    if length_ratio_easy <= 1.0 and length_ratio_hard <= 1.0:
         return np.arange(len(data["chosen_input_ids"])).tolist()
 
     rejection_reason = data["rejection_reason"].numpy()
     chosen_length = data["chosen_length"].numpy()
     rejected_length = data["rejected_length"].numpy()
+    complexities = data["complexities"].numpy()
 
-    ratio_mask = compute_pair_length_ratio(chosen_length, rejected_length) >= length_ratio
+    ratio = compute_pair_length_ratio(chosen_length, rejected_length)
     not_rejected_by_length = rejection_reason != 0
 
+    # Per-pair threshold: complexity 0 (easy) → length_ratio_easy, 1 (hard) → length_ratio_hard
+    threshold = np.where(complexities == 0, length_ratio_easy, length_ratio_hard)
+
+    # Keep pair if ratio >= threshold; bypass filter where threshold <= 1.0
+    ratio_mask = (ratio >= threshold) | (threshold <= 1.0)
     valid_mask = ratio_mask | not_rejected_by_length
 
     return np.where(valid_mask)[0].tolist()
@@ -386,19 +396,20 @@ def load_tokenized_datasets(
     tokens_path: Path,
     *,
     raw_data: Optional[dict] = None,
-    length_ratio: float = 1.0,
+    length_ratio_easy: float = 1.0,
+    length_ratio_hard: float = 1.0,
     val_split: float = 0.2,
     seed: int = 42,
     max_pairs_per_problem: Optional[int] = None,
     max_unique_problems: int = 100_000
 ) -> tuple[TokenizedDPODataset, TokenizedDPODataset]:
     """
-    Load all tokenized pairs, filter by length_ratio, optionally cap pairs per
-    problem, then split by problem_id. Returns (train_dataset, val_dataset).
+    Load all tokenized pairs, filter by per-complexity length ratios, optionally cap pairs
+    per problem, then split by problem_id. Returns (train_dataset, val_dataset).
 
     Processing order:
     1. Load all data from tokens_path (or use raw_data if provided to skip torch.load)
-    2. Apply length_ratio filter to all pairs
+    2. Apply per-complexity length_ratio filter (easy/hard) to all pairs
     3. Apply max_pairs_per_problem cap (stratified by rejection_reason)
     4. Split filtered pairs by problem_id (stratified by complexity)
     """
@@ -413,8 +424,8 @@ def load_tokenized_datasets(
     logger.debug(f'{" END LOAD TOKENS ":#^100}')
 
     logger.debug(f'{" START FILTER BY LENGTH ":#^100}')
-    # 1. Apply length_ratio filter (vectorized)
-    filtered_indices = _filter_by_length_ratio(data, length_ratio)
+    # 1. Apply per-complexity length_ratio filter (vectorized)
+    filtered_indices = _filter_by_length_ratio(data, length_ratio_easy, length_ratio_hard)
     logger.debug(f'{" END FILTER BY LENGTH ":#^100}')
 
     # 2. Cap pairs per problem (stratified by rejection_reason)
@@ -434,7 +445,7 @@ def load_tokenized_datasets(
     val_dataset = TokenizedDPODataset(data, val_indices)
 
     logger.info(
-        f"Data split (length_ratio={length_ratio}, "
+        f"Data split (length_ratio_easy={length_ratio_easy}, length_ratio_hard={length_ratio_hard}, "
         f"max_pairs_per_problem={max_pairs_per_problem}): "
         f"Train (pairs)={len(train_indices)}, Val (pairs)={len(val_indices)}"
     )
@@ -936,7 +947,8 @@ def train_dpo(
     num_workers: int = 4,
     model_name: Optional[str] = None,
     loss_type: str = "dpo",
-    length_ratio: float = 1.0,
+    length_ratio_easy: float = 1.0,
+    length_ratio_hard: float = 1.0,
     max_pairs_per_problem: Optional[int] = 3,
     best_model_metric: BestModelMetric = "val_loss",
     accuracy_floor: Optional[float] = None,
@@ -960,7 +972,8 @@ def train_dpo(
     train_dataset, val_dataset = load_tokenized_datasets(
         get_tokens_path(),
         raw_data=ctx.raw_data,
-        length_ratio=length_ratio,
+        length_ratio_easy=length_ratio_easy,
+        length_ratio_hard=length_ratio_hard,
         val_split=val_split,
         seed=seed,
         max_pairs_per_problem=max_pairs_per_problem,
@@ -969,7 +982,7 @@ def train_dpo(
 
     num_train = len(train_dataset)
     num_val = len(val_dataset)
-    logger.info("Data split: Train=%s, Val=%s (length_ratio=%.1f)", num_train, num_val, length_ratio)
+    logger.info("Data split: Train=%s, Val=%s (length_ratio_easy=%.1f, length_ratio_hard=%.1f)", num_train, num_val, length_ratio_easy, length_ratio_hard)
 
     pin_memory = device == "cuda"
 

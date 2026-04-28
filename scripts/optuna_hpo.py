@@ -73,7 +73,8 @@ GRID_SEARCH_SPACE: dict[str, list[Any]] = {
     "batch_size":                  [4, 8],
     "gradient_accumulation_steps": [1, 2],
     "loss_type":                   ["dpo"],
-    "length_ratio":                [1.0, 1.5, 2.0],
+    "length_ratio_easy":           [1.0, 1.5, 2.0, 3.0],
+    "length_ratio_hard":           [1.0, 1.5, 2.0],
     "max_pairs_per_problem":       [20, 50, 100],
 }
 
@@ -146,7 +147,8 @@ def _sample_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
         "batch_size":                  trial.suggest_categorical("batch_size", [4, 8, 12]),
         "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
         "loss_type":                   trial.suggest_categorical("loss_type", LOSS_TYPES),
-        "length_ratio":                trial.suggest_float("length_ratio", 1.5, 4.0),
+        "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.0, 5.0),
+        "length_ratio_hard":           trial.suggest_float("length_ratio_hard", 1.0, 3.0),
         "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 1, 5),
     }
 
@@ -238,7 +240,8 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
                 loss_type=str(params["loss_type"]),
                 best_model_metric="val_loss",
                 accuracy_floor=None,
-                length_ratio=float(params["length_ratio"]),
+                length_ratio_easy=float(params["length_ratio_easy"]),
+                length_ratio_hard=float(params["length_ratio_hard"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
                 # max_unique_problems=50,  # TODO - VERY TEMPORARY (CHECK THE A SMALL FULL RUN)
                 ctx=ctx,
