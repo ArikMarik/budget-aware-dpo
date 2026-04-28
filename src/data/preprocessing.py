@@ -49,6 +49,12 @@ HARD_PREF_PCT_LOW = float(os.environ.get("HARD_PREF_PCT_LOW", 20))
 HARD_PREF_PCT_HIGH = float(os.environ.get("HARD_PREF_PCT_HIGH", 45))
 
 REJECTION_REASONS = {'unknown': -1, 'length': 0, 'incorrect': 1}
+SOURCE_TO_INT = {"gsm8k": 0, "math": 1, "augmented_math": 2, "augmented_gsm8k": 3}
+INT_TO_SOURCE = {v: k for k, v in SOURCE_TO_INT. items ()}
+
+
+def _source_to_int(source: str) -> int:
+    return SOURCE_TO_INT.get (source. lower(), -1) # -1 for unknown
 
 
 def _normalize_level(level: Any) -> int | None:
@@ -404,6 +410,7 @@ def build_dpo_pairs(
 
         problem_id = items[0]["problem_id"]
         complexity = items[0]["complexity"]
+        problem_source = items[0]["problem_source"]
 
         if preferred and rejected:
             problem_pairs = []
@@ -422,6 +429,7 @@ def build_dpo_pairs(
                         "rejection_reason": rj["rejection_reason"],
                         "chosen_length": pw["teacher_token_count"],
                         "rejected_length": rj["teacher_token_count"],
+                        "problem_source": _source_to_int(problem_source),
                     })
 
             if max_per_problem and max_per_problem > 0 and len(problem_pairs) > max_per_problem:
@@ -471,31 +479,31 @@ def split_pairs_by_problem(
 
     problem_ids = pairs["problem_ids"].numpy()[filtered_indices]
     complexities = pairs["complexities"].numpy()[filtered_indices]
+    problem_sources = pairs["problem_sources"].numpy()[filtered_indices]
 
     # Get unique problems
     unique_problems = np.unique(problem_ids)
 
-    # Build problem -> complexity mapping (pick first sample's complexity)
-    problem_to_complexity = {}
+    # Build problem -> complexity and source mapping (pick first sample's complexity)
+    problem_to_complexity_and_sources = {}
     for pid in unique_problems:
         first_idx = np.where(problem_ids == pid)[0][0]
-        problem_to_complexity[pid] = complexities[first_idx]
+        problem_to_complexity_and_sources[pid] = (complexities[first_idx], problem_sources[first_idx])
 
-    problem_complexities = np.array([problem_to_complexity[p] for p in unique_problems])
+    problem_strata = np.array(problem_to_complexity_and_sources[p] for p in unique_problems)
 
-    # TODO - stratify by problem_source too
     # Stratified split
     if len(unique_problems) > max_unique_problems:
-        unique_problems, discarded_problems, problem_complexities, discarded_problem_complexities = train_test_split(
-        unique_problems, problem_complexities,
+        unique_problems, discarded_problems, problem_strata, discarded_problem_strata = train_test_split(
+        unique_problems, problem_strata,
         train_size=max_unique_problems,
-        stratify=problem_complexities,
+        stratify=problem_strata,
         random_state=seed,
     )
     unique_train_problem_ids, unique_val_problem_ids = train_test_split(
         unique_problems,
         test_size=val_split,
-        stratify=problem_complexities,
+        stratify=problem_strata,
         random_state=seed,
     )
 

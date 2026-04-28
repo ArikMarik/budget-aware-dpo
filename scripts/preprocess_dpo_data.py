@@ -79,6 +79,7 @@ def tokenize_and_save(
     rejected_length = torch.empty(num_pairs, dtype=torch.long)
     problem_ids = torch.empty(num_pairs, dtype=torch.long)
     prompt_lengths = torch.empty(num_pairs, dtype=torch.long)
+    problem_sources = torch.empty(num_pairs, dtype=torch.long)
 
     num_batches = (num_pairs + batch_size - 1) // batch_size
 
@@ -92,6 +93,7 @@ def tokenize_and_save(
         chosen_length_batch, rejected_length_batch = [], []
         problem_ids_batch = []
         prompt_length_batch = []
+        source_batch = []
 
         for pair in batch_pairs:
             prompt_text = build_zero_shot_prompt(pair["problem"])
@@ -106,6 +108,7 @@ def tokenize_and_save(
             # making shift_mask[..., :P] zero exactly the right prompt positions.
             prompt_tok = tokenizer(prompt_text, add_special_tokens=False)
             prompt_length_batch.append(len(prompt_tok["input_ids"]))
+            source_batch.append(pair["problem_source"])
 
         chosen_tok = tokenizer(chosen_combined, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
         rejected_tok = tokenizer(rejected_combined, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
@@ -120,6 +123,7 @@ def tokenize_and_save(
         rejected_length[start_idx:end_idx] = torch.tensor(rejected_length_batch, dtype=torch.long)
         problem_ids[start_idx:end_idx] = torch.tensor(problem_ids_batch, dtype=torch.long)
         prompt_lengths[start_idx:end_idx] = torch.tensor(prompt_length_batch, dtype=torch.long)
+        problem_sources[start_idx:end_idx] = torch.tensor(source_batch, dtype=torch.long)
 
     torch.save(
         {
@@ -133,6 +137,7 @@ def tokenize_and_save(
             "rejected_length": rejected_length,
             "problem_ids": problem_ids,
             "prompt_lengths": prompt_lengths,
+            "problem_sources": problem_sources,
         },
         output_path,
     )

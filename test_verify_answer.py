@@ -77,4 +77,18 @@ if __name__ == "__main__":
     pred = r"\frac{2469}{20000}"
     expected = r"\dfrac{2469}{20,000}"
 
+    pred = r"10.196"
+    expected = r"3\sqrt{3}+5"
+
+    # Result to False
+    pred = r"22+2+6+2 = 24+6+2 = 30+2 = 32"
+    expected = r"22+2+6+2=32"
+
+    # Result to False
+    pred = r"125 \text{ cm}^3"
+    expected = r"125"
+
+    pred = r"12.806"
+    expected = r"2\sqrt{41}"
+
     show_all_permutations(pred, expected)
