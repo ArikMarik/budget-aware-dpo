@@ -1,3 +1,4 @@
+import functools
 import re
 
 from math_verify import parse, verify
@@ -96,6 +97,7 @@ def remove_spaces(s: str) -> str:
     return re.sub(r'\s+', '', s)
 
 
+@functools.lru_cache(maxsize=1024)
 def verify_answer(
     pred: str | None,
     expected: str,
