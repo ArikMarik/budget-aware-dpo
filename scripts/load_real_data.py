@@ -8,13 +8,15 @@ import argparse
 import json
 import pickle
 from collections import defaultdict
-
+from typing import Any
 
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
+
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, DATASET_PATH
 from src.data.preprocessing import classify_complexity, normalize_problem
+from src.data.worker_utils import init_worker, count_tokens_batch
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
@@ -40,34 +42,48 @@ BATCH_SIZE = 100
 NUM_WORKERS = 25
 
 
-def convert_openmath_instruct_item(item: dict) -> dict:
+def convert_openmath_instruct_item(item: dict, problem_to_level: dict | None = None, compute_correctness: bool = True) -> dict:
     """Convert OpenMathInstruct-2 item to our format. Add level when problem_source has math and problem matches MATH train."""
     from src.data.preprocessing import normalize_problem
-    from src.evaluation.answer_extraction import verify_correctness
-    from src.utils import count_tokens
-
-    if not hasattr(convert_openmath_instruct_item, '_problem_to_level'):
-        with open(PROBLEM_TO_LEVEL_PATH, "rb") as f:
-            convert_openmath_instruct_item._problem_to_level = pickle.load(f)
-    problem_to_level = convert_openmath_instruct_item._problem_to_level
 
     solution = item["generated_solution"]
     expected = item["expected_answer"]
     problem = item["problem"]
     source = item["problem_source"].lower()
+
+    teacher_token_count = item.get("_token_count")
+
+    is_correct = None
+    if compute_correctness:
+        from src.evaluation.answer_extraction import verify_correctness
+        is_correct = verify_correctness(solution, expected)
+
     out = {
         "problem": problem,
         "generated_solution": solution,
         "expected_answer": expected,
         "problem_source": source,
-        "teacher_token_count": count_tokens(solution),
-        "correctness_flag": verify_correctness(solution, expected),
+        "teacher_token_count": teacher_token_count,
+        "correctness_flag": is_correct,
     }
     if problem_to_level and "math" in source and problem:
         out["level"] = problem_to_level.get(normalize_problem(problem), "")
     else:
         out["level"] = ""
     return out
+
+
+def _worker_convert(item: dict) -> dict:
+    """Worker function that uses pre-loaded problem_to_level."""
+    return convert_openmath_instruct_item(
+        item,
+        problem_to_level=_problem_to_level_cache,
+        compute_correctness=_compute_correctness,
+    )
+
+
+_problem_to_level_cache: dict | None = None
+_compute_correctness: bool = False
 
 
 def load_math_problem_to_level() -> dict[str, str]:
@@ -87,6 +103,7 @@ def load_math_problem_to_level() -> dict[str, str]:
         except Exception as e2:
             logger.warning("Failed to load hendrycks/competition_math: %s. Using final fallback...", e2)
             ds = load_dataset("lighteval/MATH", split="train")
+
     mapping = {}
     for item in ds:
         problem = item.get("problem", item.get("question", ""))
@@ -96,21 +113,31 @@ def load_math_problem_to_level() -> dict[str, str]:
     return mapping
 
 
-def load_openmath_instruct(split: str = "train_1M", limit: int | None = None) -> list[dict]:
+def load_openmath_instruct(split: str = "train_1M", limit: int | None = None, compute_correctness: bool = True) -> list[dict]:
     """Load OpenMathInstruct-2 from HuggingFace. Enriches MATH-origin problems with level from MATH train."""
-    from datasets import load_dataset
+    global _problem_to_level_cache, _compute_correctness
 
-    dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split, streaming=True)
+    import datasets
+    from datasets import load_dataset
+    cache_path = '/root/.cache/huggingface/datasets'
+    datasets.config.HF_DATASETS_CACHE = cache_path
+
+    dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split, streaming=True, cache_dir=cache_path)
     total = min(limit, OPENMATH_SIZES[split]) if limit else OPENMATH_SIZES[split]
 
     logger.info("Loading MATH train for level mapping...")
     if PROBLEM_TO_LEVEL_PATH.exists():
+        with open(PROBLEM_TO_LEVEL_PATH, "rb") as f:
+            problem_to_level = pickle.load(f)
         logger.info("Loaded problem to level mapping from %s", PROBLEM_TO_LEVEL_PATH)
     else:
         problem_to_level = load_math_problem_to_level()
         with open(PROBLEM_TO_LEVEL_PATH, "wb") as f:
             pickle.dump(problem_to_level, f)
         logger.info("Built level map for %s MATH problems and saved to %s", f"{len(problem_to_level):,}", PROBLEM_TO_LEVEL_PATH)
+
+    _problem_to_level_cache = problem_to_level
+    _compute_correctness = compute_correctness
 
     items: list[dict] = []
     for i, item in enumerate(tqdm(dataset, total=total, desc="Loading OpenMathInstruct-2")):
@@ -121,8 +148,17 @@ def load_openmath_instruct(split: str = "train_1M", limit: int | None = None) ->
     if not items:
         return []
 
+    logger.info("Batch tokenizing %d solutions...", len(items))
+    init_worker(problem_to_level_path=PROBLEM_TO_LEVEL_PATH) # Pre-load tokenizer and problem_to_level in the main process for batch tokenization
+    solutions = [item["generated_solution"] for item in items]
+    token_counts = count_tokens_batch(solutions)
+    del solutions
+    for i, tc in enumerate(token_counts):
+        items[i]["_token_count"] = tc
+    logger.info("Tokenization complete.")
+
     results = process_map(
-        convert_openmath_instruct_item,
+        _worker_convert,
         items,
         total=len(items),
         max_workers=NUM_WORKERS,
@@ -241,13 +277,14 @@ def main():
     parser.add_argument("--skip-test-sets", action="store_true", help="Skip loading GSM8K/MATH test (faster)")
     parser.add_argument("--test-sets-only", action="store_true", help="Load only GSM8K/MATH test (for Phase 9 evaluation)")
     parser.add_argument("--no-problem-index", action="store_true", help="Skip building problem index JSON")
+    parser.add_argument("--skip-correctness", action="store_true", help="Skip computing correctness flag (faster; useful for quick loading)")
     args = parser.parse_args()
 
     DATA_PATH.mkdir(parents=True, exist_ok=True)
 
     if not args.test_sets_only:
         logger.info("Loading OpenMathInstruct-2...")
-        train_data = load_openmath_instruct(split=args.split, limit=args.limit)
+        train_data = load_openmath_instruct(split=args.split, limit=args.limit, compute_correctness=not args.skip_correctness)
         logger.info("Loaded %s training examples", len(train_data))
 
         DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
