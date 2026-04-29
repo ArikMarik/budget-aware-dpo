@@ -1,64 +1,29 @@
 #!/usr/bin/env python3
 """
 Build math problem index for similarity-based complexity classification.
-Extracts original MATH problems with known levels, embeddings them, and saves FAISS index.
+Extracts original MATH problems with known levels from HuggingFace, embeds them, and saves FAISS index.
+
+Can run before load_real_data.py generates openmathinstruct.jsonl.
 """
 
 import json
 import os
-from tqdm import tqdm
 
-# Check for sentence-transformers and faiss
-try:
-    from sentence_transformers import SentenceTransformer
-    import faiss
-except ImportError:
-    print("Installing required packages...")
-    os.system("pip install sentence-transformers faiss-cpu -q")
-    from sentence_transformers import SentenceTransformer
-    import faiss
+import faiss
+from sentence_transformers import SentenceTransformer
 
-from src.config import DATA_PATH
-from src.data.preprocessing import _normalize_level, classify_complexity
+from src.config import DATA_PATH, EMBEDDING_MODEL
+from src.data.preprocessing import load_math_problems_with_complexity
 
 OUTPUT_DIR = DATA_PATH / "math_problem_index"
-SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.7"))
-EMBEDDING_MODEL = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.6"))
 
 
 def main():
-    # TODO - should load from the dataset online, since it should run before load_real_data.py (which generates the openmathinstruct.jsonl file)
-    data_path = DATA_PATH / "openmathinstruct.jsonl"
+    print("Loading MATH problems from HuggingFace...")
 
-    print(f"Loading data from {data_path}...")
-
-    # Pass 1: Collect original MATH problems with known levels
-    math_problems = {}  # problem -> {level, complexity}
-
-    with open(data_path, "r", encoding="utf-8") as f:
-        for line in tqdm(f, desc="Finding MATH problems"):
-            line = line.strip()
-            if not line:
-                continue
-            ex = json.loads(line)
-            source = str(ex.get("problem_source", "")).lower()
-
-            # Only original MATH (not augmented)
-            if source != "math":
-                continue
-
-            problem = ex["problem"]
-            level = _normalize_level(ex.get("level"))
-            if level is None:
-                continue # Skip unknown levels
-            complexity = classify_complexity(ex)
-
-            # Store unique problems (prefer first occurrence)
-            if problem not in math_problems:
-                math_problems[problem] = {
-                    "level": level,
-                    "complexity": complexity,
-                }
+    # Load MATH problems with level and complexity from HuggingFace
+    math_problems = load_math_problems_with_complexity(use_cache=True)
 
     print(f"Found {len(math_problems):,} unique MATH problems with known levels")
 
