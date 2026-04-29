@@ -14,7 +14,7 @@ from tqdm.contrib.concurrent import process_map
 
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, DATASET_PATH
-from src.data.preprocessing import classify_complexity, normalize_problem
+from src.data.preprocessing import classify_complexity, load_math_problem_to_level, normalize_problem
 from src.data.worker_utils import count_tokens_batch
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer
 from src.utils import get_logger, set_seed, setup_global_exception_handler
@@ -23,11 +23,6 @@ logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
 
 set_seed(42)
-
-MATH_CONFIGS = [
-    "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
-    "number_theory", "prealgebra", "precalculus",
-]
 
 OPENMATH_SIZES = {
     "train_1M": 1_000_000,
@@ -38,7 +33,7 @@ OPENMATH_SIZES = {
 PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
 
 BATCH_SIZE = 500
-NUM_WORKERS = 64
+NUM_WORKERS = 8
 
 
 def convert_openmath_instruct_item(item: dict, problem_to_level: dict | None = None, compute_correctness: bool = True) -> dict:
@@ -83,33 +78,6 @@ def _worker_convert(item: dict) -> dict:
 
 _problem_to_level_cache: dict | None = None
 _compute_correctness: bool = False
-
-
-def load_math_problem_to_level() -> dict[str, str]:
-    """Load MATH train split and build problem text -> level mapping. Used to enrich OpenMathInstruct-2 with levels."""
-    from datasets import load_dataset, concatenate_datasets
-
-    try:
-        parts = [
-            load_dataset("EleutherAI/hendrycks_math", cfg, split="train", trust_remote_code=False)
-            for cfg in MATH_CONFIGS
-        ]
-        ds = concatenate_datasets(parts)
-    except Exception as e:
-        logger.warning("Failed to load EleutherAI/hendrycks_math: %s. Trying fallback...", e)
-        try:
-            ds = load_dataset("hendrycks/competition_math", split="train")
-        except Exception as e2:
-            logger.warning("Failed to load hendrycks/competition_math: %s. Using final fallback...", e2)
-            ds = load_dataset("lighteval/MATH", split="train")
-
-    mapping = {}
-    for item in ds:
-        problem = item.get("problem", item.get("question", ""))
-        level = item.get("level", "")
-        if problem and level:
-            mapping[normalize_problem(problem)] = str(level)
-    return mapping
 
 
 def load_openmath_instruct(split: str = "train_1M", limit: int | None = None, compute_correctness: bool = True) -> list[dict]:
@@ -247,12 +215,12 @@ def build_problem_index(raw_data: list[dict]) -> list[dict]:
         token_lengths = [ex.get("teacher_token_count", 0) for ex in examples]
         avg_tokens = sum(token_lengths) / len(token_lengths) if token_lengths else 0
 
-        examples_sorted = sorted(examples, key=lambda ex: get_source_rank(ex.get("problem_source", "")))
+        examples_sorted = sorted(examples, key=lambda ex: (get_source_rank(ex.get("problem_source", "")), ex.get('level', '').lower() if ex.get('level', '') else 'level unknown'))
         primary = examples_sorted[0]
 
         complexity, matched_level = classify_complexity(primary, avg_token_length=avg_tokens)
 
-        level = matched_level or primary.get("level", "")
+        level = primary["level"] if primary.get("level", "") else matched_level
 
         result.append({
             "problem_id": problem_id,
