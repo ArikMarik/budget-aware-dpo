@@ -30,6 +30,9 @@ PROCESSED_DATASET_PATH_BALANCED = DATA_PATH / "processed_dpo_dataset_balanced"
 GSM8K_TEST_PATH = DATA_PATH / "gsm8k_test.jsonl"
 MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
 
+# Similarity Search - Embedding
+EMBEDDING_MODEL = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+
 
 def get_processed_dataset_path() -> Path:
     """Return processed dataset path based on DATASET_PATH / DATASET_VARIANT / USE_DUMMY_DATA."""
