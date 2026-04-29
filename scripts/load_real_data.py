@@ -124,6 +124,9 @@ def load_openmath_instruct(split: str = "train_1M", limit: int | None = None, co
         items[i]["_token_count"] = tc
     logger.info("Tokenization complete.")
 
+    logger.info("Sorting items by expected_answer for improved caching...")
+    items.sort(key=lambda x: x.get("expected_answer", ""))
+
     results = process_map(
         _worker_convert,
         items,
