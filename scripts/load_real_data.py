@@ -7,6 +7,7 @@ Saves training data for DPO preprocessing; holds out test sets for Phase 9 evalu
 import argparse
 import json
 import pickle
+from pathlib import Path
 from collections import defaultdict
 
 from tqdm import tqdm
@@ -240,6 +241,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", default="train", help="OpenMathInstruct split: train_1M, train_2M, train_5M, train")
     parser.add_argument("--limit", type=int, default=None, help="Limit training examples (for quick test)")
+    parser.add_argument("--output", type=str, default=DATASET_PATH, help="Output path for training data JSONL (default: DATASET_PATH)")
     parser.add_argument("--skip-test-sets", action="store_true", help="Skip loading GSM8K/MATH test (faster)")
     parser.add_argument("--test-sets-only", action="store_true", help="Load only GSM8K/MATH test (for Phase 9 evaluation)")
     parser.add_argument("--no-problem-index", action="store_true", help="Skip building problem index JSON")
@@ -253,7 +255,9 @@ def main():
         train_data = load_openmath_instruct(split=args.split, limit=args.limit, compute_correctness=not args.skip_correctness)
         logger.info("Loaded %s training examples", len(train_data))
 
-        if args.split == "train" and args.limit is None:
+        if args.output != DATASET_PATH:
+            output_path = Path(args.output)
+        elif args.split == "train" and args.limit is None:
             output_path = DATASET_PATH
         else:
             base_name = f"openmathinstruct_{args.split}"
