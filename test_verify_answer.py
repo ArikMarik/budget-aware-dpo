@@ -44,51 +44,26 @@ def show_all_permutations(pred, expected) -> None:
 
 
 if __name__ == "__main__":
-    pred = r"-\frac{5}{3}"
-    expected = r"-\frac{5}{3}."
+    samples = [
+        {'pred': r"-\frac{5}{3}", 'expected': r"-\frac{5}{3}.",},
+        {'pred': r"-15\frac{3}{5}", 'expected': r"-15+3/5",},
+        {'pred': r"\$306,\!960.29", 'expected': r"306,956.63",},
+        {'pred': r"\42,\!409", 'expected': r"42409",},
+        {'pred': r"-5/3", 'expected': r"-\frac{5}{3}.",},
+        {'pred': r"\text{C.}", 'expected': r"C",},
+        {'pred': r"100\,000", 'expected': r"100000",},
+        {'pred': r"a + b + c", 'expected': r"a+b+c",},
+        {'pred': r"- ab - ac - bc", 'expected': r"-(ab+ac+bc)",},
+        {'pred': r"12^\frac{1}{7}", 'expected': r"12^{1/7}",},
+        {'pred': r"\frac{2469}{20000}", 'expected': r"\dfrac{2469}{20,000}",},
+        {'pred': r"10.196", 'expected': r"3\sqrt{3}+5",},
+        # Result to False
+        {'pred': r"22+2+6+2 = 24+6+2 = 30+2 = 32", 'expected': r"22+2+6+2=32",},
+        # Result to False
+        {'pred': r"125 \text{ cm}^3", 'expected': r"125",},
+        {'pred': r"12.806", 'expected': r"2\sqrt{41}",}
+    ]
 
-    pred = r"-15\frac{3}{5}"
-    expected = r"-15+3/5"
-
-    pred = r"\$306,\!960.29"
-    expected = r"306,956.63"
-
-    pred = r"\42,\!409"
-    expected = r"42409"
-
-    pred = r"-5/3"
-    expected = r"-\frac{5}{3}."
-
-    pred = r"\text{C.}"
-    expected = r"C"
-
-    pred = r"100\,000"
-    expected = r"100000"
-
-    pred = r"a + b + c"
-    expected = r"a+b+c"
-
-    pred = r"- ab - ac - bc"
-    expected = r"-(ab+ac+bc)"
-
-    pred = r"12^\frac{1}{7}"
-    expected = r"12^{1/7}"
-
-    pred = r"\frac{2469}{20000}"
-    expected = r"\dfrac{2469}{20,000}"
-
-    pred = r"10.196"
-    expected = r"3\sqrt{3}+5"
-
-    # Result to False
-    pred = r"22+2+6+2 = 24+6+2 = 30+2 = 32"
-    expected = r"22+2+6+2=32"
-
-    # Result to False
-    pred = r"125 \text{ cm}^3"
-    expected = r"125"
-
-    pred = r"12.806"
-    expected = r"2\sqrt{41}"
-
-    show_all_permutations(pred, expected)
+    for sample in samples:
+        show_all_permutations(sample['pred'], sample['expected'])
+        print('#' * 40, end='\n\n')
