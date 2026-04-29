@@ -183,7 +183,7 @@ def main():
     logger.info("Hard (MATH) acc:   %.2f%% (%d/%d)", metrics["hard_accuracy"] * 100, metrics["num_hard_correct"], metrics["num_hard"])
     logger.info("Avg tokens easy:   %.1f", metrics["avg_tokens_easy"])
     logger.info("Avg tokens hard:   %.1f", metrics["avg_tokens_hard"])
-    logger.info("TPCA:              %.1f", metrics["tpca"])
+    logger.info("TPCA (tokens per correct answer):              %.1f", metrics["tpca"])
     if metrics["math_by_level"]:
         logger.info("MATH by level:")
         for level in sorted(metrics["math_by_level"]):

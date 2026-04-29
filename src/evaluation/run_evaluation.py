@@ -245,7 +245,7 @@ def compute_metrics(results: list[dict]) -> dict:
         "accuracy": accuracy,
         "num_correct": len(correct),
         "num_total": len(with_expected),
-        "tpca (tokens per correct answer)": tpca,
+        "tpca": tpca,
         "average_tokens_length": average_tokens_length,
         "total_tokens": total_tokens,
         "total_tokens_correct": total_tokens_correct,
