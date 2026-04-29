@@ -364,7 +364,8 @@ def load_problem_index(path: Path) -> dict[str, dict]:
     """Load problem index from pickle and build problem_text -> problem data mapping."""
     with open(path, "rb") as f:
         index = pickle.load(f)
-    return {normalize_problem(item["problem"]): item for item in index}
+    index_items = index.values() if isinstance(index, dict) else index
+    return {normalize_problem(item["problem"]): item for item in index_items}
 
 
 def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int) -> list[dict]:
