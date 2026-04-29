@@ -192,7 +192,9 @@ def compute_metrics(results: list[dict]) -> dict:
 
     with_expected, correct, easy_results, hard_results = [],  [], [], []
     easy_correct, hard_correct = [], []
-    total_tokens = 0
+    total_tokens, total_tokens_correct = 0, 0
+    total_tokens_easy, total_tokens_hard = 0, 0
+    total_tokens_easy_correct, total_tokens_hard_correct = 0, 0
     math_by_level = {}
     math_45_with_exp, math_45_correct = [], []
 
@@ -201,15 +203,20 @@ def compute_metrics(results: list[dict]) -> dict:
             with_expected.append(r)
             if r["correct"]:
                 correct.append(r)
+                total_tokens_correct += r["tokens"]
         total_tokens += r["tokens"]
         if r["complexity"] == 0:
             easy_results.append(r)
             if r["correct"]:
                 easy_correct.append(r)
+                total_tokens_easy_correct += r["tokens"]
+            total_tokens_easy += r["tokens"]
         elif r["complexity"] == 1:
             hard_results.append(r)
             if r["correct"]:
                 hard_correct.append(r)
+                total_tokens_hard_correct += r["tokens"]
+            total_tokens_hard += r["tokens"]
 
         level = r.get("level")
         if level is None:
@@ -228,7 +235,8 @@ def compute_metrics(results: list[dict]) -> dict:
                     math_45_correct.append(r)
 
     accuracy = len(correct) / len(with_expected) if with_expected else 0
-    tpca = total_tokens / len(correct) if correct else float("inf")
+    tpca = total_tokens_correct / len(correct) if correct else float("inf")
+    average_tokens_length = total_tokens / len(results) if results else 0
 
     for v in math_by_level.values():
         v["accuracy"] = v["correct"] / v["total"] if v["total"] > 0 else 0
@@ -237,10 +245,14 @@ def compute_metrics(results: list[dict]) -> dict:
         "accuracy": accuracy,
         "num_correct": len(correct),
         "num_total": len(with_expected),
-        "tpca": tpca,
+        "tpca (tokens per correct answer)": tpca,
+        "average_tokens_length": average_tokens_length,
         "total_tokens": total_tokens,
-        "avg_tokens_easy": sum(r["tokens"] for r in easy_results) / len(easy_results) if easy_results else 0,
-        "avg_tokens_hard": sum(r["tokens"] for r in hard_results) / len(hard_results) if hard_results else 0,
+        "total_tokens_correct": total_tokens_correct,
+        "avg_tokens_easy": total_tokens_easy / len(easy_results) if easy_results else 0,
+        "avg_tokens_hard": total_tokens_hard / len(hard_results) if hard_results else 0,
+        "avg_tokens_easy_correct": total_tokens_easy_correct / len(easy_correct) if easy_correct else 0,
+        "avg_tokens_hard_correct": total_tokens_hard_correct / len(hard_correct) if hard_correct else 0,
         "num_easy": len(easy_results),
         "num_hard": len(hard_results),
         "num_easy_correct": len(easy_correct),
