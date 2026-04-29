@@ -23,9 +23,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import faiss
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 from torch import Tensor
 
+from src.config import DATA_PATH, EMBEDDING_MODEL
 from src.evaluation.answer_extraction import verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
 
@@ -52,9 +55,96 @@ REJECTION_REASONS = {'unknown': -1, 'length': 0, 'incorrect': 1}
 SOURCE_TO_INT = {"gsm8k": 0, "math": 1, "augmented_math": 2, "augmented_gsm8k": 3}
 INT_TO_SOURCE = {v: k for k, v in SOURCE_TO_INT. items ()}
 
+MATH_CONFIGS = [
+    "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
+    "number_theory", "prealgebra", "precalculus",
+]
+
+PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
+
 
 def _source_to_int(source: str) -> int:
     return SOURCE_TO_INT.get (source. lower(), -1) # -1 for unknown
+
+
+def load_math_problem_to_level(use_cache: bool = True) -> dict[str, str]:
+    """Load MATH train split and build problem text -> level mapping.
+
+    Loads from HuggingFace with fallback sources, and caches result to
+    data/problem_to_level.pkl to avoid re-downloading.
+
+    Args:
+        use_cache: If True, load from pickle cache if exists.
+
+    Returns:
+        dict mapping normalized problem text -> level string (e.g., "Level 1")
+    """
+    from datasets import load_dataset, concatenate_datasets
+
+    if use_cache and PROBLEM_TO_LEVEL_PATH.exists():
+        with open(PROBLEM_TO_LEVEL_PATH, "rb") as f:
+            import pickle
+            mapping = pickle.load(f)
+        logger.info("Loaded problem to level mapping from %s (%d problems)", PROBLEM_TO_LEVEL_PATH, len(mapping))
+        return mapping
+
+    try:
+        parts = [
+            load_dataset("EleutherAI/hendrycks_math", cfg, split="train", trust_remote_code=False)
+            for cfg in MATH_CONFIGS
+        ]
+        ds = concatenate_datasets(parts)
+    except Exception as e:
+        logger.warning("Failed to load EleutherAI/hendrycks_math: %s. Trying fallback...", e)
+        try:
+            ds = load_dataset("hendrycks/competition_math", split="train")
+        except Exception as e2:
+            logger.warning("Failed to load hendrycks/competition_math: %s. Using final fallback...", e2)
+            ds = load_dataset("lighteval/MATH", split="train")
+
+    mapping = {}
+    for item in ds:
+        problem = normalize_problem(item.get("problem", item.get("question", "")))
+        level = item.get("level", "")
+        if problem and level:
+            mapping[problem] = str(level)
+
+    # Cache the result
+    import pickle
+    PROBLEM_TO_LEVEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(PROBLEM_TO_LEVEL_PATH, "wb") as f:
+        pickle.dump(mapping, f)
+    logger.info("Built and cached level map for %d MATH problems to %s", len(mapping), PROBLEM_TO_LEVEL_PATH)
+
+    return mapping
+
+
+def load_math_problems_with_complexity(use_cache: bool = True) -> dict[str, dict]:
+    """Load MATH train problems with level and complexity classification.
+
+    Args:
+        use_cache: If True, load from pickle cache if exists.
+
+    Returns:
+        dict mapping problem text -> {"level": int, "complexity": int}
+        Complexity: 0 (Easy) for level 1, 1 (Hard) for levels 2-5
+    """
+    problem_to_level = load_math_problem_to_level(use_cache=use_cache)
+
+    math_problems = {}
+    for problem, level_str in problem_to_level.items():
+        level = _normalize_level(level_str)
+        if level is None:
+            continue
+        # Level 1 = Easy (0), Level 2-5 = Hard (1)
+        complexity, _ = classify_complexity({"problem": problem, "level": level_str, "problem_source": "math"})
+        if problem not in math_problems:
+            math_problems[problem] = {
+                "level": level,
+                "complexity": complexity,
+            }
+
+    return math_problems
 
 
 def _normalize_level(level: Any) -> int | None:
@@ -86,9 +176,6 @@ class SimilarityIndex:
             return
 
         try:
-            import faiss
-            from sentence_transformers import SentenceTransformer
-
             index_path = Path(__file__).parent.parent.parent / "data" / "math_problem_index"
             if not index_path.exists():
                 logger.warning(f"Similarity index not found at {index_path}")
@@ -106,9 +193,9 @@ class SimilarityIndex:
             if config_path.exists():
                 with open(config_path) as f:
                     config = json.load(f)
-                    model_name = config.get("embedding_model", "sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
+                    model_name = config.get("embedding_model", EMBEDDING_MODEL)
             else:
-                model_name = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+                model_name = EMBEDDING_MODEL
 
             self._model = SentenceTransformer(model_name)
 
