@@ -8,7 +8,6 @@ import argparse
 import json
 import pickle
 from collections import defaultdict
-from typing import Any
 
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
@@ -16,7 +15,7 @@ from tqdm.contrib.concurrent import process_map
 
 from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, DATASET_PATH
 from src.data.preprocessing import classify_complexity, normalize_problem
-from src.data.worker_utils import init_worker, count_tokens_batch
+from src.data.worker_utils import count_tokens_batch
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
@@ -38,8 +37,8 @@ OPENMATH_SIZES = {
 }
 PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
 
-BATCH_SIZE = 100
-NUM_WORKERS = 25
+BATCH_SIZE = 500
+NUM_WORKERS = 64
 
 
 def convert_openmath_instruct_item(item: dict, problem_to_level: dict | None = None, compute_correctness: bool = True) -> dict:
@@ -149,7 +148,6 @@ def load_openmath_instruct(split: str = "train_1M", limit: int | None = None, co
         return []
 
     logger.info("Batch tokenizing %d solutions...", len(items))
-    init_worker(problem_to_level_path=PROBLEM_TO_LEVEL_PATH) # Pre-load tokenizer and problem_to_level in the main process for batch tokenization
     solutions = [item["generated_solution"] for item in items]
     token_counts = count_tokens_batch(solutions)
     del solutions
@@ -287,11 +285,19 @@ def main():
         train_data = load_openmath_instruct(split=args.split, limit=args.limit, compute_correctness=not args.skip_correctness)
         logger.info("Loaded %s training examples", len(train_data))
 
-        DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(DATASET_PATH, "w", encoding="utf-8") as f:
+        if args.split == "train" and args.limit is None:
+            output_path = DATASET_PATH
+        else:
+            base_name = f"openmathinstruct_{args.split}"
+            if args.limit:
+                base_name += f"_limit_{args.limit}"
+            output_path = DATA_PATH / f"{base_name}.jsonl"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
             for ex in train_data:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-        logger.info("Saved to %s", DATASET_PATH)
+        logger.info("Saved to %s", output_path)
 
         if not args.no_problem_index:
             logger.info("Building problem index...")
