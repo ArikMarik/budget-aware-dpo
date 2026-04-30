@@ -9,7 +9,6 @@ from src.utils import get_logger, setup_global_exception_handler
 
 
 logger = get_logger(__name__)
-setup_global_exception_handler(__name__)
 
 
 def strip_text_commands(s: str) -> str:
