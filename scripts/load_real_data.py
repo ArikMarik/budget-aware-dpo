@@ -230,7 +230,7 @@ def build_problem_index(raw_data: list[dict]) -> list[dict]:
         primary_examples.append(primary)
         problem_groups_list.append((token_lengths, primary))
 
-    complexity_results = classify_complexity_batch(primary_examples, debug=True)
+    complexity_results = classify_complexity_batch(primary_examples)
 
     result = []
     for problem_id, (complexity, matched_level) in tqdm(complexity_results.items(), desc="Building problem index", unit=" problems"):
