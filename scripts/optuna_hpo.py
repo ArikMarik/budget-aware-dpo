@@ -73,8 +73,8 @@ GRID_SEARCH_SPACE: dict[str, list[Any]] = {
     "batch_size":                  [4, 8],
     "gradient_accumulation_steps": [1, 2],
     "loss_type":                   ["dpo"],
-    "length_ratio_easy":           [1.0, 1.5, 2.0, 3.0],
-    "length_ratio_hard":           [1.0, 1.5, 2.0],
+    "length_ratio_easy":           [1.5, 2.0, 3.0, 4.0],
+    "length_ratio_hard":           [1.5, 2.0, 2.5, 3.0],
     "max_pairs_per_problem":       [20, 50, 100],
 }
 
