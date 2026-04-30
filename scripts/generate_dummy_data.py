@@ -1,123 +1,136 @@
 #!/usr/bin/env python3
 """
-Generate 50 synthetic examples mimicking OpenMathInstruct-2 format.
-Mix of Easy (GSM8K-like) and Hard (MATH-like) problems with simulated
-teacher_token_count and correctness_flag.
+Generate synthetic examples in OpenMathInstruct-2 format.
+Uses real problems from the problem_to_index so preprocessing doesn't fail.
+Token counts are set to guarantee DPO pairs survive the length-ratio filter.
 """
 
 import json
 import os
+import pickle
+from bisect import insort
 from pathlib import Path
 
+from src.config import DATA_PATH, PROBLEM_TO_INDEX_PATH
+from src.data.preprocessing import _pct_to_token_bounds, _band_for_complexity
 from src.utils import get_logger, set_seed
 
 logger = get_logger(__name__)
 
 set_seed(42)
 
-# Data storage path - use env or fallback to local
-DATA_ROOT = os.environ.get(
-    "DATA_PATH",
-    Path(__file__).resolve().parent.parent / "data"
-)
+DATA_ROOT = os.environ.get("DATA_PATH", DATA_PATH)
 DUMMY_PATH = Path(str(DATA_ROOT)) / "dummy_openmathinstruct.jsonl"
+
+NUM_EASY = 8
+NUM_HARD = 8
+LENGTH_RATIO = 2.0  # must match --length-ratio default in preprocess_dpo_data.py
+
+
+def _get_preferred_bounds(v: dict) -> tuple[int, int]:
+    complexity = v["complexity"]
+    token_lengths = sorted(int(t) for t in v["token_lengths"])
+    pct_low, pct_high = _band_for_complexity(complexity)
+    return _pct_to_token_bounds(token_lengths, pct_low, pct_high)
 
 
 def generate_dummy_data() -> list[dict]:
-    """Generate 50 synthetic examples in OpenMathInstruct-2 format."""
+    """Generate synthetic examples using real problems from the problem index."""
+    problem_to_index = pickle.load(open(PROBLEM_TO_INDEX_PATH, "rb"))
+
+    easy_entries = [(k, v) for k, v in problem_to_index.items() if v["complexity"] == 0][:NUM_EASY]
+    hard_entries = [(k, v) for k, v in problem_to_index.items() if v["complexity"] == 1][:NUM_HARD]
+
     examples = []
 
-    # --- Easy (GSM8K-like) arithmetic - 25 examples ---
-    easy_problems = [
-        ("Janet has 3 apples. She buys 5 more. How many apples does she have?", "8", 15),
-        ("A store has 12 shirts. They sell 4. How many remain?", "8", 12),
-        ("Tom has 7 marbles. His friend gives him 6. Total marbles?", "13", 18),
-        ("There are 9 birds. 3 fly away. How many stay?", "6", 14),
-        ("Lisa bakes 4 cookies. She bakes 4 more. Total cookies?", "8", 16),
-        ("A box has 15 pencils. 7 are used. How many left?", "8", 17),
-        ("Mike has 20 candies. He eats 8. Remaining?", "12", 19),
-        ("There are 6 dogs. 4 more arrive. How many dogs?", "10", 15),
-        ("Sarah has 14 books. She gives 5 away. How many?", "9", 18),
-        ("A garden has 11 flowers. 2 wilt. How many bloom?", "9", 16),
-        ("Jake collects 8 stamps. He gets 9 more. Total?", "17", 20),
-        ("A class has 18 students. 6 are absent. Present?", "12", 19),
-        ("Emma has 5 dolls. She buys 7 more. Total dolls?", "12", 17),
-        ("There are 16 balls. 9 are red. How many others?", "7", 18),
-        ("Ben has 10 toys. He loses 3. Remaining?", "7", 15),
-        ("A farm has 13 chickens. 5 are sold. Left?", "8", 16),
-        ("Anna picks 6 oranges. She picks 8 more. Total?", "14", 19),
-        ("There are 22 students. 9 leave. How many stay?", "13", 20),
-        ("Carl has 11 coins. He finds 4 more. Total?", "15", 18),
-        ("A basket has 19 eggs. 7 break. Good eggs?", "12", 19),
-        ("Sue has 8 stickers. She gets 6 more. Total?", "14", 17),
-        ("There are 24 trees. 10 are oak. Others?", "14", 20),
-        ("Dan has 17 cards. He trades 8. Remaining?", "9", 18),
-        ("A zoo has 21 monkeys. 6 move. How many stay?", "15", 20),
-        ("Kate has 9 beads. She buys 11 more. Total?", "20", 21),
-    ]
+    for _, v in easy_entries:
+        problem = v["problem"]
+        answer = v["expected_answer"]
+        source = v["problem_source"]
+        low, high = _get_preferred_bounds(v)
 
-    for i, (problem, answer, short_tokens) in enumerate(easy_problems):
-        # Correct short answer (Preferred for Easy)
+        preferred_tokens = (low + high) // 2
+        rejected_tokens = int(preferred_tokens * LENGTH_RATIO * 1.5)  # safely above ratio
+
+        # Correct preferred (short) solution — falls in preferred band
         examples.append({
             "problem": problem,
             "generated_solution": f"The answer is {answer}.",
             "expected_answer": answer,
-            "problem_source": "gsm8k",
-            "teacher_token_count": short_tokens,
+            "problem_source": source,
+            "teacher_token_count": preferred_tokens,
             "correctness_flag": True,
         })
-        # Correct verbose answer (Rejected for Easy) - alternate
-        if i % 2 == 0:
-            verbose = f"Let me think step by step. First, we need to understand the problem. {problem} So we carefully add the numbers. The result is {answer}. Therefore the final answer is {answer}."
-            examples.append({
-                "problem": problem,
-                "generated_solution": verbose,
-                "expected_answer": answer,
-                "problem_source": "gsm8k",
-                "teacher_token_count": 85,
-                "correctness_flag": True,
-            })
-
-    # --- Hard (MATH-like) proofs - 25 examples ---
-    hard_problems = [
-        ("Prove that the sum of the first n positive integers is n(n+1)/2.", "By induction: base n=1 gives 1. Assume true for n=k. For n=k+1, sum = k(k+1)/2 + (k+1) = (k+1)(k+2)/2. QED.", 120),
-        ("Find the derivative of x^3 * ln(x).", "Using product rule: 3x^2*ln(x) + x^3*(1/x) = 3x^2*ln(x) + x^2.", 95),
-        ("Solve the differential equation dy/dx = 2y with y(0)=1.", "Separating variables: dy/y=2dx. Integrating: ln|y|=2x+C. y(0)=1 gives C=0. So y=e^(2x).", 110),
-        ("Prove sqrt(2) is irrational.", "Assume sqrt(2)=p/q in lowest terms. Then 2q^2=p^2, so p^2 even, hence p even. Write p=2m. Then 2q^2=4m^2, so q^2 even, q even. Contradiction.", 150),
-        ("Evaluate the integral of x*e^x dx.", "Integration by parts: u=x, dv=e^x dx. Result: x*e^x - e^x + C.", 88),
-    ]
-
-    for problem, solution, tokens in hard_problems:
+        # Correct verbose solution (rejected by length) — above band, ratio >= 2
         examples.append({
             "problem": problem,
-            "generated_solution": solution,
-            "expected_answer": solution.split()[-1].rstrip(".") if solution else "",
-            "problem_source": "math",
-            "teacher_token_count": tokens,
+            "generated_solution": (
+                f"Let me think through this carefully step by step. "
+                f"We need to analyze all the information given in the problem. "
+                f"After working through each part systematically and checking our work, "
+                f"we can confidently say that the final answer is {answer}."
+            ),
+            "expected_answer": answer,
+            "problem_source": source,
+            "teacher_token_count": rejected_tokens,
             "correctness_flag": True,
         })
-        # Incorrect answer (Rejected)
+        # Incorrect solution (rejected by correctness) — token count also satisfies ratio
         examples.append({
             "problem": problem,
-            "generated_solution": "The answer is 42.",
-            "expected_answer": "N/A",
-            "problem_source": "math",
-            "teacher_token_count": 5,
+            "generated_solution": "I'm not sure. The answer might be 42.",
+            "expected_answer": answer,
+            "problem_source": source,
+            "teacher_token_count": rejected_tokens,
             "correctness_flag": False,
         })
 
-    # Pad to 50 if needed
-    while len(examples) < 50:
+    for _, v in hard_entries:
+        problem = v["problem"]
+        answer = v["expected_answer"]
+        source = v["problem_source"]
+        low, high = _get_preferred_bounds(v)
+
+        preferred_tokens = (low + high) // 2
+        rejected_tokens = int(preferred_tokens * LENGTH_RATIO * 1.5)
+
+        # Correct preferred solution — falls in preferred band
         examples.append({
-            "problem": "What is 2 + 2?",
-            "generated_solution": "4",
-            "expected_answer": "4",
-            "problem_source": "gsm8k",
-            "teacher_token_count": 3,
+            "problem": problem,
+            "generated_solution": (
+                f"Applying the relevant theorems systematically, "
+                f"we find that the answer is {answer}."
+            ),
+            "expected_answer": answer,
+            "problem_source": source,
+            "teacher_token_count": preferred_tokens,
             "correctness_flag": True,
         })
+        # Correct verbose solution (rejected by length) — above band, ratio >= 2
+        examples.append({
+            "problem": problem,
+            "generated_solution": (
+                f"Let me work through this problem very carefully and in great detail. "
+                f"First I identify all the given information. Then I apply the relevant "
+                f"mathematical principles one by one. After checking each step thoroughly "
+                f"and verifying there are no errors, I conclude the answer is {answer}."
+            ),
+            "expected_answer": answer,
+            "problem_source": source,
+            "teacher_token_count": rejected_tokens,
+            "correctness_flag": True,
+        })
+        # Incorrect solution
+        examples.append({
+            "problem": problem,
+            "generated_solution": "The answer is 0.",
+            "expected_answer": answer,
+            "problem_source": source,
+            "teacher_token_count": rejected_tokens,
+            "correctness_flag": False,
+        })
 
-    return examples[:50]
+    return examples
 
 
 def main():
