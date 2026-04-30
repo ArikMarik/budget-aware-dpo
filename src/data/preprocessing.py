@@ -553,10 +553,12 @@ def build_dpo_pairs(
 
         if preferred and rejected:
             problem_pairs = []
+            skipped_ratio = 0
             for pw in preferred:
                 for rj in rejected:
                     # Skip pairs where the length ratio condition is not satisfied
                     if compute_pair_length_ratio(pw["teacher_token_count"], rj["teacher_token_count"]) < length_ratio:
+                        skipped_ratio += 1
                         continue
 
                     problem_pairs.append({
@@ -576,7 +578,7 @@ def build_dpo_pairs(
 
             pairs.extend(problem_pairs)
 
-    logger.info(f'Created a total of {len(pairs):,} pairs')
+    logger.info(f'Created a total of {len(pairs):,} pairs (skipped by length ratio: {skipped_ratio:,})')
 
     return pairs
 
