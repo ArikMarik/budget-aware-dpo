@@ -18,7 +18,6 @@ See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessin
 import json
 import os
 import pickle
-import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -421,7 +420,7 @@ def load_problem_to_index(path: Path) -> dict[str, dict]:
 
 
 def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int) -> list[dict]:
-    """Stratified sampling by rejection_reason to limit pairs per problem."""
+    """Stratified sampling by rejection_reason with weighted selection based on length_ratio."""
     by_reason: dict[int, list[dict]] = defaultdict(list)
     for p in pairs:
         by_reason[p["rejection_reason"]].append(p)
@@ -434,7 +433,27 @@ def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem
     for reason, group in by_reason.items():
         quota = max(1, round(len(group) / total * max_per_problem))
         quota = min(quota, len(group), remaining)
-        selected.extend(random.sample(group, quota))
+        if quota <= 0:
+            continue
+
+        # Compute weights based on log(length_ratio), set to 0 if log(ratio) < 0
+        weights = []
+        for p in group:
+            ratio = compute_pair_length_ratio(p["chosen_length"], p["rejected_length"])
+            # avoid log(0) and set to 0 if negative
+            weights.append(max(np.log(max(ratio, 1e-6)), 0.0))
+
+        sum_weights = sum(weights)
+        if sum_weights > 0:
+            # Normalize to probabilities
+            probabilities = np.array(weights) / sum_weights
+            # Weighted sampling without replacement
+            indices = np.random.choice(len(group), size=quota, replace=False, p=probabilities)
+        else:
+            # Fallback to uniform sampling if all weights are zero
+            indices = np.random.choice(len(group), size=quota, replace=False)
+
+        selected.extend(group[i] for i in indices)
         remaining -= quota
         if remaining <= 0:
             break
