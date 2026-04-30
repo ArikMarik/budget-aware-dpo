@@ -14,9 +14,9 @@ from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
 
-from src.config import DATA_PATH, GSM8K_TEST_PATH, MATH_TEST_PATH, DATASET_PATH
-from src.data.preprocessing import classify_complexity, load_math_problem_to_level, normalize_problem
-from src.data.worker_utils import count_tokens_batch
+from src.config import DATA_PATH, GSM8K_TEST_PATH, INDEX_TO_PROBLEM_PATH, MATH_TEST_PATH, DATASET_PATH, PROBLEM_TO_INDEX_PATH, PROBLEM_TO_LEVEL_PATH
+from src.data.preprocessing import load_jsonl, load_math_problem_to_level, normalize_problem
+from src.data.worker_utils import count_tokens_batch, classify_complexity_batch
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
@@ -31,7 +31,6 @@ OPENMATH_SIZES = {
     "train_5M": 5_000_000,
     "train": 13_972_791,
 }
-PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
 
 BATCH_SIZE = 500
 NUM_WORKERS = 8
@@ -205,30 +204,47 @@ def build_problem_index(raw_data: list[dict]) -> list[dict]:
     - Collect all solution token lengths from all sources
     - Compute average token length
     - Select data by source preference (math > augmented_math > gsm8k > augmented_gsm8k)
-    - Classify complexity using the average token length
+    - Classify complexity using batched classification for efficiency
     - Copy level from similar MATH problem if available
     """
     groups: dict[str, list[dict]] = defaultdict(list)
-    for ex in raw_data:
+    for ex in tqdm(raw_data, desc="Grouping by normalized problem", unit=" examples"):
         norm_problem = normalize_problem(ex.get("problem", ""))
         if norm_problem:
             groups[norm_problem].append(ex)
 
-    result = []
-    for problem_id, examples in enumerate(tqdm(groups.values(), desc="Building problem index", unit=" problems")):
+    primary_examples = []
+    problem_groups_list = []
+
+    for examples in tqdm(groups.values(), desc="Initial Processing of problem groups", unit=" groups"):
         token_lengths = [ex.get("teacher_token_count", 0) for ex in examples]
         avg_tokens = sum(token_lengths) / len(token_lengths) if token_lengths else 0
 
-        examples_sorted = sorted(examples, key=lambda ex: (get_source_rank(ex.get("problem_source", "")), ex.get('level', '').lower() if ex.get('level', '') else 'level unknown'))
-        primary = examples_sorted[0]
+        examples_sorted = sorted(
+            examples,
+            key=lambda ex: (get_source_rank(ex.get("problem_source", "")),
+                            ex.get("level").lower() if ex.get("level") else "level unknown")
+        )
+        primary = examples_sorted[0].copy()
+        primary["_avg_token_length"] = avg_tokens
+        primary_examples.append(primary)
+        problem_groups_list.append((token_lengths, primary))
 
-        complexity, matched_level = classify_complexity(primary, avg_token_length=avg_tokens)
+    complexity_results = classify_complexity_batch(primary_examples, debug=True)
 
-        level = primary["level"] if primary.get("level", "") else matched_level
+    result = []
+    for problem_id, (complexity, matched_level) in tqdm(complexity_results.items(), desc="Building problem index", unit=" problems"):
+        token_lengths, primary = problem_groups_list[problem_id]
+
+        problem = primary.get("problem", "")
+        avg_tokens = primary.get("_avg_token_length", 0)
+
+        level = primary.get("level") if primary.get("level") else matched_level
 
         result.append({
             "problem_id": problem_id,
-            "problem": primary.get("problem", ""),
+            "problem": problem,
+            "normalized_problem": normalize_problem(problem),
             "problem_source": primary.get("problem_source", ""),
             "level": level,
             "token_lengths": token_lengths,
@@ -242,6 +258,7 @@ def build_problem_index(raw_data: list[dict]) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true", help="Force regeneration even if files exist")
     parser.add_argument("--split", default="train", help="OpenMathInstruct split: train_1M, train_2M, train_5M, train")
     parser.add_argument("--limit", type=int, default=None, help="Limit training examples (for quick test)")
     parser.add_argument("--output", type=str, default=DATASET_PATH, help="Output path for training data JSONL (default: DATASET_PATH)")
@@ -254,10 +271,6 @@ def main():
     DATA_PATH.mkdir(parents=True, exist_ok=True)
 
     if not args.test_sets_only:
-        logger.info("Loading OpenMathInstruct-2...")
-        train_data = load_openmath_instruct(split=args.split, limit=args.limit, compute_correctness=not args.skip_correctness)
-        logger.info("Loaded %s training examples", len(train_data))
-
         if args.output != DATASET_PATH:
             output_path = Path(args.output)
         elif args.split == "train" and args.limit is None:
@@ -268,30 +281,40 @@ def main():
                 base_name += f"_limit_{args.limit}"
             output_path = DATA_PATH / f"{base_name}.jsonl"
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            for ex in train_data:
-                f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-        logger.info("Saved to %s", output_path)
+        train_data = None
+        if not output_path.exists() or args.force:
+            logger.info("Loading OpenMathInstruct-2...")
+            train_data = load_openmath_instruct(split=args.split, limit=args.limit, compute_correctness=not args.skip_correctness)
+            logger.info("Loaded %s training examples", len(train_data))
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                for ex in train_data:
+                    f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+            logger.info("Saved to %s", output_path)
 
         if not args.no_problem_index:
-            logger.info("Building problem index...")
-            problem_index = build_problem_index(train_data)
-            logger.info("Built index for %s unique problems", len(problem_index))
+            if not (PROBLEM_TO_INDEX_PATH.exists() and INDEX_TO_PROBLEM_PATH.exists()) or args.force:
+                logger.info("Building problem index...")
+                train_data = train_data if train_data is not None else load_jsonl(output_path)
 
-            DATA_PATH.mkdir(parents=True, exist_ok=True)
+                problem_index = build_problem_index(train_data)
+                logger.info("Built index for %s unique problems", len(problem_index))
 
-            problem_index_dict = {item["problem_id"]: item for item in problem_index}
-            problem_index_dict_path = DATA_PATH / "problem_index_dict.pkl"
-            with open(problem_index_dict_path, "wb") as f:
-                pickle.dump(problem_index_dict, f)
-            logger.info("Saved problem index (Dict) to %s", problem_index_dict_path)
+                problem_to_index_dict, index_to_problem_dict = {}, {}
+                for item in problem_index:
+                    # keep the original problem structure (not normalized) in the index, but key by normalized problem for lookup
+                    normalized_problem = item.pop("normalized_problem")
+                    problem_to_index_dict[normalized_problem] = item
+                    index_to_problem_dict[item["problem_id"]] = item
 
-            reverse_index = {item["problem"]: item for item in problem_index}
-            reverse_index_path = DATA_PATH / "problem_index_reverse.pkl"
-            with open(reverse_index_path, "wb") as f:
-                pickle.dump(reverse_index, f)
-            logger.info("Saved reverse index to %s", reverse_index_path)
+                with open(PROBLEM_TO_INDEX_PATH, "wb") as f:
+                    pickle.dump(problem_to_index_dict, f)
+                logger.info("Saved problem index (Dict) to %s", PROBLEM_TO_INDEX_PATH)
+
+                with open(INDEX_TO_PROBLEM_PATH, "wb") as f:
+                    pickle.dump(index_to_problem_dict, f)
+                logger.info("Saved reverse index to %s", INDEX_TO_PROBLEM_PATH)
 
     if args.test_sets_only or not args.skip_test_sets:
         logger.info("Loading GSM8K test...")

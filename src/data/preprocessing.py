@@ -24,11 +24,13 @@ from pathlib import Path
 from typing import Any
 
 import faiss
+import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 from torch import Tensor
 
-from src.config import DATA_PATH, EMBEDDING_MODEL
+from src.config import EMBEDDING_MODEL, PROBLEM_TO_LEVEL_PATH, SIMILARITY_INDEX_DIR
 from src.evaluation.answer_extraction import verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
 
@@ -59,8 +61,6 @@ MATH_CONFIGS = [
     "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
     "number_theory", "prealgebra", "precalculus",
 ]
-
-PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
 
 
 def _source_to_int(source: str) -> int:
@@ -168,6 +168,8 @@ class SimilarityIndex:
         self._index: Any = None
         self._metadata: list[dict] | None = None
         self._model: Any = None
+        self._model_name: str = EMBEDDING_MODEL
+        self._device: str = "cpu"
         self._loaded = False
 
     def ensure_loaded(self) -> None:
@@ -176,36 +178,37 @@ class SimilarityIndex:
             return
 
         try:
-            index_path = Path(__file__).parent.parent.parent / "data" / "math_problem_index"
-            if not index_path.exists():
-                logger.warning(f"Similarity index not found at {index_path}")
+            if not SIMILARITY_INDEX_DIR.exists():
+                logger.warning(f"Similarity index not found at {SIMILARITY_INDEX_DIR}")
                 self._loaded = True
                 return
 
-            self._index = faiss.read_index(str(index_path / "index.faiss"))
+            self._index = faiss.read_index(str(SIMILARITY_INDEX_DIR / "index.faiss"))
 
             self._metadata = []
-            with open(index_path / "metadata.jsonl", "r") as f:
+            with open(SIMILARITY_INDEX_DIR / "metadata.jsonl", "r") as f:
                 for line in f:
                     self._metadata.append(json.loads(line))
 
-            config_path = index_path / "config.json"
+            config_path = SIMILARITY_INDEX_DIR / "config.json"
             if config_path.exists():
                 with open(config_path) as f:
                     config = json.load(f)
-                    model_name = config.get("embedding_model", EMBEDDING_MODEL)
+                    self._model_name = config.get("embedding_model", EMBEDDING_MODEL)
             else:
-                model_name = EMBEDDING_MODEL
+                self._model_name = EMBEDDING_MODEL
 
-            self._model = SentenceTransformer(model_name)
+            # Auto-detect GPU for SentenceTransformer (FAISS stays on CPU)
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._model = SentenceTransformer(self._model_name, device=self._device)
 
-            logger.info(f"Loaded similarity index with {self._index.ntotal} problems")
+            logger.info(f"Loaded similarity index with {self._index.ntotal} problems (model on {self._device})")
         except Exception as e:
             logger.warning(f"Failed to load similarity index: {e}")
 
         self._loaded = True
 
-    def find_similar(self, problem: str, threshold: float = 0.7) -> tuple[int | None, int | None]:
+    def find_similar(self, problem: str, threshold: float = 0.6) -> tuple[int | None, int | None]:
         """Find similar original MATH problem. Returns (complexity, level)."""
         self.ensure_loaded()
 
@@ -213,8 +216,6 @@ class SimilarityIndex:
             return None, None
 
         try:
-            import faiss
-
             query = self._model.encode([problem], convert_to_numpy=True)
             faiss.normalize_L2(query)
 
@@ -229,6 +230,59 @@ class SimilarityIndex:
             logger.warning(f"Similarity search failed: {e}")
 
         return None, None
+
+    def find_similar_batch(
+        self,
+        problems: list[str],
+        threshold: float = 0.6,
+        batch_size: int = 256,
+    ) -> list[tuple[int | None, int | None]]:
+        """Batch find similar MATH problems.
+
+        Args:
+            problems: List of problem texts to search for.
+            threshold: Minimum similarity score (default 0.6).
+            batch_size: Batch size for encoding (default 128).
+
+        Returns:
+            List of (complexity, level) tuples, one per problem.
+            complexity is None and level is None when no match found.
+        """
+        self.ensure_loaded()
+
+        if self._index is None or self._metadata is None or self._model is None:
+            return [(None, None)] * len(problems)
+
+        embeddings = []
+        embeddings = self._model.encode(problems, batch_size=batch_size, convert_to_numpy=True, show_progress_bar=True)
+
+        faiss.normalize_L2(embeddings)
+
+        # Process in batches for progress bar
+        scores_list, indices_list = [], []
+        num_batches = (len(embeddings) + batch_size - 1) // batch_size
+        for i in tqdm(range(num_batches), desc="Searching index", unit=" batch"):
+            start_idx = i * batch_size
+            end_idx = min(start_idx + batch_size, len(embeddings))
+            batch = embeddings[start_idx:end_idx]
+            scores_batch, indices_batch = self._index.search(batch, k=1)
+            scores_list.append(scores_batch)
+            indices_list.append(indices_batch)
+
+        scores = np.vstack(scores_list)
+        indices = np.vstack(indices_list)
+
+        results = []
+        for i in range(len(problems)):
+            if scores[i][0] >= threshold:
+                meta_idx = indices[i][0]
+                if meta_idx >= 0 and meta_idx < len(self._metadata):
+                    meta = self._metadata[meta_idx]
+                    results.append((meta.get("complexity"), _normalize_level(meta.get("level"))))
+                    continue
+            results.append((None, None))
+
+        return results
 
 
 _similarity_index = SimilarityIndex()
@@ -360,12 +414,10 @@ def label_preference(
     return "rejected", REJECTION_REASONS["length"]
 
 
-def load_problem_index(path: Path) -> dict[str, dict]:
-    """Load problem index from pickle and build problem_text -> problem data mapping."""
+def load_problem_to_index(path: Path) -> dict[str, dict]:
+    """Load problem to index from pickle."""
     with open(path, "rb") as f:
-        index = pickle.load(f)
-    index_items = index.values() if isinstance(index, dict) else index
-    return {normalize_problem(item["problem"]): item for item in index_items}
+        return pickle.load(f)
 
 
 def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int) -> list[dict]:
@@ -427,7 +479,7 @@ def compute_pair_length_ratio(preferred_length: Tensor | int, rejected_length: T
 
 def build_dpo_pairs(
     raw_data: list[dict],
-    problem_index_path: Path,
+    problem_to_index_path: Path,
     max_per_problem: int | None = None,
     length_ratio: float | int = 1,
 ) -> list[dict]:
@@ -440,30 +492,28 @@ def build_dpo_pairs(
 
     Args:
         raw_data: List of examples with problem, generated_solution, etc.
-        problem_index_path: Path to problem_index.json. If provided, uses existing IDs and complexity.
+        problem_to_index_path: Path to problem_to_index.pkl. If provided, uses existing IDs and complexity.
         max_per_problem: If set (and not -1), limit number of pairs per problem using stratified sampling by rejection_reason.
     """
-    problem_index = load_problem_index(problem_index_path)
-    logger.info(f"Loaded problem index with {len(problem_index)} problems")
+    problem_to_index_dict = load_problem_to_index(problem_to_index_path)
+    logger.info(f"Loaded problem to index with {len(problem_to_index_dict)} problems")
 
     # Pass 1: group raw examples by problem (no labeling yet — we need the whole
     # group to compute per-problem percentile ranks).
     raw_groups: dict[str, list[dict]] = defaultdict(list)
-    problem_meta: dict[str, dict] = {}
     for ex in tqdm(raw_data, desc="Grouping by problem", unit=" examples"):
-        problem = normalize_problem(ex["problem"])
-        problem_data = problem_index.get(problem)
-        if problem_data is None:
-            raise ValueError(f"Problem not found in problem index:\n{problem}")
-        raw_groups[problem].append(ex)
-        problem_meta[problem] = problem_data
+        normalized_problem = normalize_problem(ex["problem"])
+        raw_groups[normalized_problem].append(ex)
 
     # Pass 2: label each solution using precomputed token bounds per problem.
     # Instead of calculating percentile rank per example (O(log N) per example),
     # compute bounds once per problem (O(1)) then simple comparison.
     groups: dict[str, list[dict]] = defaultdict(list)
-    for problem, items in tqdm(raw_groups.items(), desc="Labeling by per-problem percentile", unit=" problems"):
-        problem_data = problem_meta[problem]
+    for normalized_problem, items in tqdm(raw_groups.items(), desc="Labeling by per-problem percentile", unit=" problems"):
+        problem_data = problem_to_index_dict.get(normalized_problem)
+        if problem_data is None:
+            raise ValueError(f"Problem not found in problem to index:\n{normalized_problem}")
+
         problem_id = problem_data["problem_id"]
         level = problem_data["level"]
         complexity = problem_data["complexity"]
@@ -480,7 +530,7 @@ def build_dpo_pairs(
         for ex in items:
             label, rejection_reason = label_preference(ex, low_tokens, high_tokens)
 
-            groups[problem].append({
+            groups[normalized_problem].append({
                 "problem_id": problem_id,
                 **ex,
                 "level": level,
@@ -491,12 +541,13 @@ def build_dpo_pairs(
 
     pairs: list[dict] = []
 
-    for problem, items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
+    for normalized_problem, items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
         preferred, rejected = [], []
         for x in items:
             (preferred if x["label"] == "preferred" else rejected).append(x)
 
         problem_id = items[0]["problem_id"]
+        problem = items[0]["problem"]
         complexity = items[0]["complexity"]
         problem_source = items[0]["problem_source"]
 
