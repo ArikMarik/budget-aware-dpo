@@ -16,12 +16,17 @@ DATA_PATH = Path(
     )
 )
 
+PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
+
 DUMMY_DATASET_PATH = DATA_PATH / "dummy_openmathinstruct.jsonl"
 DUMMY_PROCESSED_DATASET_PATH = DATA_PATH / "dummy_processed_dpo_dataset"
 
 # Real data (Phase 7+)
 DATASET_PATH = DATA_PATH / "openmathinstruct.jsonl"
 DATASET_PATH_LIMITED = DATA_PATH / "openmathinstruct.jsonl.limited"
+
+PROBLEM_TO_INDEX_PATH = DATA_PATH / "problem_to_index.pkl"
+INDEX_TO_PROBLEM_PATH = DATA_PATH / "index_to_problem.pkl"
 
 PROCESSED_DATASET_PATH = DATA_PATH / "processed_dpo_dataset"
 PROCESSED_DATASET_PATH_LIMITED = DATA_PATH / "processed_dpo_dataset_limited"
@@ -31,6 +36,7 @@ GSM8K_TEST_PATH = DATA_PATH / "gsm8k_test.jsonl"
 MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
 
 # Similarity Search - Embedding
+SIMILARITY_INDEX_DIR = DATA_PATH / "math_problem_index"
 EMBEDDING_MODEL = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
 
 

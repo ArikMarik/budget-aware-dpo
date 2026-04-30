@@ -23,7 +23,7 @@ import wandb
 
 from src.config import (
     CHECKPOINT_DIR,
-    DATA_PATH,
+    INDEX_TO_PROBLEM_PATH,
     MODEL_NAME,
     get_tokens_path,
     get_processed_dataset_path,
@@ -81,7 +81,7 @@ class TrainingConfig:
 class StaticTrainingContext:
     raw_data: dict
     tokenizer: PreTrainedTokenizer
-    problem_index: dict
+    index_to_problem: dict
     ref_model: nn.Module
 
 
@@ -524,21 +524,21 @@ def build_static_context(
     tokens_path: Path,
     model_name: str,
     device: str,
-    problem_index_path: Path,
+    index_to_problem_path: Path,
 ) -> StaticTrainingContext:
     """Load all trial-invariant state once. Pass the result to every train_dpo call."""
     raw_data = torch.load(tokens_path)
     tokenizer = create_tokenizer(model_name)
-    if problem_index_path.exists():
-        with open(problem_index_path, "rb") as f:
-            problem_index = pickle.load(f)
+    if index_to_problem_path.exists():
+        with open(index_to_problem_path, "rb") as f:
+            index_to_problem = pickle.load(f)
     else:
-        problem_index = {}
+        index_to_problem = {}
     ref_model = create_ref_model(model_name, device)
     return StaticTrainingContext(
         raw_data=raw_data,
         tokenizer=tokenizer,
-        problem_index=problem_index,
+        index_to_problem=index_to_problem,
         ref_model=ref_model,
     )
 
@@ -693,7 +693,7 @@ def compute_batch_loss_eval(
 
 def build_val_problems(
     val_loader: DataLoader,
-    problem_index: dict,
+    index_to_problem: dict,
     max_val_problems: int = 1000,
 ) -> list[dict]:
     """Build list of unique validation problems with pre-tokenized prompts."""
@@ -705,7 +705,7 @@ def build_val_problems(
         for pid in problem_ids:
             if pid not in seen_problem_ids:
                 seen_problem_ids.add(pid)
-                info = problem_index[pid]
+                info = index_to_problem[pid]
                 problem_text = info["problem"]
                 val_problems.append({
                     "problem_id": pid,
@@ -952,7 +952,7 @@ def train_dpo(
     best_model_metric: BestModelMetric = "val_loss",
     accuracy_floor: Optional[float] = None,
     max_unique_problems: int = 65_000,
-    problem_index_path: Path = DATA_PATH / "problem_index_dict.pkl",
+    index_to_problem_path: Path = INDEX_TO_PROBLEM_PATH,
     ctx: Optional[StaticTrainingContext] = None,
 ) -> dict:
     logger.debug(f'{" STARTED DPO TRAINER ":#^100}')
@@ -961,10 +961,10 @@ def train_dpo(
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if ctx is None:
-        ctx = build_static_context(get_tokens_path(), effective_model_name, device, problem_index_path)
+        ctx = build_static_context(get_tokens_path(), effective_model_name, device, index_to_problem_path)
 
     tokenizer = ctx.tokenizer
-    problem_index = ctx.problem_index
+    index_to_problem = ctx.index_to_problem
     ref_model = ctx.ref_model
 
     # Load, filter, and split in one call
@@ -990,10 +990,10 @@ def train_dpo(
     )
 
     logger.debug(f'{" START BUILD VALIDATION PROBLEMS ":#^100}')
-    if problem_index:
-        val_problems = build_val_problems(val_loader, problem_index)
+    if index_to_problem:
+        val_problems = build_val_problems(val_loader, index_to_problem)
     else:
-        logger.warning(f"Problem index not found at {problem_index_path}, skipping val_problems")
+        logger.warning(f"Problem index not found at {index_to_problem_path}, skipping val_problems")
         val_problems = []
     logger.debug(f'{" END BUILD VALIDATION PROBLEMS ":#^100}')
 

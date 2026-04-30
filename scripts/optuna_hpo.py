@@ -45,7 +45,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import CHECKPOINT_DIR, DATA_PATH, MODEL_NAME  # noqa: E402
+from src.config import CHECKPOINT_DIR, INDEX_TO_PROBLEM_PATH, MODEL_NAME  # noqa: E402
 from src.training.dpo_trainer import (  # noqa: E402
     train_dpo,
     build_static_context,
@@ -420,7 +420,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         get_tokens_path(),
         effective_model,
         device,
-        DATA_PATH / "problem_index_dict.pkl",
+        INDEX_TO_PROBLEM_PATH,
     )
 
     objective_fn = _build_objective_fn(search, use_grid=(args.sampler == "grid"), ctx=ctx)

@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 from src.config import (
     DUMMY_DATASET_PATH,
     DUMMY_PROCESSED_DATASET_PATH,
+    PROBLEM_TO_INDEX_PATH,
     PROCESSED_DATASET_PATH,
     DATASET_PATH,
     USE_DUMMY_DATA,
@@ -148,7 +149,7 @@ def tokenize_and_save(
 def main():
     parser = argparse.ArgumentParser(description="Preprocess DPO data - tokenize all pairs")
     parser.add_argument("--force", action="store_true", help="Force regeneration even if files exist")
-    parser.add_argument("--problem-index", type=str, default='data/problem_index_dict.pkl', help="Path to problem_index.pkl")
+    parser.add_argument("--problem-index", type=str, default=PROBLEM_TO_INDEX_PATH, help="Path to problem_to_index.pkl")
     parser.add_argument("--max-pairs-per-problem", type=int, default=100, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
     parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 1.5 (1.0 = no filter)")
     args = parser.parse_args()
@@ -182,10 +183,10 @@ def main():
     logger.info("      Loaded %s examples", f"{len(raw_data):,}")
 
     logger.info("[2/4] Building DPO pairs (classify, label, group)...")
-    problem_index_path = Path(args.problem_index)
-    assert problem_index_path.exists(), f'You must first run the load_real_data.py script, to generate the {problem_index_path.name} file'
-    pairs = build_dpo_pairs(raw_data, problem_index_path=problem_index_path, max_per_problem=args.max_pairs_per_problem, length_ratio=args.length_ratio)
-    logger.info("      Using problem index: %s", problem_index_path)
+    problem_to_index_path = Path(args.problem_index)
+    assert problem_to_index_path.exists(), f'You must first run the load_real_data.py script, to generate the {problem_to_index_path.name} file'
+    pairs = build_dpo_pairs(raw_data, problem_to_index_path=problem_to_index_path, max_per_problem=args.max_pairs_per_problem, length_ratio=args.length_ratio)
+    logger.info("      Using problem index: %s", problem_to_index_path)
     logger.info("      Built %s total pairs", f"{len(pairs):,}")
 
     num_unique_problems = len(set(p.get("problem_id", 0) for p in pairs))
