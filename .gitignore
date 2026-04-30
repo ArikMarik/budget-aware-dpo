@@ -19,7 +19,7 @@ data/processed_dpo_dataset/*.jsonl
 *.pt
 wandb/
 logs/
-data/
+/data/
 .agents/
 .claude/
 .vscode/

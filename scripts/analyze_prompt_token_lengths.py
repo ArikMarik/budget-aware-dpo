@@ -4,10 +4,14 @@ Analyze prompt and solution token lengths from PROBLEM_TO_INDEX_PATH.
 Samples problems and plots histograms of token counts per complexity (0=easy, 1=hard).
 
 Usage:
-    python scripts/analyze_prompt_token_lengths.py [--sample-size 30000] [--output reports/figures/prompt_token_lengths.png]
+    python scripts/analyze_prompt_token_lengths.py [--sample-size 30000] [--output reports/figures/token_lengths.png]
+                   [--token-limit 1500] [--stats-csv reports/data/token_length_stats.csv]
+                   [--over-limit-json reports/data/problems_over_token_limit.json]
 """
 
 import argparse
+import csv
+import json
 import pickle
 import random
 from pathlib import Path
@@ -52,18 +56,28 @@ def load_problems(sample_size: int = 30_000) -> tuple[list[dict], int]:
     return sampled, total
 
 
-def compute_prompt_token_lengths(problems: list[dict], tokenizer) -> list[tuple[int, int]]:
-    """Build prompts, tokenize, return list of (complexity, token_count)."""
+def compute_prompt_token_lengths(problems: list[dict], tokenizer, token_limit: int = 1500) -> tuple[list[tuple[int, int]], list[dict]]:
+    """Build prompts, tokenize, return (valid_data, over_limit_problems)."""
     prompts = [build_zero_shot_prompt(p["problem"]) for p in problems]
 
     logger.info("Tokenizing %s prompts...", f"{len(prompts):,}")
     token_counts = count_tokens_batch(prompts, tokenizer)
 
-    results = []
+    valid_data = []
+    over_limit = []
     for i, p in enumerate(problems):
         token_count = token_counts[i]
-        results.append((p["complexity"], token_count))
-    return results
+        if token_count > token_limit:
+            over_limit.append({
+                "problem_id": p["problem_id"],
+                "complexity": p["complexity"],
+                "token_count": token_count,
+                "problem": p["problem"],
+                "problem_source": p["problem_source"]
+            })
+        else:
+            valid_data.append((p["complexity"], token_count))
+    return valid_data, over_limit
 
 
 def plot_histograms(
@@ -171,10 +185,64 @@ def print_stats(prompt_data: list[tuple[int, int]], solution_data: list[tuple[in
     print("\n" + "=" * 70)
 
 
+def save_stats_csv(prompt_data: list[tuple[int, int]], solution_data: list[tuple[int, int]], output_path: Path) -> None:
+    """Save summary statistics to CSV file."""
+    datasets = [("prompt", prompt_data), ("solution", solution_data)]
+    complexities = [("easy", 0), ("hard", 1)]
+
+    rows = []
+    metrics = ["mean", "median", "std", "min", "max", "p25", "p75", "p90"]
+
+    for metric in metrics:
+        row = {"metric": metric}
+        for ds_name, data in datasets:
+            for comp_name, comp_val in complexities:
+                tokens = [t for c, t in data if c == comp_val]
+                if not tokens:
+                    row[f"{comp_name}_{ds_name}"] = ""
+                    continue
+                arr = np.array(tokens)
+                if metric == "mean":
+                    row[f"{comp_name}_{ds_name}"] = f"{arr.mean():.1f}"
+                elif metric == "median":
+                    row[f"{comp_name}_{ds_name}"] = f"{np.median(arr):.1f}"
+                elif metric == "std":
+                    row[f"{comp_name}_{ds_name}"] = f"{arr.std():.1f}"
+                elif metric == "min":
+                    row[f"{comp_name}_{ds_name}"] = str(arr.min())
+                elif metric == "max":
+                    row[f"{comp_name}_{ds_name}"] = str(arr.max())
+                elif metric == "p25":
+                    row[f"{comp_name}_{ds_name}"] = f"{np.percentile(arr, 25):.1f}"
+                elif metric == "p75":
+                    row[f"{comp_name}_{ds_name}"] = f"{np.percentile(arr, 75):.1f}"
+                elif metric == "p90":
+                    row[f"{comp_name}_{ds_name}"] = f"{np.percentile(arr, 90):.1f}"
+        rows.append(row)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["metric", "easy_prompt", "hard_prompt", "easy_solution", "hard_solution"])
+        writer.writeheader()
+        writer.writerows(rows)
+    logger.info("Saved summary statistics to %s", output_path)
+
+
+def save_over_limit_json(over_limit: list[dict], output_path: Path) -> None:
+    """Save problems exceeding token limit to JSON file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(over_limit, f, indent=2)
+    logger.info("Saved %s over-limit problems to %s", len(over_limit), output_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze prompt and solution token lengths by complexity")
     parser.add_argument("--sample-size", type=int, default=30000, help="Number of problems to sample (default: 30000)")
     parser.add_argument("--output", type=str, default="reports/figures/token_lengths.png", help="Output path for histogram")
+    parser.add_argument("--token-limit", type=int, default=1500, help="Token count limit for flagging problems (default: 1500)")
+    parser.add_argument("--stats-csv", type=str, default="reports/data/token_length_stats.csv", help="Output path for summary statistics CSV")
+    parser.add_argument("--over-limit-json", type=str, default="reports/data/problems_over_token_limit.json", help="Output path for problems exceeding token limit")
     args = parser.parse_args()
 
     problems, total_problems = load_problems(args.sample_size)
@@ -185,13 +253,21 @@ def main():
     tokenizer = _get_model_tokenizer()
 
     # Compute prompt token lengths
-    prompt_data = compute_prompt_token_lengths(problems, tokenizer)
+    prompt_data, over_limit = compute_prompt_token_lengths(problems, tokenizer, args.token_limit)
 
     # Extract solution token lengths (avg_token_length from pickle)
     solution_data = [(p["complexity"], p["avg_token_length"]) for p in problems]
 
     # Print stats
     print_stats(prompt_data, solution_data)
+
+    # Save summary statistics to CSV
+    save_stats_csv(prompt_data, solution_data, Path(args.stats_csv))
+
+    # Save over-limit problems to JSON
+    if over_limit:
+        save_over_limit_json(over_limit, Path(args.over_limit_json))
+        print(f"\n⚠️  Found {len(over_limit)} problems exceeding token limit ({args.token_limit})")
 
     # Plot with sample size annotation
     plot_histograms(prompt_data, solution_data, Path(args.output),
