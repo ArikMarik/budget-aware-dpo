@@ -501,6 +501,7 @@ def build_dpo_pairs(
     problem_to_index_path: Path,
     max_per_problem: int | None = None,
     length_ratio: float | int = 1,
+    over_limit_json_path: Path | None = None,
 ) -> list[dict]:
     """
     Group by problem and build preferred/rejected pairs.
@@ -513,9 +514,18 @@ def build_dpo_pairs(
         raw_data: List of examples with problem, generated_solution, etc.
         problem_to_index_path: Path to problem_to_index.pkl. If provided, uses existing IDs and complexity.
         max_per_problem: If set (and not -1), limit number of pairs per problem using stratified sampling by rejection_reason.
+        over_limit_json_path: Path to JSON file with problems exceeding token limit (to skip).
     """
     problem_to_index_dict = load_problem_to_index(problem_to_index_path)
     logger.info(f"Loaded problem to index with {len(problem_to_index_dict)} problems")
+
+    # Load over-limit problem IDs to skip
+    over_limit_ids = set()
+    if over_limit_json_path and Path(over_limit_json_path).exists():
+        with open(over_limit_json_path) as f:
+            over_limit_data = json.load(f)
+        over_limit_ids = {item["problem_id"] for item in over_limit_data}
+        logger.info(f"Loaded {len(over_limit_ids)} over-limit problem IDs to skip")
 
     # Pass 1: group raw examples by problem (no labeling yet — we need the whole
     # group to compute per-problem percentile ranks).
@@ -536,6 +546,10 @@ def build_dpo_pairs(
         problem_id = problem_data["problem_id"]
         level = problem_data["level"]
         complexity = problem_data["complexity"]
+
+        # Skip problems that exceed token limit
+        if problem_id in over_limit_ids:
+            continue
 
         index_lengths = problem_data.get("token_lengths")
         if index_lengths:

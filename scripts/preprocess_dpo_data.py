@@ -23,6 +23,7 @@ from src.config import (
     USE_DUMMY_DATA,
     MODEL_NAME,
     get_tokens_path,
+    OVER_LIMIT_PROBLEMS_PATH,
 )
 from src.data.preprocessing import (
     build_dpo_pairs,
@@ -153,6 +154,8 @@ def main():
     parser.add_argument("--problem-index", type=str, default=PROBLEM_TO_INDEX_PATH, help="Path to problem_to_index.pkl")
     parser.add_argument("--max-pairs-per-problem", type=int, default=25, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
     parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 2.0 (1.0 = no filter)")
+    parser.add_argument("--num-shards", type=int, default=None, help="Number of shards for parallel tokenization (default: 4x num_workers)")
+    parser.add_argument("--over-limit-json", type=str, default=str(OVER_LIMIT_PROBLEMS_PATH), help="Path to JSON file with problems exceeding token limit")
     args = parser.parse_args()
 
     set_seed(SEED)
@@ -186,7 +189,7 @@ def main():
     logger.info("[2/4] Building DPO pairs (classify, label, group)...")
     problem_to_index_path = Path(args.problem_index)
     assert problem_to_index_path.exists(), f'You must first run the load_real_data.py script, to generate the {problem_to_index_path.name} file'
-    pairs = build_dpo_pairs(raw_data, problem_to_index_path=problem_to_index_path, max_per_problem=args.max_pairs_per_problem, length_ratio=args.length_ratio)
+    pairs = build_dpo_pairs(raw_data, problem_to_index_path=problem_to_index_path, max_per_problem=args.max_pairs_per_problem, length_ratio=args.length_ratio, over_limit_json_path=Path(args.over_limit_json))
     logger.info("      Using problem index: %s", problem_to_index_path)
     logger.info("      Built %s total pairs", f"{len(pairs):,}")
 
@@ -205,6 +208,7 @@ def main():
         num_workers=32,
         batch_size=10_000,
         pad_token_id=_tok.pad_token_id,
+        num_shards=args.num_shards,
     )
     logger.info(f"      Tokenized {total_pairs:,} pairs, saved to {output_dir}")
 

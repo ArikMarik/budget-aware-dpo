@@ -26,7 +26,7 @@ import numpy as np
 import seaborn as sns
 from tqdm import tqdm
 
-from src.config import PROBLEM_TO_INDEX_PATH, MODEL_NAME
+from src.config import PROBLEM_TO_INDEX_PATH, MODEL_NAME, OVER_LIMIT_PROBLEMS_PATH, TOKEN_LENGTH_STATS_PATH
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.utils import get_logger, _get_model_tokenizer
 
@@ -241,8 +241,8 @@ def main():
     parser.add_argument("--sample-size", type=int, default=30000, help="Number of problems to sample (default: 30000)")
     parser.add_argument("--output", type=str, default="reports/figures/token_lengths.png", help="Output path for histogram")
     parser.add_argument("--token-limit", type=int, default=1500, help="Token count limit for flagging problems (default: 1500)")
-    parser.add_argument("--stats-csv", type=str, default="reports/data/token_length_stats.csv", help="Output path for summary statistics CSV")
-    parser.add_argument("--over-limit-json", type=str, default="reports/data/problems_over_token_limit.json", help="Output path for problems exceeding token limit")
+    parser.add_argument("--stats-csv", type=str, default=str(TOKEN_LENGTH_STATS_PATH), help="Output path for summary statistics CSV")
+    parser.add_argument("--over-limit-json", type=str, default=str(OVER_LIMIT_PROBLEMS_PATH), help="Output path for problems exceeding token limit")
     args = parser.parse_args()
 
     problems, total_problems = load_problems(args.sample_size)
