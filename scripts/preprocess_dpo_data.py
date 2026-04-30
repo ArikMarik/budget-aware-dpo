@@ -154,7 +154,6 @@ def main():
     parser.add_argument("--problem-index", type=str, default=PROBLEM_TO_INDEX_PATH, help="Path to problem_to_index.pkl")
     parser.add_argument("--max-pairs-per-problem", type=int, default=25, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
     parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 2.0 (1.0 = no filter)")
-    parser.add_argument("--num-shards", type=int, default=None, help="Number of shards for parallel tokenization (default: 4x num_workers)")
     parser.add_argument("--over-limit-json", type=str, default=str(OVER_LIMIT_PROBLEMS_PATH), help="Path to JSON file with problems exceeding token limit")
     args = parser.parse_args()
 
@@ -208,7 +207,6 @@ def main():
         num_workers=32,
         batch_size=10_000,
         pad_token_id=_tok.pad_token_id,
-        num_shards=args.num_shards,
     )
     logger.info(f"      Tokenized {total_pairs:,} pairs, saved to {output_dir}")
 

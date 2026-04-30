@@ -35,13 +35,13 @@ PROCESSED_DATASET_PATH_BALANCED = DATA_PATH / "processed_dpo_dataset_balanced"
 GSM8K_TEST_PATH = DATA_PATH / "gsm8k_test.jsonl"
 MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
 
-# Token length analysis outputs
-OVER_LIMIT_PROBLEMS_PATH = PROJECT_ROOT / "reports" / "data" / "problems_over_token_limit.json"
-TOKEN_LENGTH_STATS_PATH = PROJECT_ROOT / "reports" / "data" / "token_length_stats.csv"
-
 # Similarity Search - Embedding
 SIMILARITY_INDEX_DIR = DATA_PATH / "math_problem_index"
 EMBEDDING_MODEL = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+
+# Token length analysis outputs
+OVER_LIMIT_PROBLEMS_PATH = PROJECT_ROOT / "reports" / "data" / "problems_over_token_limit.json"
+TOKEN_LENGTH_STATS_PATH = PROJECT_ROOT / "reports" / "data" / "token_length_stats.csv"
 
 
 def get_processed_dataset_path() -> Path:
