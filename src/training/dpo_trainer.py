@@ -4,6 +4,7 @@ Optimized for GPU utilization and training efficiency.
 """
 
 from collections import defaultdict
+from functools import partial
 import json
 import pickle
 import os
@@ -16,6 +17,7 @@ from tqdm import tqdm
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
@@ -310,11 +312,13 @@ class TokenizedDPODataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         real_idx = self.indices[idx]
+        chosen_ids = self.data["chosen_input_ids"][real_idx]
+        rejected_ids = self.data["rejected_input_ids"][real_idx]
         return {
-            "chosen_input_ids": self.data["chosen_input_ids"][real_idx],
-            "chosen_attention_mask": self.data["chosen_attention_mask"][real_idx],
-            "rejected_input_ids": self.data["rejected_input_ids"][real_idx],
-            "rejected_attention_mask": self.data["rejected_attention_mask"][real_idx],
+            "chosen_input_ids": chosen_ids,
+            "chosen_attention_mask": torch.ones(len(chosen_ids), dtype=torch.long),
+            "rejected_input_ids": rejected_ids,
+            "rejected_attention_mask": torch.ones(len(rejected_ids), dtype=torch.long),
             "complexity": self.data["complexities"][real_idx],
             "problem_id": self.data["problem_ids"][real_idx],
             "prompt_length": self.data["prompt_lengths"][real_idx],
@@ -454,13 +458,33 @@ def load_tokenized_datasets(
     return train_dataset, val_dataset
 
 
-def collate_fn_tokenized(batch: list[dict]) -> dict:
-    keys = ["chosen_input_ids", "chosen_attention_mask", "rejected_input_ids", "rejected_attention_mask", "complexity", "problem_id", "prompt_length"]
-    collated_batch = {key: [] for key in keys}
+def collate_fn_tokenized(batch: list[dict], pad_token_id: int) -> dict:
+    chosen_input_ids, chosen_attention_mask = [], []
+    rejected_input_ids, rejected_attention_mask = [], []
+    complexity, problem_id, prompt_length = [], [], []
+
     for item in batch:
-        for key, value in item.items():
-            collated_batch[key].append(value)
-    return {key: torch.stack(values) for key, values in collated_batch.items()}
+        chosen_input_ids.append(item["chosen_input_ids"])
+        chosen_attention_mask.append(item["chosen_attention_mask"])
+        rejected_input_ids.append(item["rejected_input_ids"])
+        rejected_attention_mask.append(item["rejected_attention_mask"])
+        complexity.append(item["complexity"])
+        problem_id.append(item["problem_id"])
+        prompt_length.append(item["prompt_length"])
+
+    return {
+        "chosen_input_ids": pad_sequence(chosen_input_ids, batch_first=True, padding_value=pad_token_id
+        ),
+        "chosen_attention_mask": pad_sequence(chosen_attention_mask, batch_first=True, padding_value=0
+        ),
+        "rejected_input_ids": pad_sequence(rejected_input_ids, batch_first=True, padding_value=pad_token_id
+        ),
+        "rejected_attention_mask": pad_sequence(rejected_attention_mask, batch_first=True, padding_value=0
+        ),
+        "complexity": torch.stack(complexity),
+        "problem_id": torch.stack(problem_id),
+        "prompt_length": torch.stack(prompt_length),
+    }
 
 
 def _pad_token_if_needed(tokenizer: PreTrainedTokenizer) -> None:
@@ -897,12 +921,14 @@ def _build_dataloaders(
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
+    pad_token_id: int,
 ) -> tuple[DataLoader, DataLoader]:
+    collate = partial(collate_fn_tokenized, pad_token_id=pad_token_id)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate_fn_tokenized,
+        collate_fn=collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
@@ -912,7 +938,7 @@ def _build_dataloaders(
         val_dataset,
         batch_size=batch_size,
         shuffle=True,  # Shuffle val for more even problem coverage during accuracy eval
-        collate_fn=collate_fn_tokenized,
+        collate_fn=collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
@@ -986,7 +1012,8 @@ def train_dpo(
     pin_memory = device == "cuda"
 
     train_loader, val_loader = _build_dataloaders(
-        train_dataset, val_dataset, batch_size, num_workers, pin_memory
+        train_dataset, val_dataset, batch_size, num_workers, pin_memory,
+        pad_token_id=tokenizer.pad_token_id,
     )
 
     logger.debug(f'{" START BUILD VALIDATION PROBLEMS ":#^100}')

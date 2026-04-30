@@ -29,6 +29,7 @@ from src.data.preprocessing import (
     compute_statistics,
     load_jsonl,
 )
+from src.data.worker_utils import tokenize_dpo_pairs_parallel
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.utils import get_logger, set_seed, setup_global_exception_handler
 
@@ -36,7 +37,7 @@ logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
 
 SEED = 42
-MAX_LENGTH = 512
+MAX_LENGTH = 2048
 
 
 def get_input_path() -> Path:
@@ -150,8 +151,8 @@ def main():
     parser = argparse.ArgumentParser(description="Preprocess DPO data - tokenize all pairs")
     parser.add_argument("--force", action="store_true", help="Force regeneration even if files exist")
     parser.add_argument("--problem-index", type=str, default=PROBLEM_TO_INDEX_PATH, help="Path to problem_to_index.pkl")
-    parser.add_argument("--max-pairs-per-problem", type=int, default=100, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
-    parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 1.5 (1.0 = no filter)")
+    parser.add_argument("--max-pairs-per-problem", type=int, default=25, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
+    parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 2.0 (1.0 = no filter)")
     args = parser.parse_args()
 
     set_seed(SEED)
@@ -193,8 +194,19 @@ def main():
     logger.info(f"      Unique problem IDs: {num_unique_problems:,}")
 
     logger.info("[3/4] Tokenizing all pairs...")
-    tokens_path = tokenize_and_save(MODEL_NAME, pairs, tokens_path)
-    logger.info("      Saved to %s", output_dir)
+    _tok = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    if _tok.pad_token is None:
+        _tok.pad_token = _tok.eos_token
+    total_pairs = tokenize_dpo_pairs_parallel(
+        pairs=pairs,
+        model_name=MODEL_NAME,
+        output_path=tokens_path,
+        max_length=MAX_LENGTH,
+        num_workers=32,
+        batch_size=10_000,
+        pad_token_id=_tok.pad_token_id,
+    )
+    logger.info(f"      Tokenized {total_pairs:,} pairs, saved to {output_dir}")
 
     logger.info("[4/4] Computing and saving statistics...")
     stats = compute_statistics(pairs)
