@@ -10,12 +10,13 @@ import pickle
 from pathlib import Path
 from collections import defaultdict
 
+from datasets import load_dataset, concatenate_datasets
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
 
-from src.config import DATA_PATH, GSM8K_TEST_PATH, INDEX_TO_PROBLEM_PATH, MATH_TEST_PATH, DATASET_PATH, PROBLEM_TO_INDEX_PATH, PROBLEM_TO_LEVEL_PATH
-from src.data.preprocessing import load_jsonl, load_math_problem_to_level, normalize_problem
+from src.config import DATA_PATH, GSM8K_TEST_PATH, INDEX_TO_PROBLEM_PATH, MATH_TEST_PATH, DATASET_PATH, PROBLEM_TO_INDEX_PATH, PROBLEM_TO_LEVEL_PATH, SEED
+from src.data.preprocessing import MATH_CONFIGS, load_jsonl, load_math_problem_to_level, normalize_problem
 from src.data.worker_utils import count_tokens_batch, classify_complexity_batch
 from src.evaluation.answer_extraction import extract_answer, extract_gsm8k_answer
 from src.utils import get_logger, set_seed, setup_global_exception_handler
@@ -23,7 +24,7 @@ from src.utils import get_logger, set_seed, setup_global_exception_handler
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
 
-set_seed(42)
+set_seed(SEED)
 
 OPENMATH_SIZES = {
     "train_1M": 1_000_000,
@@ -84,12 +85,7 @@ def load_openmath_instruct(split: str = "train_1M", limit: int | None = None, co
     """Load OpenMathInstruct-2 from HuggingFace. Enriches MATH-origin problems with level from MATH train."""
     global _problem_to_level_cache, _compute_correctness
 
-    import datasets
-    from datasets import load_dataset
-    cache_path = '/root/.cache/huggingface/datasets'
-    datasets.config.HF_DATASETS_CACHE = cache_path
-
-    dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split, streaming=True, cache_dir=cache_path)
+    dataset = load_dataset("nvidia/OpenMathInstruct-2", split=split, streaming=True)
     total = min(limit, OPENMATH_SIZES[split]) if limit else OPENMATH_SIZES[split]
 
     logger.info("Loading MATH train for level mapping...")
@@ -140,8 +136,6 @@ def load_openmath_instruct(split: str = "train_1M", limit: int | None = None, co
 
 def load_gsm8k_test() -> list[dict]:
     """Load GSM8K test set for Phase 9 evaluation."""
-    from datasets import load_dataset
-
     ds = load_dataset("openai/gsm8k", "main", split="test")
     examples = []
     for item in ds:
@@ -156,8 +150,6 @@ def load_gsm8k_test() -> list[dict]:
 
 def load_math_test() -> list[dict]:
     """Load MATH test set for Phase 9 evaluation."""
-    from datasets import load_dataset, concatenate_datasets
-
     # EleutherAI/hendrycks_math has per-subject configs; concatenate all
     try:
         parts = [
