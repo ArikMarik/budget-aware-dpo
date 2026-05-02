@@ -10,6 +10,7 @@ from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+import concurrent.futures
 import torch
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
@@ -138,7 +139,16 @@ def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH
     from tqdm import tqdm
 
     logger = get_logger(__name__)
-    logger.info("Loading and combining tokenized data...")
+    logger.info("Loading and combining tokenized data (parallel)...")
+
+    def _load_file(name: str, path: Path, key: str):
+        size_mb = path.stat().st_size / 1e6
+        logger.info(f"Loading {name} from {path} ({size_mb:.2f} MB)...")
+        start = time.time()
+        data = torch.load(path, weights_only=False)
+        elapsed = time.time() - start
+        logger.info(f"Loaded {name} in {elapsed:.2f}s")
+        return key, data
 
     loads = [
         ("chosen encodings", chosen_path, "chosen_encodings"),
@@ -147,16 +157,12 @@ def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH
     ]
 
     results = {}
-    for name, path, key in tqdm(loads, desc="Loading files", unit="file"):
-        size_mb = path.stat().st_size / 1e6
-        logger.info(f"Loading {name} from {path} ({size_mb:.2f} MB)...")
-        start = time.time()
-        data = torch.load(path, weights_only=False)
-        elapsed = time.time() - start
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(_load_file, name, path, key): key for name, path, key in loads}
+        for future in tqdm(concurrent.futures.as_completed(futures), desc="Loading files", total=3, unit="file"):
+            key, data = future.result()
+            results[key] = data
 
-        results[key] = data
-
-        logger.info(f"Loaded {name} in {elapsed:.2f}s")
     chosen_encodings = results["chosen_encodings"]
     rejected_encodings = results["rejected_encodings"]
     pairs_info = results["pairs_info"]
