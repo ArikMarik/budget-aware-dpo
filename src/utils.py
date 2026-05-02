@@ -10,9 +10,11 @@ from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+import torch
 from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers.tokenization_utils_base import BatchEncoding
 
-from src.config import MODEL_NAME
+from src.config import CHOSEN_ENCODINGS_PATH, MODEL_NAME, PROCESSED_PAIRS_INFO_PATH, REJECTED_ENCODINGS_PATH, SEED
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs" / "cli"
@@ -82,7 +84,7 @@ def setup_global_exception_handler(logger_name: str = "main") -> None:
     atexit.register(lambda: logger.info("Script exited normally"))
 
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = SEED) -> None:
     """Fix random seeds for reproducibility across torch, numpy, transformers."""
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -112,9 +114,12 @@ def approx_tokens(text: str) -> int:
 
 
 @lru_cache(maxsize=1)
-def _get_model_tokenizer():
+def get_model_tokenizer(model_name: str = MODEL_NAME) -> PreTrainedTokenizer:
     """Get cached Qwen tokenizer (lazy loading)."""
-    return AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 
 def count_tokens(text: str, tokenizer: PreTrainedTokenizer | None = None) -> int:
@@ -124,5 +129,23 @@ def count_tokens(text: str, tokenizer: PreTrainedTokenizer | None = None) -> int
     to ensure token counts match what the model sees during training/inference.
     """
     if tokenizer is None:
-        tokenizer = _get_model_tokenizer()
+        tokenizer = get_model_tokenizer()
     return len(tokenizer.encode(str(text) if text else "", add_special_tokens=False))
+
+
+def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH, rejected_path: Path = REJECTED_ENCODINGS_PATH, info_path: Path = PROCESSED_PAIRS_INFO_PATH) -> dict:
+    """Load tokenized prompts and problem info, and combine into single dict."""
+    chosen_encodings: BatchEncoding = torch.load(chosen_path) # TODO - try if works with weights_only=True
+    rejected_encodings: BatchEncoding = torch.load(rejected_path) # TODO - try if works with weights_only=True
+    pairs_info: dict = torch.load(info_path) # TODO - try if works with weights_only=True
+
+    assert len(chosen_encodings["input_ids"]) == len(rejected_encodings["input_ids"]) == len(pairs_info["prompt_length"]), "Mismatched lengths of encodings and info"
+
+    combined = pairs_info
+    combined["chosen_input_ids"] = chosen_encodings["input_ids"],
+    combined["rejected_input_ids"] = rejected_encodings["input_ids"]
+    if "attention_mask" in chosen_encodings and "attention_mask" in rejected_encodings:
+        combined["chosen_attention_mask"] = chosen_encodings["attention_mask"]
+        combined["rejected_attention_mask"] = rejected_encodings["attention_mask"]
+
+    return combined

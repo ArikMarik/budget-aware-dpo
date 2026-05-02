@@ -19,7 +19,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 import wandb
 
@@ -27,18 +27,17 @@ from src.config import (
     CHECKPOINT_DIR,
     INDEX_TO_PROBLEM_PATH,
     MODEL_NAME,
-    get_tokens_path,
-    get_processed_dataset_path,
+    SEED,
+    get_tokens_paths,
 )
 from src.data.preprocessing import compute_pair_length_ratio, split_pairs_by_problem
-from src.evaluation.answer_extraction import verify_correctness
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
     generate_and_evaluate,
     compute_metrics,
     load_eval_problems,
 )
-from src.utils import get_logger, set_seed, setup_global_exception_handler
+from src.utils import get_logger, get_model_tokenizer, load_and_combine_pairs_tokens_info, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
@@ -319,9 +318,9 @@ class TokenizedDPODataset(Dataset):
             "chosen_attention_mask": torch.ones(len(chosen_ids), dtype=torch.long),
             "rejected_input_ids": rejected_ids,
             "rejected_attention_mask": torch.ones(len(rejected_ids), dtype=torch.long),
-            "complexity": self.data["complexities"][real_idx],
-            "problem_id": self.data["problem_ids"][real_idx],
-            "prompt_length": self.data["prompt_lengths"][real_idx],
+            "complexity": self.data["complexity"][real_idx],
+            "problem_id": self.data["problem_id"][real_idx],
+            "prompt_length": self.data["prompt_length"][real_idx],
         }
 
 
@@ -335,7 +334,7 @@ def _cap_pairs_per_problem(
     import numpy as np
 
     rng = np.random.default_rng(seed)
-    problem_ids = data["problem_ids"].numpy()
+    problem_ids = data["problem_id"].numpy()
     rejection_reason = data["rejection_reason"].numpy()
 
     # Group the *filtered* indices by problem_id
@@ -382,7 +381,7 @@ def _filter_by_length_ratio(
     rejection_reason = data["rejection_reason"].numpy()
     chosen_length = data["chosen_length"].numpy()
     rejected_length = data["rejected_length"].numpy()
-    complexities = data["complexities"].numpy()
+    complexities = data["complexity"].numpy()
 
     ratio = compute_pair_length_ratio(chosen_length, rejected_length)
     not_rejected_by_length = rejection_reason != 0
@@ -398,13 +397,13 @@ def _filter_by_length_ratio(
 
 
 def load_tokenized_datasets(
-    tokens_path: Path,
+    tokens_paths: tuple[Path, Path, Path],
     *,
     raw_data: Optional[dict] = None,
     length_ratio_easy: float = 1.0,
     length_ratio_hard: float = 1.0,
     val_split: float = 0.2,
-    seed: int = 42,
+    seed: int = SEED,
     max_pairs_per_problem: Optional[int] = None,
     max_unique_problems: int = 100_000
 ) -> tuple[TokenizedDPODataset, TokenizedDPODataset]:
@@ -418,14 +417,14 @@ def load_tokenized_datasets(
     3. Apply max_pairs_per_problem cap (stratified by rejection_reason)
     4. Split filtered pairs by problem_id (stratified by complexity)
     """
-    if raw_data is None and not tokens_path.exists():
+    if raw_data is None and not all(tok_path.exists() for tok_path in tokens_paths):
         raise FileNotFoundError(
-            f"Tokenized dataset not found at {tokens_path}. "
+            f"Tokenized dataset not found at {tokens_paths}. "
             "Run preprocess_dpo_data.py first."
         )
 
     logger.debug(f'{" START LOAD TOKENS ":#^100}')
-    data = raw_data if raw_data is not None else torch.load(tokens_path)
+    data = raw_data if raw_data is not None else load_and_combine_pairs_tokens_info(*tokens_paths)
     logger.debug(f'{" END LOAD TOKENS ":#^100}')
 
     logger.debug(f'{" START FILTER BY LENGTH ":#^100}')
@@ -473,29 +472,15 @@ def collate_fn_tokenized(batch: list[dict], pad_token_id: int) -> dict:
         prompt_length.append(item["prompt_length"])
 
     return {
-        "chosen_input_ids": pad_sequence(chosen_input_ids, batch_first=True, padding_value=pad_token_id
-        ),
-        "chosen_attention_mask": pad_sequence(chosen_attention_mask, batch_first=True, padding_value=0
-        ),
-        "rejected_input_ids": pad_sequence(rejected_input_ids, batch_first=True, padding_value=pad_token_id
-        ),
-        "rejected_attention_mask": pad_sequence(rejected_attention_mask, batch_first=True, padding_value=0
-        ),
+        "chosen_input_ids": pad_sequence(chosen_input_ids, batch_first=True, padding_value=pad_token_id),
+        "chosen_attention_mask": pad_sequence(chosen_attention_mask, batch_first=True, padding_value=0),
+        "rejected_input_ids": pad_sequence(rejected_input_ids, batch_first=True, padding_value=pad_token_id),
+        "rejected_attention_mask": pad_sequence(rejected_attention_mask, batch_first=True, padding_value=0),
         "complexity": torch.stack(complexity),
         "problem_id": torch.stack(problem_id),
         "prompt_length": torch.stack(prompt_length),
     }
 
-
-def _pad_token_if_needed(tokenizer: PreTrainedTokenizer) -> None:
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-
-def create_tokenizer(model_name: str) -> PreTrainedTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    _pad_token_if_needed(tokenizer)
-    return tokenizer
 
 def create_model(
     model_name: str,
@@ -545,14 +530,14 @@ def create_ref_model(model_name: str, device: str) -> PeftModel:
 
 
 def build_static_context(
-    tokens_path: Path,
+    tokens_paths: tuple[Path, Path, Path],
     model_name: str,
     device: str,
     index_to_problem_path: Path,
 ) -> StaticTrainingContext:
     """Load all trial-invariant state once. Pass the result to every train_dpo call."""
-    raw_data = torch.load(tokens_path)
-    tokenizer = create_tokenizer(model_name)
+    raw_data = load_and_combine_pairs_tokens_info(*tokens_paths)
+    tokenizer = get_model_tokenizer(model_name)
     if index_to_problem_path.exists():
         with open(index_to_problem_path, "rb") as f:
             index_to_problem = pickle.load(f)
@@ -587,8 +572,6 @@ def _compute_batch_forward(
     tokenizer: PreTrainedTokenizer,
     prompt_lengths: Optional[torch.Tensor] = None,
 ) -> tuple:
-    _pad_token_if_needed(tokenizer)
-
     with torch.no_grad():
         ref_chosen = ref_model(input_ids=chosen_ids, attention_mask=chosen_mask).logits
         ref_rejected = ref_model(input_ids=rejected_ids, attention_mask=rejected_mask).logits
@@ -614,7 +597,7 @@ def compute_batch_loss_train(
     tokenizer: PreTrainedTokenizer,
     loss_fn: Callable,
     use_compile: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
     chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities, prompt_lengths = _move_batch_to_device(batch)
 
     policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens = _compute_batch_forward(
@@ -631,7 +614,7 @@ def compute_batch_loss_train(
         complexities,
     )
 
-    return loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, extra
+    return loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens, extra
 
 
 def _compute_val_accuracy(
@@ -957,7 +940,7 @@ def train_dpo(
     checkpoint_every: int = 1,
     data_limit: Optional[int] = None,
     resume_from: Optional[str] = None,
-    seed: int = 42,
+    seed: int = SEED,
     use_wandb: bool = False,
     run_name: Optional[str] = None,
     early_stopping_patience: int = 5,
@@ -987,7 +970,7 @@ def train_dpo(
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if ctx is None:
-        ctx = build_static_context(get_tokens_path(), effective_model_name, device, index_to_problem_path)
+        ctx = build_static_context(effective_model_name, device, index_to_problem_path)
 
     tokenizer = ctx.tokenizer
     index_to_problem = ctx.index_to_problem
@@ -995,7 +978,7 @@ def train_dpo(
 
     # Load, filter, and split in one call
     train_dataset, val_dataset = load_tokenized_datasets(
-        get_tokens_path(),
+        tokens_paths=get_tokens_paths(),
         raw_data=ctx.raw_data,
         length_ratio_easy=length_ratio_easy,
         length_ratio_hard=length_ratio_hard,
@@ -1378,7 +1361,7 @@ def _run_epoch(
             dtype=autocast_dtype,
             enabled=use_mixed_precision,
         ):
-            loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, extra = compute_batch_loss_train(
+            loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens, extra = compute_batch_loss_train(
                 model, ref_model, batch, tokenizer, loss_fn, compile_model
             )
             loss = loss / gradient_accumulation_steps
@@ -1395,11 +1378,6 @@ def _run_epoch(
             )
             per_sample_loss = -F.logsigmoid(reward_diff_per_sample)
             complexities = batch['complexity'].cuda(non_blocking=True)
-            rejected_lens = (batch['rejected_attention_mask'] != tokenizer.pad_token_id).sum(dim=-1).float()
-            if rejected_lens.device != device:
-                rejected_lens = rejected_lens.to(device)
-            elif not isinstance(rejected_lens, torch.Tensor):
-                rejected_lens = torch.tensor(rejected_lens, device=device, dtype=torch.float)
 
             accum.update(
                 loss.detach() * gradient_accumulation_steps,

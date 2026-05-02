@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 
+SEED = 42
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Use dummy data when USE_DUMMY_DATA=1
@@ -55,9 +56,15 @@ def get_processed_dataset_path() -> Path:
     return DUMMY_PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH
 
 
-def get_tokens_path() -> Path:
+# Tokenized and processed data files path - for training.
+CHOSEN_ENCODINGS_PATH = get_processed_dataset_path() / "chosen_encodings.pt"
+REJECTED_ENCODINGS_PATH = get_processed_dataset_path() / "rejected_encodings.pt"
+PROCESSED_PAIRS_INFO_PATH = get_processed_dataset_path() / "pairs_info.pt"
+
+
+def get_tokens_paths() -> tuple[Path, Path, Path]:
     """Return path to all tokenized pairs."""
-    return get_processed_dataset_path() / "tokens.pt"
+    return CHOSEN_ENCODINGS_PATH, REJECTED_ENCODINGS_PATH, PROCESSED_PAIRS_INFO_PATH
 
 
 def get_train_pairs_path() -> Path:
