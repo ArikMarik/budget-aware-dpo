@@ -12,7 +12,6 @@ from pathlib import Path
 
 import torch
 from transformers import AutoTokenizer, PreTrainedTokenizer
-from transformers.tokenization_utils_base import BatchEncoding
 
 from src.config import CHOSEN_ENCODINGS_PATH, MODEL_NAME, PROCESSED_PAIRS_INFO_PATH, REJECTED_ENCODINGS_PATH, SEED
 
@@ -135,17 +134,41 @@ def count_tokens(text: str, tokenizer: PreTrainedTokenizer | None = None) -> int
 
 def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH, rejected_path: Path = REJECTED_ENCODINGS_PATH, info_path: Path = PROCESSED_PAIRS_INFO_PATH) -> dict:
     """Load tokenized prompts and problem info, and combine into single dict."""
-    chosen_encodings: BatchEncoding = torch.load(chosen_path) # TODO - try if works with weights_only=True
-    rejected_encodings: BatchEncoding = torch.load(rejected_path) # TODO - try if works with weights_only=True
-    pairs_info: dict = torch.load(info_path) # TODO - try if works with weights_only=True
+    import time
+    from tqdm import tqdm
+
+    logger = get_logger(__name__)
+    logger.info("Loading and combining tokenized data...")
+
+    loads = [
+        ("chosen encodings", chosen_path, "chosen_encodings"),
+        ("rejected encodings", rejected_path, "rejected_encodings"),
+        ("pairs info", info_path, "pairs_info"),
+    ]
+
+    results = {}
+    for name, path, key in tqdm(loads, desc="Loading files", unit="file"):
+        size_mb = path.stat().st_size / 1e6
+        logger.info(f"Loading {name} from {path} ({size_mb:.2f} MB)...")
+        start = time.time()
+        data = torch.load(path, weights_only=False)
+        elapsed = time.time() - start
+
+        results[key] = data
+
+        logger.info(f"Loaded {name} in {elapsed:.2f}s")
+    chosen_encodings = results["chosen_encodings"]
+    rejected_encodings = results["rejected_encodings"]
+    pairs_info = results["pairs_info"]
 
     assert len(chosen_encodings["input_ids"]) == len(rejected_encodings["input_ids"]) == len(pairs_info["prompt_length"]), "Mismatched lengths of encodings and info"
 
     combined = pairs_info
-    combined["chosen_input_ids"] = chosen_encodings["input_ids"],
+    combined["chosen_input_ids"] = chosen_encodings["input_ids"]
     combined["rejected_input_ids"] = rejected_encodings["input_ids"]
     if "attention_mask" in chosen_encodings and "attention_mask" in rejected_encodings:
         combined["chosen_attention_mask"] = chosen_encodings["attention_mask"]
         combined["rejected_attention_mask"] = rejected_encodings["attention_mask"]
 
+    logger.info(f"Combined data ready - {len(combined['prompt_length'])} total samples")
     return combined
