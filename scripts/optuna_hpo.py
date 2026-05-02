@@ -45,12 +45,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import CHECKPOINT_DIR, INDEX_TO_PROBLEM_PATH, MODEL_NAME  # noqa: E402
+from src.config import CHECKPOINT_DIR, INDEX_TO_PROBLEM_PATH, MODEL_NAME, SEED  # noqa: E402
 from src.training.dpo_trainer import (  # noqa: E402
     train_dpo,
     build_static_context,
     StaticTrainingContext,
-    get_tokens_path,
+    get_tokens_paths,
 )
 from src.utils import get_logger  # noqa: E402
 
@@ -347,7 +347,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--n-trials", type=int, default=20)
     p.add_argument("--timeout", type=int, default=None, help="Wall clock seconds")
     p.add_argument("--pruner", action="store_true", help="Enable MedianPruner (best-effort)")
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=SEED)
 
     # Training knobs (fixed across trials)
     p.add_argument("--max-epochs", type=int, default=3)
@@ -417,7 +417,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     effective_model = args.model or MODEL_NAME
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ctx = build_static_context(
-        get_tokens_path(),
+        get_tokens_paths(),
         effective_model,
         device,
         INDEX_TO_PROBLEM_PATH,

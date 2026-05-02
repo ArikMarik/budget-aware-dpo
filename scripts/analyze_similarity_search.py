@@ -20,6 +20,8 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 
+from src.config import SEED
+
 EMBEDDING_MODEL = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
 
 DATA_PATH = Path(__file__).parent.parent / "data"
@@ -306,7 +308,7 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.7, help="Similarity threshold to analyze")
     args = parser.parse_args()
 
-    np.random.seed(42)
+    np.random.seed(SEED)
 
     # Load index
     if not INDEX_PATH.exists():

@@ -15,6 +15,7 @@ from src.config import (
     GSM8K_TEST_PATH,
     MATH_TEST_PATH,
     MODEL_NAME,
+    SEED,
     get_processed_dataset_path,
 )
 from src.data.preprocessing import classify_complexity
@@ -22,7 +23,7 @@ from src.evaluation.answer_extraction import extract_answer, verify_correctness
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.utils import count_tokens, set_seed
 
-set_seed(42)
+set_seed(SEED)
 
 
 def load_eval_problems(limit: Optional[int] = None, use_real: bool = False) -> list[dict]:

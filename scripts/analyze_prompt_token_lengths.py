@@ -26,13 +26,12 @@ import numpy as np
 import seaborn as sns
 from tqdm import tqdm
 
-from src.config import PROBLEM_TO_INDEX_PATH, MODEL_NAME, OVER_LIMIT_PROBLEMS_PATH, TOKEN_LENGTH_STATS_PATH
+from src.config import PROBLEM_TO_INDEX_PATH, MODEL_NAME, OVER_LIMIT_PROBLEMS_PATH, SEED, TOKEN_LENGTH_STATS_PATH
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
-from src.utils import get_logger, _get_model_tokenizer
+from src.utils import get_logger, get_model_tokenizer
 
 logger = get_logger(__name__)
 
-SEED = 42
 PROMPT_TEMPLATE = "Question: {problem}\nAnswer: "
 
 
@@ -250,7 +249,7 @@ def main():
 
     # Load tokenizer for prompt tokenization
     logger.info("Loading tokenizer: %s", MODEL_NAME)
-    tokenizer = _get_model_tokenizer()
+    tokenizer = get_model_tokenizer()
 
     # Compute prompt token lengths
     prompt_data, over_limit = compute_prompt_token_lengths(problems, tokenizer, args.token_limit)

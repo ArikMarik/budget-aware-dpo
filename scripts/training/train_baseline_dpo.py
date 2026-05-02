@@ -6,7 +6,7 @@ Train standard DPO baseline (no length penalty).
 import argparse
 from pathlib import Path
 
-from src.config import get_baseline_output_dir
+from src.config import SEED, get_baseline_output_dir
 from src.training.dpo_trainer import train_dpo
 
 
@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--data-limit", type=int, default=None)
     parser.add_argument("--resume-from", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--early-stopping-patience", type=int, default=5)
     parser.add_argument("--early-stopping-threshold", type=float, default=0.0)

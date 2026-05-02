@@ -10,7 +10,7 @@ import time
 
 from tqdm import tqdm
 
-from src.utils import count_tokens, _get_model_tokenizer
+from src.utils import count_tokens, get_model_tokenizer
 from src.data.worker_utils import count_tokens_batch
 
 
@@ -161,7 +161,7 @@ def main():
     print("Tokenization Equivalence Tests")
     print("=" * 60)
 
-    tokenizer = _get_model_tokenizer()
+    tokenizer = get_model_tokenizer()
 
     results = []
 

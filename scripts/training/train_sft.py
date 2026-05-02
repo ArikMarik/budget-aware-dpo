@@ -24,7 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
 import wandb
 
-from src.config import MODEL_NAME, get_processed_dataset_path
+from src.config import MODEL_NAME, SEED, get_processed_dataset_path
 from src.evaluation.run_evaluation import (
     compute_metrics,
     generate_and_evaluate,
@@ -116,7 +116,7 @@ def run_gen_eval(model, tokenizer, epoch, step, use_wandb=False):
     problems = load_eval_problems(limit=None, use_real=True)
     easy = [p for p in problems if p["complexity"] == 0]
     hard = [p for p in problems if p["complexity"] == 1]
-    random.seed(42)
+    random.seed(SEED)
     random.shuffle(easy)
     random.shuffle(hard)
     sample = easy[:50] + hard[:50]
@@ -169,7 +169,7 @@ def main():
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--wandb", action="store_true", default=False)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--early-stopping-patience", type=int, default=3)

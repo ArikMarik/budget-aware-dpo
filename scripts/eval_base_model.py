@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.config import MODEL_NAME
+from src.config import MODEL_NAME, SEED
 from src.evaluation.few_shot_exemplars import build_few_shots_prompt, build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
     compute_metrics,
@@ -35,7 +35,7 @@ from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
-set_seed(42)
+set_seed(SEED)
 
 
 def main():
@@ -63,7 +63,7 @@ def main():
 
     # Filter by level/source
     import random
-    random.seed(42)
+    random.seed(SEED)
 
     if args.math_only:
         problems = [p for p in problems if p.get("source") == "math"]

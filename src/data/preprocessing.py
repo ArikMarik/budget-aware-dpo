@@ -29,11 +29,11 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 from torch import Tensor
 
-from src.config import EMBEDDING_MODEL, PROBLEM_TO_LEVEL_PATH, SIMILARITY_INDEX_DIR
+from src.config import EMBEDDING_MODEL, PROBLEM_TO_LEVEL_PATH, SEED, SIMILARITY_INDEX_DIR
 from src.evaluation.answer_extraction import verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
 
-set_seed(42)
+set_seed(SEED)
 
 logger = get_logger(__name__)
 
@@ -419,7 +419,7 @@ def load_problem_to_index(path: Path) -> dict[str, dict]:
         return pickle.load(f)
 
 
-def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int) -> list[dict]:
+def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int, seed: int = SEED) -> list[dict]:
     """Stratified sampling by rejection_reason with weighted selection based on length_ratio."""
     by_reason: dict[int, list[dict]] = defaultdict(list)
     for p in pairs:
@@ -430,6 +430,7 @@ def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem
     remaining = max_per_problem
 
     # TODO - should we add a bias for incorrect pairs ???
+    rng = np.random.default_rng(seed)
     for reason, group in by_reason.items():
         quota = max(1, round(len(group) / total * max_per_problem))
         quota = min(quota, len(group), remaining)
@@ -448,10 +449,10 @@ def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem
             # Normalize to probabilities
             probabilities = np.array(weights) / sum_weights
             # Weighted sampling without replacement
-            indices = np.random.choice(len(group), size=quota, replace=False, p=probabilities)
+            indices = rng.choice(len(group), size=quota, replace=False, p=probabilities)
         else:
             # Fallback to uniform sampling if all weights are zero
-            indices = np.random.choice(len(group), size=quota, replace=False)
+            indices = rng.choice(len(group), size=quota, replace=False)
 
         selected.extend(group[i] for i in indices)
         remaining -= quota
@@ -632,7 +633,7 @@ def load_jsonl(path: Path) -> list[dict]:
 def split_pairs_by_problem(
     pairs: dict,
     val_split: float,
-    seed: int = 42,
+    seed: int = SEED,
     filtered_indices: list[int] | None = None,
     max_unique_problems: int = 100_000
 ) -> tuple[list[int], list[int]]:
@@ -700,9 +701,10 @@ def split_pairs_by_problem(
 
 
 def compute_statistics(
-    pairs: list[dict],
+    dataset_path: Path,
 ) -> dict[str, Any]:
     """Compute full statistics per spec (Section 4), including length ratio histogram."""
+    pairs = load_jsonl(dataset_path)
     total = len(pairs)
 
     if total == 0:
