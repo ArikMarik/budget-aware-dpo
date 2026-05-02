@@ -643,14 +643,12 @@ def split_pairs_by_problem(
 
     Stratifies by problem-level complexity (majority complexity among pairs for each problem).
     """
-    import numpy as np
     from sklearn.model_selection import train_test_split
 
     set_seed(seed)
 
-
     if filtered_indices is None:
-        filtered_indices = np.arange(len(pairs)).tolist()
+        filtered_indices = np.arange(len(pairs["problem_id"])).tolist()
 
     problem_ids = pairs["problem_id"].numpy()[filtered_indices]
     complexities = pairs["complexity"].numpy()[filtered_indices]
@@ -665,7 +663,7 @@ def split_pairs_by_problem(
         first_idx = np.where(problem_ids == pid)[0][0]
         problem_to_complexity_and_sources[pid] = (complexities[first_idx], problem_sources[first_idx])
 
-    problem_strata = np.array(problem_to_complexity_and_sources[p] for p in unique_problems)
+    problem_strata = np.array([problem_to_complexity_and_sources[p] for p in unique_problems])
 
     # Stratified split
     if len(unique_problems) > max_unique_problems:
@@ -683,8 +681,7 @@ def split_pairs_by_problem(
     )
 
     # Single loop - assign to train or val
-    train_indices = []
-    val_indices = []
+    train_indices, val_indices = [], []
     for i, pid in enumerate(problem_ids):
         if pid in unique_train_problem_ids:
             train_indices.append(filtered_indices[i])
