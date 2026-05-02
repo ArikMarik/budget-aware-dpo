@@ -630,11 +630,157 @@ def load_jsonl(path: Path) -> list[dict]:
     return data
 
 
+def safe_stratified_split(
+    *arrays: np.ndarray,
+    strata: np.ndarray,
+    test_size: float | int | None = None,
+    train_size: float | int | None = None,
+    random_state: int | None = None,
+) -> tuple[np.ndarray, ...]:
+    """
+    Split multiple arrays handling single-member strata gracefully.
+
+    Accepts variadic arrays (e.g., problems, strata, metadata) and splits them
+    identically by stratifying on the `strata` array, handling single-member strata
+    by splitting them randomly.
+    """
+    from sklearn.model_selection import train_test_split
+    from tqdm import tqdm
+
+    if not arrays:
+        raise ValueError("At least one array must be provided")
+
+    total_items = len(arrays[0])
+    for arr in arrays:
+        if len(arr) != total_items:
+            raise ValueError("All arrays must have the same length")
+
+    # Calculate test count
+    if test_size is not None and train_size is not None:
+        raise ValueError("Cannot specify both test_size and train_size")
+    if test_size is not None:
+        test_item_count = int(total_items * test_size) if isinstance(test_size, float) else test_size
+    elif train_size is not None:
+        train_item_count = int(total_items * train_size) if isinstance(train_size, float) else train_size
+        test_item_count = total_items - train_item_count
+    else:
+        raise ValueError("Must specify either test_size or train_size")
+
+    # Count items per stratum using np.unique with axis=0 and return_counts
+    unique_stratum_values, stratum_counts = np.unique(strata, axis=0, return_counts=True)
+    stratum_to_count_mapping = {
+        tuple(stratum_value): count
+        for stratum_value, count in zip(unique_stratum_values, stratum_counts)
+    }
+
+    # Separate multi-member vs single-member strata
+    multi_member_mask = np.array([
+        stratum_to_count_mapping.get(tuple(stratum_value), 0) >= 2
+        for stratum_value in tqdm(strata, desc="Checking stratum membership", unit=" strata")
+    ])
+
+    multi_member_indices = np.where(multi_member_mask)[0]
+    single_member_indices = np.where(~multi_member_mask)[0]
+
+    multi_member_strata = strata[multi_member_mask]
+    single_member_strata = strata[~multi_member_mask]
+
+    # Allocate test count proportionally, but ensure minimum for stratification
+    if len(multi_member_indices) > 0:
+        # Count unique strata in multi-member group
+        unique_multi_strata, multi_strata_counts = np.unique(multi_member_strata, axis=0, return_counts=True)
+        num_multi_classes = len(unique_multi_strata)
+
+        # Calculate proportional test count
+        proportional_test_count = round(test_item_count * len(multi_member_indices) / total_items)
+
+        # Check if stratified split is possible (need at least 2 per class: 1 train, 1 test)
+        min_for_stratify = num_multi_classes * 2
+
+        if len(multi_member_indices) >= min_for_stratify:
+            # Ensure test count >= num_classes and train count >= num_classes
+            multi_member_test_count = max(num_multi_classes, min(proportional_test_count, len(multi_member_indices) - num_multi_classes))
+            multi_member_test_count = max(0, min(multi_member_test_count, len(multi_member_indices)))
+        else:
+            # Not enough samples for stratification, will use random split
+            multi_member_test_count = max(0, min(proportional_test_count, len(multi_member_indices)))
+    else:
+        multi_member_test_count = 0
+
+    # Split multi-member: use stratification if possible, else random
+    if len(multi_member_indices) > 0 and 0 < multi_member_test_count < len(multi_member_indices):
+        # Check if we can use stratified split
+        unique_multi_strata = np.unique(multi_member_strata, axis=0)
+        num_multi_classes = len(unique_multi_strata)
+
+        can_stratify = (
+            len(multi_member_indices) - multi_member_test_count >= num_multi_classes and
+            multi_member_test_count >= num_multi_classes
+        )
+
+        if can_stratify:
+            multi_member_train_indices, multi_member_test_indices = train_test_split(
+                multi_member_indices,
+                test_size=multi_member_test_count / len(multi_member_indices),
+                stratify=multi_member_strata,
+                random_state=random_state
+            )
+        else:
+            # Fall back to random split
+            multi_member_train_indices, multi_member_test_indices = train_test_split(
+                multi_member_indices,
+                test_size=multi_member_test_count / len(multi_member_indices),
+                random_state=random_state
+            )
+    elif len(multi_member_indices) > 0:
+        multi_member_train_indices, multi_member_test_indices = (
+            (multi_member_indices, np.array([])) if multi_member_test_count == 0
+            else (np.array([]), multi_member_indices)
+        )
+    else:
+        multi_member_train_indices, multi_member_test_indices = np.array([]), np.array([])
+
+    single_member_test_count = test_item_count - multi_member_test_count
+
+    # Split single-member indices randomly
+    if len(single_member_indices) > 0 and 0 < single_member_test_count < len(single_member_indices):
+        single_member_train_indices, single_member_test_indices = train_test_split(
+            single_member_indices,
+            test_size=single_member_test_count / len(single_member_indices),
+            random_state=random_state
+        )
+    elif len(single_member_indices) > 0:
+        single_member_train_indices, single_member_test_indices = (
+            (single_member_indices, np.array([])) if single_member_test_count == 0
+            else (np.array([]), single_member_indices)
+        )
+    else:
+        single_member_train_indices, single_member_test_indices = np.array([]), np.array([])
+
+    # Combine indices
+    combined_train_indices = np.concatenate([
+        np.array(multi_member_train_indices, dtype=int),
+        np.array(single_member_train_indices, dtype=int)
+    ])
+    combined_test_indices = np.concatenate([
+        np.array(multi_member_test_indices, dtype=int),
+        np.array(single_member_test_indices, dtype=int)
+    ])
+
+    # Split all arrays using the combined indices
+    result = []
+    for arr in tqdm(arrays, desc="Splitting arrays", unit=" array"):
+        result.append(arr[combined_train_indices])
+        result.append(arr[combined_test_indices])
+
+    return tuple(result)
+
+
 def split_pairs_by_problem(
     pairs: dict,
     val_split: float,
     seed: int = SEED,
-    filtered_indices: list[int] | None = None,
+    filtered_indices: list[int] | np.ndarray | None = None,
     max_unique_problems: int = 100_000
 ) -> tuple[list[int], list[int]]:
     """
@@ -643,12 +789,13 @@ def split_pairs_by_problem(
 
     Stratifies by problem-level complexity (majority complexity among pairs for each problem).
     """
-    from sklearn.model_selection import train_test_split
-
     set_seed(seed)
 
+    num_pairs = len(pairs["problem_id"])
     if filtered_indices is None:
-        filtered_indices = np.arange(len(pairs["problem_id"])).tolist()
+        filtered_indices = np.arange(num_pairs)
+    else:
+        filtered_indices = np.array(filtered_indices)
 
     problem_ids = pairs["problem_id"].numpy()[filtered_indices]
     complexities = pairs["complexity"].numpy()[filtered_indices]
@@ -659,37 +806,40 @@ def split_pairs_by_problem(
 
     # Build problem -> complexity and source mapping (pick first sample's complexity)
     problem_to_complexity_and_sources = {}
-    for pid in unique_problems:
-        first_idx = np.where(problem_ids == pid)[0][0]
-        problem_to_complexity_and_sources[pid] = (complexities[first_idx], problem_sources[first_idx])
+    iterator = tqdm(problem_ids, desc='Build problem -> complexity and source mapping')
+    for i, pid in enumerate(iterator):
+        if pid not in problem_to_complexity_and_sources:
+            problem_to_complexity_and_sources[pid] = (complexities[i], problem_sources[i])
+            if len(problem_to_complexity_and_sources) >= len(unique_problems):
+                iterator.close()
+                break
 
     problem_strata = np.array([problem_to_complexity_and_sources[p] for p in unique_problems])
 
-    # Stratified split
+    # Safe stratified split (handles single-member strata)
     if len(unique_problems) > max_unique_problems:
-        unique_problems, discarded_problems, problem_strata, discarded_problem_strata = train_test_split(
-        unique_problems, problem_strata,
-        train_size=max_unique_problems,
-        stratify=problem_strata,
-        random_state=seed,
-    )
-    unique_train_problem_ids, unique_val_problem_ids = train_test_split(
+        unique_problems, discarded_problems, problem_strata, discarded_problem_strata = safe_stratified_split(
+            unique_problems, problem_strata,
+            strata=problem_strata,
+            train_size=max_unique_problems,
+            random_state=seed,
+        )
+
+    unique_train_problem_ids, unique_val_problem_ids = safe_stratified_split(
         unique_problems,
+        strata=problem_strata,
         test_size=val_split,
-        stratify=problem_strata,
         random_state=seed,
     )
 
     # Single loop - assign to train or val
-    train_indices, val_indices = [], []
-    for i, pid in enumerate(problem_ids):
-        if pid in unique_train_problem_ids:
-            train_indices.append(filtered_indices[i])
-        elif pid in unique_val_problem_ids:
-            val_indices.append(filtered_indices[i])
+    train_mask = np.isin(problem_ids, unique_train_problem_ids)
+    val_mask = np.isin(problem_ids, unique_val_problem_ids)
+    train_indices = filtered_indices[train_mask].tolist()
+    val_indices = filtered_indices[val_mask].tolist()
 
     logger.info(
-        f"Data split, filtered indices: {len(filtered_indices):,} out of {len(pairs):,} pairs\n\t"
+        f"Data split, filtered indices: {len(filtered_indices):,} out of {num_pairs:,} pairs\n\t"
         f"max_unique_problems={max_unique_problems}): "
         f"Train (unique problems)={len(unique_train_problem_ids)}, Val (unique problems)={len(unique_val_problem_ids)}"
     )
