@@ -652,9 +652,9 @@ def split_pairs_by_problem(
     if filtered_indices is None:
         filtered_indices = np.arange(len(pairs)).tolist()
 
-    problem_ids = pairs["problem_ids"].numpy()[filtered_indices]
-    complexities = pairs["complexities"].numpy()[filtered_indices]
-    problem_sources = pairs["problem_sources"].numpy()[filtered_indices]
+    problem_ids = pairs["problem_id"].numpy()[filtered_indices]
+    complexities = pairs["complexity"].numpy()[filtered_indices]
+    problem_sources = pairs["problem_source"].numpy()[filtered_indices]
 
     # Get unique problems
     unique_problems = np.unique(problem_ids)

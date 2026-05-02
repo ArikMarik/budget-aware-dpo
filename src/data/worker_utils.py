@@ -228,13 +228,13 @@ def _tokenize_pair_batch(
     return {
         "chosen_input_ids": [torch.tensor(enc, dtype=torch.long) for enc in chosen_tok["input_ids"]],
         "rejected_input_ids": [torch.tensor(enc, dtype=torch.long) for enc in rejected_tok["input_ids"]],
-        "complexities": torch.tensor(complexities_batch, dtype=torch.long),
+        "complexity": torch.tensor(complexities_batch, dtype=torch.long),
         "rejection_reason": torch.tensor(rejection_reason_batch, dtype=torch.long),
         "chosen_length": torch.tensor(chosen_length_batch, dtype=torch.long),
         "rejected_length": torch.tensor(rejected_length_batch, dtype=torch.long),
-        "problem_ids": torch.tensor(problem_ids_batch, dtype=torch.long),
-        "prompt_lengths": torch.tensor(prompt_lengths, dtype=torch.long),
-        "problem_sources": torch.tensor(source_batch, dtype=torch.long),
+        "problem_id": torch.tensor(problem_ids_batch, dtype=torch.long),
+        "prompt_length": torch.tensor(prompt_lengths, dtype=torch.long),
+        "problem_source": torch.tensor(source_batch, dtype=torch.long),
     }
 
 
@@ -267,13 +267,13 @@ def _tokenize_shard(args: tuple) -> dict:
 
         chosen_input_ids_all.extend(result["chosen_input_ids"])
         rejected_input_ids_all.extend(result["rejected_input_ids"])
-        complexities_all.append(result["complexities"])
+        complexities_all.append(result["complexity"])
         rejection_reason_all.append(result["rejection_reason"])
         chosen_length_all.append(result["chosen_length"])
         rejected_length_all.append(result["rejected_length"])
-        problem_ids_all.append(result["problem_ids"])
-        prompt_lengths_all.append(result["prompt_lengths"])
-        problem_sources_all.append(result["problem_sources"])
+        problem_ids_all.append(result["problem_id"])
+        prompt_lengths_all.append(result["prompt_length"])
+        problem_sources_all.append(result["problem_source"])
 
     # OPTION A: write shard result to a temp file and return only the path.
     # Returning 100K individual PyTorch tensors through the multiprocessing pipe
@@ -286,13 +286,13 @@ def _tokenize_shard(args: tuple) -> dict:
         "shard_idx": shard_idx,
         "chosen_input_ids": chosen_input_ids_all,
         "rejected_input_ids": rejected_input_ids_all,
-        "complexities": torch.cat(complexities_all),
+        "complexity": torch.cat(complexities_all),
         "rejection_reason": torch.cat(rejection_reason_all),
         "chosen_length": torch.cat(chosen_length_all),
         "rejected_length": torch.cat(rejected_length_all),
-        "problem_ids": torch.cat(problem_ids_all),
-        "prompt_lengths": torch.cat(prompt_lengths_all),
-        "problem_sources": torch.cat(problem_sources_all),
+        "problem_id": torch.cat(problem_ids_all),
+        "prompt_length": torch.cat(prompt_lengths_all),
+        "problem_source": torch.cat(problem_sources_all),
     }
     tmp_path = os.path.join(tempfile.gettempdir(), f"dpo_shard_{shard_idx}_{os.getpid()}.pt")
     torch.save(shard_data, tmp_path)
@@ -308,13 +308,13 @@ def _tokenize_shard(args: tuple) -> dict:
     #     "shard_idx": shard_idx,
     #     "chosen_input_ids": chosen_input_ids_all,
     #     "rejected_input_ids": rejected_input_ids_all,
-    #     "complexities": torch.cat(complexities_all),
+    #     "complexity": torch.cat(complexities_all),
     #     "rejection_reason": torch.cat(rejection_reason_all),
     #     "chosen_length": torch.cat(chosen_length_all),
     #     "rejected_length": torch.cat(rejected_length_all),
-    #     "problem_ids": torch.cat(problem_ids_all),
-    #     "prompt_lengths": torch.cat(prompt_lengths_all),
-    #     "problem_sources": torch.cat(problem_sources_all),
+    #     "problem_id": torch.cat(problem_ids_all),
+    #     "prompt_length": torch.cat(prompt_lengths_all),
+    #     "problem_source": torch.cat(problem_sources_all),
     # }
 
 
@@ -360,13 +360,13 @@ def tokenize_dpo_pairs_parallel(
     def _merge_shard(result: dict) -> None:
         all_chosen_input_ids.extend(result["chosen_input_ids"])
         all_rejected_input_ids.extend(result["rejected_input_ids"])
-        all_complexities.append(result["complexities"])
+        all_complexities.append(result["complexity"])
         all_rejection_reason.append(result["rejection_reason"])
         all_chosen_length.append(result["chosen_length"])
         all_rejected_length.append(result["rejected_length"])
-        all_problem_ids.append(result["problem_ids"])
-        all_prompt_lengths.append(result["prompt_lengths"])
-        all_problem_sources.append(result["problem_sources"])
+        all_problem_ids.append(result["problem_id"])
+        all_prompt_lengths.append(result["prompt_length"])
+        all_problem_sources.append(result["problem_source"])
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {executor.submit(_tokenize_shard, args): args for args in shard_args}
@@ -410,13 +410,13 @@ def tokenize_dpo_pairs_parallel(
         {
             "chosen_input_ids": final_chosen,
             "rejected_input_ids": final_rejected,
-            "complexities": final_complexities,
+            "complexity": final_complexities,
             "rejection_reason": final_rejection_reason,
             "chosen_length": final_chosen_length,
             "rejected_length": final_rejected_length,
-            "problem_ids": final_problem_ids,
-            "prompt_lengths": final_prompt_lengths,
-            "problem_sources": final_problem_sources,
+            "problem_id": final_problem_ids,
+            "prompt_length": final_prompt_lengths,
+            "problem_source": final_problem_sources,
             "pad_token_id": pad_token_id,
         },
         output_path,
