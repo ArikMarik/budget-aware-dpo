@@ -72,7 +72,7 @@ GRID_SEARCH_SPACE: dict[str, list[Any]] = {
     "lambda_easy":                 [0.01, 0.05, 0.1],
     "lambda_hard":                 [0.001, 0.01, 0.03],
     "kl_penalty_weight":           [0.0, 0.01, 0.1],
-    "batch_size":                  [4, 8],   # bs=8 is safe after LoRA + seq-len fixes
+    "batch_size":                  [8, 16],
     "gradient_accumulation_steps": [2, 4],   # effective bs = physical bs × grad_accum; bs=8 × 4 = bs=32 matches literature
     "loss_type":                   ["dpo"],
     "length_ratio_easy":           [1.5, 2.0, 3.0, 4.0],
@@ -134,6 +134,13 @@ def _compute_objective(
     if objective == "val_loss":
         val_loss = float(best_metrics.get("val_loss", INFEASIBLE) or INFEASIBLE)
         return val_loss
+    if objective == "efficiency":
+        # efficiency = accuracy / (mean_gen_length / max_new_tokens): correct answers per token budget.
+        # Higher is better → negate for Optuna minimization.
+        efficiency = float(best_metrics.get("gen/efficiency", 0.0) or 0.0)
+        if not math.isfinite(efficiency) or efficiency == 0.0:
+            return INFEASIBLE
+        return -efficiency
     if objective == "composite":
         # lower tpca is better; accuracy pulls it down. α weights accuracy.
         alpha = 500.0  # 1% accuracy ≈ 5 tokens of tpca
@@ -149,7 +156,7 @@ def _sample_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
         "lambda_easy":                 trial.suggest_float("lambda_easy", 1e-3, 0.3, log=True),
         "lambda_hard":                 trial.suggest_float("lambda_hard", 1e-4, 0.1, log=True),
         "kl_penalty_weight":           trial.suggest_float("kl_penalty_weight", 1e-4, 1.0, log=True),
-        "batch_size":                  trial.suggest_categorical("batch_size", [4, 8]),
+        "batch_size":                  trial.suggest_categorical("batch_size", [8, 16]),
         "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
         "loss_type":                   trial.suggest_categorical("loss_type", LOSS_TYPES),
         "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.0, 5.0),
@@ -364,8 +371,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--model", type=str, default=None)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--no-mixed-precision", action="store_true")
-    p.add_argument("--max-unique-problems", type=int, default=500,
-                   help="Cap unique problems loaded per trial (controls trial length). Default 500.")
+    p.add_argument("--max-unique-problems", type=int, default=1250,
+                   help="Cap unique problems loaded per trial (controls trial length). Default 1250.")
     p.add_argument("--max-seq-len", type=int, default=1536,
                    help="Drop pairs where max(chosen, rejected) token length > this. Default 1536.")
     p.add_argument("--val-gen-batch-size", type=int, default=8,
@@ -377,8 +384,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
     # Objective
     p.add_argument("--objective",
-                   choices=["tpca", "tokens_easy", "accuracy", "val_loss", "composite"],
-                   default="val_loss")
+                   choices=["tpca", "tokens_easy", "accuracy", "val_loss", "composite", "efficiency"],
+                   default="efficiency")
     p.add_argument("--accuracy-floor", type=float, default=0.10,
                    help="Trials with gen/accuracy_easy below this are infeasible (+inf).")
 

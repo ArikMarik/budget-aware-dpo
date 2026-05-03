@@ -575,9 +575,9 @@ def build_dpo_pairs(
 
     pairs: list[dict] = []
 
-    i = 0
+    # i = 0
     for normalized_problem, items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
-        i += 1
+        # i += 1
         preferred, rejected = [], []
         for x in items:
             (preferred if x["label"] == "preferred" else rejected).append(x)
@@ -614,8 +614,8 @@ def build_dpo_pairs(
 
             pairs.extend(problem_pairs)
 
-        if i >= 10_000:
-            break
+        # if i >= 200_000:
+        #     break
 
     logger.info(f'Created a total of {len(pairs):,} pairs (skipped by length ratio: {skipped_ratio:,})')
 
@@ -881,6 +881,8 @@ def compute_statistics(
     rejected_length_sum_easy = 0
     chosen_length_sum_hard = 0
     rejected_length_sum_hard = 0
+    num_easy_problems = 0
+    num_hard_problems = 0
 
     # For histograms
     ratios_easy = []
@@ -888,9 +890,16 @@ def compute_statistics(
     pairs_per_problem: dict[int, int] = defaultdict(int)
 
     for p in pairs_iter:
-        pairs_per_problem[p["problem_id"]] += 1
+        problem_id = p["problem_id"]
+        pairs_per_problem[problem_id] += 1
         rejection_reason = p["rejection_reason"]
         complexity = p["complexity"]
+
+        if pairs_per_problem[p["problem_id"]] == 1:
+            if complexity == 1:
+                num_hard_problems += 1
+            else:
+                num_easy_problems += 1
 
         if rejection_reason == REJECTION_REASONS['incorrect']:
             rej_correctness += 1
@@ -972,6 +981,8 @@ def compute_statistics(
         "easy_preferred_percentile_high": EASY_PREF_PCT_HIGH,
         "hard_preferred_percentile_low": HARD_PREF_PCT_LOW,
         "hard_preferred_percentile_high": HARD_PREF_PCT_HIGH,
+        "easy_problems": num_easy_problems,
+        "hard_problems": num_hard_problems,
         "total_pairs": total,
         "rejected_by_correctness": rej_correctness,
         "rejected_by_length": rej_length,

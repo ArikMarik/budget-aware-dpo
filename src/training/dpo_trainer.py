@@ -149,9 +149,6 @@ class MetricsAccumulator:
         self.total_reward_diff_hard = torch.zeros((), device=self.device)
         self.total_complexity_0 = torch.zeros((), device=self.device)
         self.total_complexity_1 = torch.zeros((), device=self.device)
-        self.total_accuracy = torch.zeros((), device=self.device)
-        self.total_accuracy_easy = torch.zeros((), device=self.device)
-        self.total_accuracy_hard = torch.zeros((), device=self.device)
         self.total_chosen_easy = torch.zeros((), device=self.device)
         self.total_chosen_hard = torch.zeros((), device=self.device)
         self.total_rejected_easy = torch.zeros((), device=self.device)
@@ -179,17 +176,12 @@ class MetricsAccumulator:
         easy_count = mask_easy.sum()
         hard_count = mask_hard.sum()
 
-        batch_accuracy = (reward_diff_per_sample > 0).float()
-
         self.total_loss += loss.detach()
         self.total_reward_diff += reward_diff_per_sample.mean().detach()
         self.total_reward_diff_easy += (reward_diff_per_sample * mask_easy).sum().detach() / easy_count.clamp(min=1)
         self.total_reward_diff_hard += (reward_diff_per_sample * mask_hard).sum().detach() / hard_count.clamp(min=1)
         self.total_complexity_0 += (per_sample_loss * mask_easy).sum() / easy_count.clamp(min=1)
         self.total_complexity_1 += (per_sample_loss * mask_hard).sum() / hard_count.clamp(min=1)
-        self.total_accuracy += batch_accuracy.mean().detach()
-        self.total_accuracy_easy += (batch_accuracy * mask_easy).sum().detach() / easy_count.clamp(min=1)
-        self.total_accuracy_hard += (batch_accuracy * mask_hard).sum().detach() / hard_count.clamp(min=1)
         self.total_chosen_tokens += chosen_lens.mean().detach()
         self.total_rejected_tokens += rejected_lens.mean().detach()
         self.total_chosen_easy += (chosen_lens * mask_easy).sum().detach()
@@ -211,9 +203,6 @@ class MetricsAccumulator:
         result = {
             "reward_diff_easy": self.total_reward_diff_easy.item() / n,
             "reward_diff_hard": self.total_reward_diff_hard.item() / n,
-            "accuracy": self.total_accuracy.item() / n,
-            "accuracy_easy": self.total_accuracy_easy.item() / n,
-            "accuracy_hard": self.total_accuracy_hard.item() / n,
             "avg_chosen_tokens_easy": self.total_chosen_easy.item() / easy_n,
             "avg_chosen_tokens_hard": self.total_chosen_hard.item() / hard_n,
             "avg_rejected_tokens_easy": self.total_rejected_easy.item() / easy_n,
@@ -249,9 +238,6 @@ class MetricsAccumulator:
             "val/reward_diff_hard": (self.total_reward_diff_hard / n).cpu().item(),
             "val/complexity_0_loss": (self.total_complexity_0 / n).cpu().item(),
             "val/complexity_1_loss": (self.total_complexity_1 / n).cpu().item(),
-            "val/accuracy": (self.total_accuracy / n).cpu().item(),
-            "val/accuracy_easy": (self.total_accuracy_easy / n).cpu().item(),
-            "val/accuracy_hard": (self.total_accuracy_hard / n).cpu().item(),
             "val/avg_chosen_tokens_easy": self.total_chosen_easy.cpu().item() / easy_n,
             "val/avg_chosen_tokens_hard": self.total_chosen_hard.cpu().item() / hard_n,
             "val/avg_rejected_tokens_easy": self.total_rejected_easy.cpu().item() / easy_n,
@@ -588,16 +574,11 @@ def _compute_batch_forward(
     prompt_lengths: Optional[torch.Tensor] = None,
 ) -> tuple:
     with torch.no_grad():
-        ref_chosen = ref_model(input_ids=chosen_ids, attention_mask=chosen_mask).logits
-        ref_rejected = ref_model(input_ids=rejected_ids, attention_mask=rejected_mask).logits
+        ref_chosen_lp = log_prob(ref_model(input_ids=chosen_ids, attention_mask=chosen_mask).logits, chosen_ids, chosen_mask, prompt_lengths)
+        ref_rejected_lp = log_prob(ref_model(input_ids=rejected_ids, attention_mask=rejected_mask).logits, rejected_ids, rejected_mask, prompt_lengths)
 
-    policy_chosen = model(input_ids=chosen_ids, attention_mask=chosen_mask).logits
-    policy_rejected = model(input_ids=rejected_ids, attention_mask=rejected_mask).logits
-
-    policy_chosen_lp = log_prob(policy_chosen, chosen_ids, chosen_mask, prompt_lengths)
-    policy_rejected_lp = log_prob(policy_rejected, rejected_ids, rejected_mask, prompt_lengths)
-    ref_chosen_lp = log_prob(ref_chosen, chosen_ids, chosen_mask, prompt_lengths)
-    ref_rejected_lp = log_prob(ref_rejected, rejected_ids, rejected_mask, prompt_lengths)
+    policy_chosen_lp = log_prob(model(input_ids=chosen_ids, attention_mask=chosen_mask).logits, chosen_ids, chosen_mask, prompt_lengths)
+    policy_rejected_lp = log_prob(model(input_ids=rejected_ids, attention_mask=rejected_mask).logits, rejected_ids, rejected_mask, prompt_lengths)
 
     chosen_lens = (chosen_ids != tokenizer.pad_token_id).sum(dim=-1).float()
     rejected_lens = (rejected_ids != tokenizer.pad_token_id).sum(dim=-1).float()
@@ -650,6 +631,7 @@ def _compute_val_accuracy(
 
     easy_results, hard_results = [], []
     correct_count = defaultdict(int)
+    tokens_count = defaultdict(int)
     for r in results:
         if r["complexity"] == 1:
             hard_results.append(r)
@@ -657,20 +639,37 @@ def _compute_val_accuracy(
             easy_results.append(r)
 
         correct_count[r['complexity']] += r["correct"]
+        tokens_count[(r['complexity'], r["correct"])] += r["tokens"]
 
     accuracy = sum(correct_count.values()) / max(len(results), 1)
     accuracy_easy = correct_count[0] / max(len(easy_results), 1)
     accuracy_hard = correct_count[1] / max(len(hard_results), 1)
 
+    tpca = (tokens_count[(0, True)] + tokens_count[(1, True)]) / (correct_count[0] + correct_count[1]) if (correct_count[0] + correct_count[1]) > 0 else 0.0
+    tpca_easy = tokens_count[(0, True)] / correct_count[0] if correct_count[0] > 0 else 0.0
+    tpca_hard = tokens_count[(1, True)] / correct_count[1] if correct_count[1] > 0 else 0.0
+
+    mean_gen_length = sum(r["tokens"] for r in results) / max(len(results), 1)
+    # efficiency = correct fraction per unit of token budget spent (higher is better).
+    # Normalizing by max_new_tokens makes the scale independent of the budget setting.
+    efficiency = accuracy / (mean_gen_length / max_new_tokens) if mean_gen_length > 0 else 0.0
+
     val_accuracy = {
         "val/accuracy": accuracy,
         "val/accuracy_easy": accuracy_easy,
         "val/accuracy_hard": accuracy_hard,
+        "val/tpca": tpca,
+        "val/tpca_easy": tpca_easy,
+        "val/tpca_hard": tpca_hard,
+        "val/token_easy": (tokens_count[(0, False)] + tokens_count[(0, True)]) / len(easy_results) if len(easy_results) > 0 else 0.0,
+        "val/token_hard": (tokens_count[(1, False)] + tokens_count[(1, True)]) / len(hard_results) if len(hard_results) > 0 else 0.0,
+        "val/mean_gen_length": mean_gen_length,
+        "val/efficiency": efficiency,
     }
 
     logger.info(
-        "Epoch %d val accuracy: %.4f (easy=%.4f, hard=%.4f)",
-        epoch, accuracy, accuracy_easy, accuracy_hard
+        "Epoch %d val accuracy: %.4f (easy=%.4f, hard=%.4f), mean_gen_length=%.1f, efficiency=%.4f",
+        epoch, accuracy, accuracy_easy, accuracy_hard, mean_gen_length, efficiency,
     )
 
     if use_wandb:
@@ -1116,9 +1115,6 @@ def train_dpo(
     )
     loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
 
-    # TODO - what is it used for
-    # Load generation eval problems once (50 easy + 50 hard)
-    # gen_eval_problems = _load_gen_eval_problems(n_easy=50, n_hard=50)
 
     for epoch in range(1, max_epochs + 1):
         epoch_metrics = _run_epoch(
@@ -1249,19 +1245,6 @@ def _get_best_value_for_epoch(
     raise ValueError(f"Unsupported best_model_metric: {best_model_metric}")
 
 
-def _load_gen_eval_problems(n_easy: int = 50, n_hard: int = 50) -> list[dict]:
-    """Load a balanced set of eval problems for generation-based validation."""
-    all_problems = load_eval_problems(limit=None)
-    easy = [p for p in all_problems if p["complexity"] == 0][:n_easy]
-    hard = [p for p in all_problems if p["complexity"] == 1][:n_hard]
-    problems = easy + hard
-    logger.info(
-        "Loaded %d gen-eval problems (%d easy, %d hard)",
-        len(problems), len(easy), len(hard),
-    )
-    return problems
-
-
 def _build_extra_wandb_dict(
     accum: MetricsAccumulator,
     n: int,
@@ -1272,9 +1255,6 @@ def _build_extra_wandb_dict(
     result = {
         "reward_diff_easy": accum.total_reward_diff_easy.item() / n,
         "reward_diff_hard": accum.total_reward_diff_hard.item() / n,
-        "accuracy": accum.total_accuracy.item() / n,
-        "accuracy_easy": accum.total_accuracy_easy.item() / n,
-        "accuracy_hard": accum.total_accuracy_hard.item() / n,
         "avg_chosen_tokens_easy": accum.total_chosen_easy.item() / easy_n,
         "avg_chosen_tokens_hard": accum.total_chosen_hard.item() / hard_n,
         "avg_rejected_tokens_easy": accum.total_rejected_easy.item() / easy_n,
@@ -1497,7 +1477,7 @@ def _update_best_model(
             best_model_metric,
             float(accuracy_floor or 0.0),
             val_loss,
-            float((epoch_metrics.get("gen_metrics") or {}).get("gen/accuracy_easy", float("nan"))),
+            float((epoch_metrics.get("val_accuracy") or {}).get("val/accuracy_easy", float("nan"))),
         )
         return best_val_loss, best_model_state, best_epoch, best_epoch_metrics
 
@@ -1514,19 +1494,22 @@ def _update_best_model(
         should_update = (prev_value is None) or (float(candidate_value) < float(prev_value))
 
     if should_update:
-        gen_metrics = epoch_metrics.get("gen_metrics") or {}
+        val_acc = epoch_metrics.get("val_accuracy") or {}
         best_epoch_metrics = {
             "val_loss": val_loss,
-            "gen/accuracy": float(gen_metrics.get("gen/accuracy", float("nan"))),
-            "gen/accuracy_easy": float(gen_metrics.get("gen/accuracy_easy", float("nan"))),
-            "gen/avg_tokens_easy": float(gen_metrics.get("gen/avg_tokens_easy", float("nan"))),
-            "gen/tpca": float(gen_metrics.get("gen/tpca", float("nan"))),
+            "gen/accuracy": float(val_acc.get("val/accuracy", float("nan"))),
+            "gen/accuracy_easy": float(val_acc.get("val/accuracy_easy", float("nan"))),
+            "gen/avg_tokens_easy": float(val_acc.get("val/token_easy", float("nan"))),
+            "gen/tpca": float(val_acc.get("val/tpca", float("nan"))),
+            "gen/mean_gen_length": float(val_acc.get("val/mean_gen_length", float("nan"))),
+            "gen/efficiency": float(val_acc.get("val/efficiency", float("nan"))),
         }
         best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         best_epoch = epoch
         logger.info(
             "New best model by metric=%s at epoch %d (value=%.4f). "
-            "val_loss=%.4f, gen/accuracy=%.4f, gen/accuracy_easy=%.4f, gen/avg_tokens_easy=%.1f, gen/tpca=%.1f",
+            "val_loss=%.4f, gen/accuracy=%.4f, gen/accuracy_easy=%.4f, "
+            "gen/avg_tokens_easy=%.1f, gen/tpca=%.1f, gen/efficiency=%.4f",
             best_model_metric,
             epoch,
             float(candidate_value),
@@ -1535,6 +1518,7 @@ def _update_best_model(
             best_epoch_metrics["gen/accuracy_easy"],
             best_epoch_metrics["gen/avg_tokens_easy"],
             best_epoch_metrics["gen/tpca"],
+            best_epoch_metrics["gen/efficiency"],
         )
 
     return best_val_loss, best_model_state, best_epoch, best_epoch_metrics

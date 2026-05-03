@@ -10,9 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-import torch
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 from src.config import (
     DUMMY_DATASET_PATH,
@@ -31,8 +29,7 @@ from src.data.preprocessing import (
     compute_statistics,
     load_jsonl,
 )
-from src.data.worker_utils import tokenize_and_save, tokenize_dpo_pairs_parallel
-from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
+from src.data.worker_utils import tokenize_and_save
 from src.utils import get_logger, get_model_tokenizer, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)

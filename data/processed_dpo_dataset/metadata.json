@@ -3,27 +3,29 @@
   "easy_preferred_percentile_high": 40.0,
   "hard_preferred_percentile_low": 20.0,
   "hard_preferred_percentile_high": 45.0,
-  "total_pairs": 190874,
-  "rejected_by_correctness": 27,
-  "rejected_by_length": 190847,
-  "rejected_by_correctness_pct": 0.01,
-  "rejected_by_length_pct": 99.99,
-  "easy_pairs": 55514,
-  "hard_pairs": 135360,
-  "correct_easy_pairs": 55505,
-  "correct_hard_pairs": 135342,
-  "incorrect_easy_pairs": 9,
-  "incorrect_hard_pairs": 18,
-  "correct_easy_pairs_pct": 29.08,
-  "correct_hard_pairs_pct": 70.92,
-  "incorrect_easy_pairs_pct": 33.33,
-  "incorrect_hard_pairs_pct": 66.67,
-  "avg_chosen_length_easy": 146.2,
-  "avg_rejected_length_easy": 272.89,
-  "avg_chosen_length_hard": 261.19,
-  "avg_rejected_length_hard": 496.58,
-  "avg_length_ratio_easy": 1.86,
-  "avg_length_ratio_hard": 1.95,
+  "easy_problems": 125718,
+  "hard_problems": 383708,
+  "total_pairs": 7834674,
+  "rejected_by_correctness": 160,
+  "rejected_by_length": 7834514,
+  "rejected_by_correctness_pct": 0.0,
+  "rejected_by_length_pct": 100.0,
+  "easy_pairs": 2291055,
+  "hard_pairs": 5543619,
+  "correct_easy_pairs": 2291012,
+  "correct_hard_pairs": 5543502,
+  "incorrect_easy_pairs": 43,
+  "incorrect_hard_pairs": 117,
+  "correct_easy_pairs_pct": 29.24,
+  "correct_hard_pairs_pct": 70.76,
+  "incorrect_easy_pairs_pct": 26.88,
+  "incorrect_hard_pairs_pct": 73.12,
+  "avg_chosen_length_easy": 156.9,
+  "avg_rejected_length_easy": 302.07,
+  "avg_chosen_length_hard": 283.27,
+  "avg_rejected_length_hard": 552.02,
+  "avg_length_ratio_easy": 1.93,
+  "avg_length_ratio_hard": 2.03,
   "length_ratio_histogram": {
     "complexity_easy": {
       "bins": [
@@ -67,13 +69,13 @@
       "counts": [
         0,
         0,
-        44459,
-        6624,
-        2151,
-        923,
-        438,
-        510,
-        254
+        1747683,
+        300647,
+        107109,
+        52074,
+        29029,
+        29638,
+        17212
       ]
     },
     "complexity_hard": {
@@ -118,43 +120,43 @@
       "counts": [
         0,
         0,
-        96170,
-        24457,
-        7912,
-        3214,
-        1506,
-        1304,
-        502
+        3686626,
+        1061386,
+        396799,
+        178949,
+        89715,
+        77398,
+        35423
       ]
     }
   },
   "length_ratio_cumulative": {
     "complexity_easy": {
-      "ratio_gte_[5.5, inf)": 254,
-      "ratio_gte_[4, inf)": 764,
-      "ratio_gte_[3.5, inf)": 1202,
-      "ratio_gte_[3, inf)": 2125,
-      "ratio_gte_[2.5, inf)": 4276,
-      "ratio_gte_[2, inf)": 10900,
-      "ratio_gte_[1.5, inf)": 55359,
-      "ratio_gte_[1, inf)": 55359,
-      "ratio_gte_[0, inf)": 55359
+      "ratio_gte_[5.5, inf)": 17212,
+      "ratio_gte_[4, inf)": 46850,
+      "ratio_gte_[3.5, inf)": 75879,
+      "ratio_gte_[3, inf)": 127953,
+      "ratio_gte_[2.5, inf)": 235062,
+      "ratio_gte_[2, inf)": 535709,
+      "ratio_gte_[1.5, inf)": 2283392,
+      "ratio_gte_[1, inf)": 2283392,
+      "ratio_gte_[0, inf)": 2283392
     },
     "complexity_hard": {
-      "ratio_gte_[5.5, inf)": 502,
-      "ratio_gte_[4, inf)": 1806,
-      "ratio_gte_[3.5, inf)": 3312,
-      "ratio_gte_[3, inf)": 6526,
-      "ratio_gte_[2.5, inf)": 14438,
-      "ratio_gte_[2, inf)": 38895,
-      "ratio_gte_[1.5, inf)": 135065,
-      "ratio_gte_[1, inf)": 135065,
-      "ratio_gte_[0, inf)": 135065
+      "ratio_gte_[5.5, inf)": 35423,
+      "ratio_gte_[4, inf)": 112821,
+      "ratio_gte_[3.5, inf)": 202536,
+      "ratio_gte_[3, inf)": 381485,
+      "ratio_gte_[2.5, inf)": 778284,
+      "ratio_gte_[2, inf)": 1839670,
+      "ratio_gte_[1.5, inf)": 5526296,
+      "ratio_gte_[1, inf)": 5526296,
+      "ratio_gte_[0, inf)": 5526296
     }
   },
   "pairs_per_problem": {
-    "unique_problems": 9415,
-    "avg_pairs_per_problem": 20.27,
+    "unique_problems": 509426,
+    "avg_pairs_per_problem": 15.38,
     "max_pairs_per_problem": 25,
     "min_pairs_per_problem": 1,
     "histogram": {
@@ -193,11 +195,11 @@
         ]
       ],
       "counts": [
-        143,
-        499,
-        822,
-        1239,
-        6712,
+        26707,
+        73034,
+        79369,
+        99585,
+        230731,
         0,
         0,
         0
@@ -205,5 +207,5 @@
     }
   },
   "seed": 42,
-  "num_unique_problems": 9415
+  "num_unique_problems": 509426
 }
