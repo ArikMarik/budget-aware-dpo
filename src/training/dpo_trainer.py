@@ -1062,7 +1062,9 @@ def train_dpo(
         threshold=early_stopping_threshold,
         threshold_mode="rel",
     )
-    autocast_dtype = torch.float16 if device == "cuda" else torch.float32
+    # bfloat16 has the same exponent range as float32 so GradScaler is not
+    # needed (and its unscale kernel is not implemented for bf16 — it crashes).
+    autocast_dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
     logger.info("Using model: %s (loss_type=%s)", effective_model_name, loss_type)
     model = create_model(
@@ -1075,7 +1077,7 @@ def train_dpo(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
     loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
-    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda" and autocast_dtype == torch.float16))
 
     # TODO - what is it used for
     # Load generation eval problems once (50 easy + 50 hard)
