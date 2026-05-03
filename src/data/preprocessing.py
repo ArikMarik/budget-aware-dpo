@@ -575,9 +575,9 @@ def build_dpo_pairs(
 
     pairs: list[dict] = []
 
-    # i = 0
+    i = 0
     for normalized_problem, items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
-        # i += 1
+        i += 1
         preferred, rejected = [], []
         for x in items:
             (preferred if x["label"] == "preferred" else rejected).append(x)
@@ -614,8 +614,8 @@ def build_dpo_pairs(
 
             pairs.extend(problem_pairs)
 
-        # if i >= 10_000:
-        #     break
+        if i >= 10_000:
+            break
 
     logger.info(f'Created a total of {len(pairs):,} pairs (skipped by length ratio: {skipped_ratio:,})')
 

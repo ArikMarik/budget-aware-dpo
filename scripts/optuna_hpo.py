@@ -29,8 +29,10 @@ import json
 import math
 import os
 import sys
+import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -95,6 +97,7 @@ class SearchConfig:
     use_wandb: bool
     max_unique_problems: int
     max_seq_len: Optional[int]
+    val_gen_batch_size: int
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +252,7 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
                 max_unique_problems=search.max_unique_problems,
                 max_seq_len=search.max_seq_len,
+                val_gen_batch_size=search.val_gen_batch_size,
                 ctx=ctx,
             )
         except torch.cuda.OutOfMemoryError:
@@ -358,12 +362,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--max-epochs", type=int, default=3)
     p.add_argument("--data-limit", type=int, default=None)
     p.add_argument("--model", type=str, default=None)
-    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--no-mixed-precision", action="store_true")
     p.add_argument("--max-unique-problems", type=int, default=500,
                    help="Cap unique problems loaded per trial (controls trial length). Default 500.")
-    p.add_argument("--max-seq-len", type=int, default=1024,
-                   help="Drop pairs where max(chosen, rejected) token length > this. Default 1024.")
+    p.add_argument("--max-seq-len", type=int, default=1536,
+                   help="Drop pairs where max(chosen, rejected) token length > this. Default 1536.")
+    p.add_argument("--val-gen-batch-size", type=int, default=8,
+                   help="Batch size for val generation (lower = less VRAM spike). Default 8.")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume an existing study by name. Default: always create a fresh study with auto-timestamp.")
     p.add_argument("--baseline", action="store_true",
                    help="Tune baseline DPO (no length penalty) instead of budget-aware")
 
@@ -385,6 +393,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
 
+    # By default, always create a fresh study with a timestamp suffix.
+    # Pass --resume to load an existing study by its exact name.
+    if args.resume:
+        study_name = args.study_name
+        load_if_exists = True
+    else:
+        study_name = f"{args.study_name}_{datetime.now().strftime('%m%d_%H%M%S')}"
+        load_if_exists = False
+
     search = SearchConfig(
         budget_aware=not args.baseline,
         objective=args.objective,
@@ -396,24 +413,25 @@ def main(argv: Optional[list[str]] = None) -> None:
         num_workers=args.num_workers,
         use_mixed_precision=not args.no_mixed_precision,
         output_root=Path(args.output_root),
-        study_name=args.study_name,
+        study_name=study_name,
         use_wandb=args.wandb,
         max_unique_problems=args.max_unique_problems,
         max_seq_len=args.max_seq_len,
+        val_gen_batch_size=args.val_gen_batch_size,
     )
     search.output_root.mkdir(parents=True, exist_ok=True)
 
-    storage = _make_storage(args.study_name, args.storage)
+    storage = _make_storage(study_name, args.storage)
     sampler = _build_sampler(args.sampler, args.seed)
     pruner = _build_pruner(args.pruner)
 
     study = optuna.create_study(
-        study_name=args.study_name,
+        study_name=study_name,
         storage=storage,
         sampler=sampler,
         pruner=pruner,
         direction="minimize",
-        load_if_exists=True,
+        load_if_exists=load_if_exists,
     )
     study.set_user_attr("objective", args.objective)
     study.set_user_attr("budget_aware", search.budget_aware)
@@ -422,7 +440,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     logger.info(
         "Starting study '%s' sampler=%s n_trials=%s timeout=%s storage=%s",
-        args.study_name, args.sampler, args.n_trials, args.timeout, storage,
+        study_name, args.sampler, args.n_trials, args.timeout, storage,
     )
 
     effective_model = args.model or MODEL_NAME

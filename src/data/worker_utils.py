@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 from transformers import AutoTokenizer, PreTrainedTokenizer
@@ -102,7 +103,15 @@ def count_tokens_batch(
     return results
 
 
-def _tokenize_pairs_in_batches(pairs: list[dict], tokenizer: PreTrainedTokenizer, option: Literal["chosen", "rejected", "base"], max_length: int = 2048, batch_size: int = 20_000, padding: bool = False, show_progress: bool = True, description: str = 'Tokenizing') -> list[torch.Tensor] | dict[str, list[torch.Tensor]]:
+def _tokenize_pairs_in_batches(
+        pairs: list[dict],
+        tokenizer: PreTrainedTokenizer,
+        option: Literal["chosen", "rejected"],
+        max_length: int = 2048,
+        batch_size: int = 20_000,
+        show_progress: bool = True,
+        description: str = 'Tokenizing'
+    ) -> dict[str, torch.Tensor]:
     """Tokenize a list of texts in batches, returning a list of tensors or a dict of lists of tensors."""
     results = defaultdict(list)
     total= len(pairs)
@@ -119,13 +128,19 @@ def _tokenize_pairs_in_batches(pairs: list[dict], tokenizer: PreTrainedTokenizer
         elif option == "rejected":
             chunk = [build_zero_shot_prompt(p["problem"]) + p["rejected"] for p in batch]
         else:
-            chunk = [build_zero_shot_prompt(p["problem"]) for p in batch]
-        encodings = tokenizer(chunk, padding='max_length' if padding else 'do_not_pad', truncation=True, max_length=max_length, return_attention_mask=True if padding else False)
+            raise ValueError(f'Invalid value for option - {option}')
 
-        for key, value in encodings.items():
-            results[key].extend([torch.tensor(v, dtype=torch.long) for v in value])
+        encodings = tokenizer(chunk, padding=False, truncation=True, max_length=max_length, return_attention_mask=False)
 
-    return results
+        for input_id in encodings['input_ids']:
+            tensor_id = torch.tensor(input_id, dtype=torch.long)
+            results['input_ids'].append(tensor_id)
+            results['true_lengths'].append(len(tensor_id))
+
+    return {
+        'input_ids': pad_sequence(results['input_ids'], batch_first=True, padding_value=tokenizer.pad_token_id).to(torch.int32),
+        'true_lengths': torch.as_tensor(results['true_lengths'], dtype=torch.int16)
+    }
 
 
 def tokenize_and_save(
@@ -173,7 +188,7 @@ def tokenize_and_save(
 
     if reset or not chosen_encodings_path.exists():
         # Tokenize chosen prompts in batches
-        chosen_encodings = _tokenize_pairs_in_batches(pairs, tokenizer, option="chosen", max_length=max_length, batch_size=batch_size, padding=padding, show_progress=show_progress, description="Tokenizing chosen prompts")
+        chosen_encodings = _tokenize_pairs_in_batches(pairs, tokenizer, option="chosen", max_length=max_length, batch_size=batch_size, show_progress=show_progress, description="Tokenizing chosen prompts")
         iterator = range(0, num_pairs, batch_size)
         torch.save(chosen_encodings, chosen_encodings_path)
         # Remove tokenized texts from pairs to free memory
@@ -185,7 +200,7 @@ def tokenize_and_save(
 
     if reset or not rejected_encodings_path.exists():
         # Tokenize rejected prompts in batches
-        rejected_encodings = _tokenize_pairs_in_batches(pairs, tokenizer, option="rejected", max_length=max_length, batch_size=batch_size, padding=padding, show_progress=show_progress, description="Tokenizing rejected prompts")
+        rejected_encodings = _tokenize_pairs_in_batches(pairs, tokenizer, option="rejected", max_length=max_length, batch_size=batch_size, show_progress=show_progress, description="Tokenizing rejected prompts")
         torch.save(rejected_encodings, rejected_encodings_path)
         # Remove tokenized texts from pairs to free memory
         for p in pairs:

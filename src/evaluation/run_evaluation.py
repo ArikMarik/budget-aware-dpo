@@ -125,7 +125,7 @@ def _generate_batch(
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=[151645, 151643],
+            eos_token_id=[151645, tokenizer.eos_token_id],
         )
 
     results = []
