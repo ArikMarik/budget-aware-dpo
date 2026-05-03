@@ -388,9 +388,6 @@ def _filter_by_length_ratio(
     """Vectorized per-complexity filtering using numpy."""
     import numpy as np
 
-    if length_ratio_easy <= 1.0 and length_ratio_hard <= 1.0:
-        return np.arange(len(data["chosen_input_ids"])).tolist()
-
     rejection_reason = data["rejection_reason"].numpy()
     chosen_length = data["chosen_length"].numpy()
     rejected_length = data["rejected_length"].numpy()
@@ -402,8 +399,8 @@ def _filter_by_length_ratio(
     # Per-pair threshold: complexity 0 (easy) → length_ratio_easy, 1 (hard) → length_ratio_hard
     threshold = np.where(complexities == 0, length_ratio_easy, length_ratio_hard)
 
-    # Keep pair if ratio >= threshold; bypass filter where threshold <= 1.0
-    ratio_mask = (ratio >= threshold) | (threshold <= 1.0)
+    # Keep pair if ratio >= threshold
+    ratio_mask = ratio >= threshold
     valid_mask = ratio_mask | not_rejected_by_length
 
     return np.where(valid_mask)[0].tolist()
