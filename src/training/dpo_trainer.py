@@ -374,7 +374,7 @@ def _cap_pairs_per_problem(
             quota = max(1, round(len(group) / total * max_pairs_per_problem))
             quota = min(quota, len(group), remaining)
             chosen = rng.choice(group, size=quota, replace=False).tolist()
-            kept.extend(int(x) for x in chosen)
+            kept.extend(chosen)
             remaining -= quota
 
     return sorted(kept)
