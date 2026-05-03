@@ -117,6 +117,7 @@ def main():
         max_length=MAX_LENGTH,
         batch_size=20_000,
         output_paths=tokens_paths,
+        reset=args.force
     )
     total_pairs = len(pairs)
     logger.info(f"      Tokenized {total_pairs:,} pairs, saved to {output_dir}")

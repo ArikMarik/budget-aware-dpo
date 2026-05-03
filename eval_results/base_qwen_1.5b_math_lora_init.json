@@ -43,9 +43,9 @@
     "math_level_4_5_accuracy": 0.3203309692671395,
     "math_level_4_5_num": 2538,
     "model": "Qwen/Qwen2.5-Math-1.5B",
-    "mode": "raw_base+few-shot",
+    "mode": "base+untrained_lora+few-shot",
     "max_new_tokens": 1024,
-    "eval_time_minutes": 90.2692583322525
+    "eval_time_minutes": 98.88880714972814
   },
   "results": [
     {

@@ -317,14 +317,19 @@ class TokenizedDPODataset(Dataset):
         len_chosen = len(chosen_ids)
         len_rejected = len(rejected_ids)
 
-        chosen_attention_mask = torch.as_tensor(self.data.get(
-            "chosen_attention_mask",
-            torch.ones(size=(len_chosen,)).expand(real_idx+1, -1)
-        )[real_idx]).to(dtype=torch.long)
-        rejected_attention_mask = torch.as_tensor(self.data.get(
-            "rejected_attention_mask",
-            torch.ones(size=(len_rejected,)).expand(real_idx+1, -1)
-        )[real_idx]).to(dtype=torch.long)
+        if "chosen_attention_mask" in self.data:
+            chosen_attention_mask = torch.as_tensor(
+                self.data["chosen_attention_mask"][real_idx], dtype=torch.long
+            )
+        else:
+            chosen_attention_mask = torch.ones(len_chosen, dtype=torch.long)
+
+        if "rejected_attention_mask" in self.data:
+            rejected_attention_mask = torch.as_tensor(
+                self.data["rejected_attention_mask"][real_idx], dtype=torch.long
+            )
+        else:
+            rejected_attention_mask = torch.ones(len_rejected, dtype=torch.long)
 
         return {
             "chosen_input_ids": chosen_ids,
@@ -406,6 +411,20 @@ def _filter_by_length_ratio(
     return np.where(valid_mask)[0].tolist()
 
 
+def _filter_by_seq_len(
+    data: dict,
+    indices: list[int],
+    max_seq_len: int,
+) -> list[int]:
+    """Remove pairs whose longest side (chosen or rejected) exceeds max_seq_len tokens."""
+    import numpy as np
+
+    c_lens = data["chosen_seq_len"].numpy()[indices]
+    r_lens = data["rejected_seq_len"].numpy()[indices]
+    keep_mask = np.maximum(c_lens, r_lens) <= max_seq_len
+    return np.array(indices)[keep_mask].tolist()
+
+
 def load_tokenized_datasets(
     tokens_paths: tuple[Path, Path, Path],
     *,
@@ -415,7 +434,8 @@ def load_tokenized_datasets(
     val_split: float = 0.2,
     seed: int = SEED,
     max_pairs_per_problem: Optional[int] = None,
-    max_unique_problems: int = 100_000
+    max_unique_problems: int = 100_000,
+    max_seq_len: Optional[int] = None,
 ) -> tuple[TokenizedDPODataset, TokenizedDPODataset]:
     """
     Load all tokenized pairs, filter by per-complexity length ratios, optionally cap pairs
@@ -433,16 +453,41 @@ def load_tokenized_datasets(
             "Run preprocess_dpo_data.py first."
         )
 
+    import time
+    import numpy as _np
+
     data = raw_data if raw_data is not None else load_and_combine_pairs_tokens_info(*tokens_paths)
 
     # 1. Apply per-complexity length_ratio filter (vectorized)
+    t0 = time.time()
     filtered_indices = _filter_by_length_ratio(data, length_ratio_easy, length_ratio_hard)
+    easy_mask = data["complexity"].numpy()[_np.array(filtered_indices)] == 0
+    logger.info(
+        "After length-ratio filter (easy≥%.1f, hard≥%.1f): %d pairs "
+        "(easy=%d, hard=%d) in %.1fs",
+        length_ratio_easy, length_ratio_hard,
+        len(filtered_indices), int(easy_mask.sum()), int((~easy_mask).sum()),
+        time.time() - t0,
+    )
+
+    # 1b. Filter by absolute sequence length to prevent OOM from outlier-padded batches
+    if max_seq_len is not None and "chosen_seq_len" in data:
+        pre_count = len(filtered_indices)
+        filtered_indices = _filter_by_seq_len(data, filtered_indices, max_seq_len)
+        logger.info(
+            "Seq-len filter (max_seq_len=%d): %d → %d pairs (dropped %d)",
+            max_seq_len, pre_count, len(filtered_indices), pre_count - len(filtered_indices),
+        )
 
     # 2. Cap pairs per problem (stratified by rejection_reason)
     if max_pairs_per_problem is not None and max_pairs_per_problem > 0:
         filtered_indices = _cap_pairs_per_problem(
             data, filtered_indices, max_pairs_per_problem, seed
         )
+    logger.info(
+        "After pair cap (max_per_problem=%s): %d pairs total",
+        max_pairs_per_problem, len(filtered_indices),
+    )
 
     # 3. Split by problem_id (stratified by complexity of filtered data)
     train_indices, val_indices = split_pairs_by_problem(
@@ -452,9 +497,16 @@ def load_tokenized_datasets(
     train_dataset = TokenizedDPODataset(data, train_indices)
     val_dataset = TokenizedDPODataset(data, val_indices)
 
+    n_train_easy = sum(1 for i in train_indices if data["complexity"][i] == 0)
+    n_val_easy   = sum(1 for i in val_indices   if data["complexity"][i] == 0)
+    logger.info(
+        "Final split — train: %d pairs (easy=%d hard=%d) | val: %d pairs (easy=%d hard=%d)",
+        len(train_indices), n_train_easy, len(train_indices) - n_train_easy,
+        len(val_indices),   n_val_easy,   len(val_indices)   - n_val_easy,
+    )
     logger.info(
         f"Data split (length_ratio_easy={length_ratio_easy}, length_ratio_hard={length_ratio_hard}, "
-        f"max_pairs_per_problem={max_pairs_per_problem}): "
+        f"max_pairs_per_problem={max_pairs_per_problem}, max_seq_len={max_seq_len}): "
         f"Train (pairs)={len(train_indices)}, Val (pairs)={len(val_indices)}"
     )
 
@@ -496,10 +548,11 @@ def create_model(
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
-        device_map="auto" if device == "cuda" else None,
     )
-    if device == "cpu":
-        model = model.to(device)
+    if device == "cuda":
+        model = model.cuda()
+    elif device == "cpu":
+        model = model.to("cpu")
 
     if lora_config is not None:
         model = get_peft_model(model, lora_config)
@@ -508,9 +561,6 @@ def create_model(
         model = PeftModel.from_pretrained(model, resume_from, is_trainable=True)
 
     model.train()
-
-    for p in model.parameters():
-        p.requires_grad = True
 
     if use_compile and hasattr(torch, "compile") and device == "cuda":
         logger.info("Compiling model with torch.compile()...")
@@ -523,10 +573,11 @@ def create_ref_model(model_name: str, device: str) -> PeftModel:
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
-        device_map="auto" if device == "cuda" else None,
     )
-    if device == "cpu":
-        model = model.to(device)
+    if device == "cuda":
+        model = model.cuda()
+    elif device == "cpu":
+        model = model.to("cpu")
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
@@ -965,6 +1016,7 @@ def train_dpo(
     best_model_metric: BestModelMetric = "val_loss",
     accuracy_floor: Optional[float] = None,
     max_unique_problems: int = 65_000,
+    max_seq_len: Optional[int] = None,
     index_to_problem_path: Path = INDEX_TO_PROBLEM_PATH,
     ctx: Optional[StaticTrainingContext] = None,
 ) -> dict:
@@ -988,7 +1040,8 @@ def train_dpo(
         val_split=val_split,
         seed=seed,
         max_pairs_per_problem=max_pairs_per_problem,
-        max_unique_problems=max_unique_problems
+        max_unique_problems=max_unique_problems,
+        max_seq_len=max_seq_len,
     )
 
     num_train = len(train_dataset)
@@ -1060,9 +1113,11 @@ def train_dpo(
         threshold=early_stopping_threshold,
         threshold_mode="rel",
     )
-    # bfloat16 has the same exponent range as float32 so GradScaler is not
-    # needed (and its unscale kernel is not implemented for bf16 — it crashes).
     autocast_dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    # GradScaler only needed for fp16; bf16 has fp32's exponent range and the CUDA
+    # unscale_ kernel is not implemented for bf16 — it crashes if enabled.
+    use_fp16_scaler = use_mixed_precision and device == "cuda" and autocast_dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_fp16_scaler)
 
     logger.info("Using model: %s (loss_type=%s)", effective_model_name, loss_type)
     model = create_model(
@@ -1073,9 +1128,31 @@ def train_dpo(
         use_compile=compile_model and device == "cuda"
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    logger.info(
+        "Model: %s | trainable params: %s / %s (%.3f%%) | device: %s | dtype: %s | "
+        "use_mixed_precision: %s | use_fp16_scaler: %s | autocast_dtype: %s",
+        effective_model_name,
+        f"{trainable:,}", f"{total:,}", 100 * trainable / total,
+        next(model.parameters()).device,
+        next(model.parameters()).dtype,
+        use_mixed_precision, use_fp16_scaler, autocast_dtype,
+    )
+
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=lr, betas=(0.9, 0.999), weight_decay=0.01,
+    )
+    opt_param_count = sum(p.numel() for g in optimizer.param_groups for p in g['params'])
+    logger.info(
+        "Optimizer: AdamW | params in optimizer: %s | lr: %.2e | wd: %.3f",
+        f"{opt_param_count:,}", lr, 0.01,
+    )
+    assert opt_param_count == trainable, (
+        f"Optimizer has {opt_param_count:,} params but only {trainable:,} are trainable — mismatch!"
+    )
     loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
-    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda" and autocast_dtype == torch.float16))
 
     # TODO - what is it used for
     # Load generation eval problems once (50 easy + 50 hard)
@@ -1098,6 +1175,7 @@ def train_dpo(
             steps_per_epoch=steps_per_epoch,
             gradient_accumulation_steps=gradient_accumulation_steps,
             use_mixed_precision=use_mixed_precision and device == "cuda",
+            use_fp16_scaler=use_fp16_scaler,
             autocast_dtype=autocast_dtype,
             compile_model=compile_model,
             val_problems=val_problems,
@@ -1344,14 +1422,17 @@ def _run_epoch(
     steps_per_epoch: int,
     gradient_accumulation_steps: int,
     use_mixed_precision: bool,
+    use_fp16_scaler: bool,
     autocast_dtype: torch.dtype,
     compile_model: bool,
     val_problems: Optional[list[dict]] = None,
 ) -> dict:
+    import time
     model.train()
     device = next(model.parameters()).device
     accum = MetricsAccumulator(device)
     num_batches = len(train_loader)
+    epoch_start_time = time.time()
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}", total=num_batches, mininterval=1.0, dynamic_ncols=True)
     optimizer.zero_grad()
@@ -1369,11 +1450,27 @@ def _run_epoch(
             )
             loss = loss / gradient_accumulation_steps
 
-        if use_mixed_precision:
-            scaled_loss = scaler.scale(loss)
-            scaled_loss.backward()
+        if use_fp16_scaler:
+            scaler.scale(loss).backward()
         else:
             loss.backward()
+
+        if epoch == 1 and batch_idx == 0:
+            grad_stats = []
+            for name, p in model.named_parameters():
+                if p.grad is not None:
+                    g = p.grad.float()
+                    grad_stats.append((name, g.abs().max().item(), g.abs().mean().item()))
+            grad_stats.sort(key=lambda x: -x[1])
+            logger.info("BF16 grad health check (top 5 by max abs grad):")
+            for name, gmax, gmean in grad_stats[:5]:
+                logger.info("  %s: max=%.6f mean=%.6f", name, gmax, gmean)
+            if all(gmax < 1e-7 for _, gmax, _ in grad_stats):
+                logger.warning("ALL gradients near zero — possible bf16 underflow or incorrect loss!")
+            elif any(gmax > 100 for _, gmax, _ in grad_stats):
+                logger.warning("VERY LARGE gradients detected — possible exploding gradients!")
+            else:
+                logger.info("BF16 gradient magnitudes look healthy.")
 
         with torch.no_grad():
             reward_diff_per_sample = dpo_beta * (
@@ -1393,10 +1490,11 @@ def _run_epoch(
             )
 
         if is_last_accum:
-            if use_mixed_precision:
+            if use_fp16_scaler:
                 scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # type: ignore[assignment]
-            if use_mixed_precision:
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)  # type: ignore[assignment]
+            if use_fp16_scaler:
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -1411,6 +1509,19 @@ def _run_epoch(
                 "lr": f"{current_lr:.2e}",
                 "gn": f"{grad_norm.item():.2f}",
             })
+
+            LOG_EVERY_N_STEPS = 50
+            if num_steps_so_far % LOG_EVERY_N_STEPS == 0:
+                elapsed = time.time() - epoch_start_time
+                steps_remaining = num_batches - num_steps_so_far
+                eta_sec = elapsed / num_steps_so_far * steps_remaining if num_steps_so_far > 0 else 0
+                logger.info(
+                    "Epoch %d step %d/%d | loss=%.4f | grad_norm=%.3f | lr=%.2e | "
+                    "elapsed=%.0fs | ETA=%.0fs (%.1f min)",
+                    epoch, num_steps_so_far, num_batches,
+                    (accum.total_loss / num_steps_so_far).item(), grad_norm.item(), current_lr,
+                    elapsed, eta_sec, eta_sec / 60,
+                )
 
             if use_wandb:
                 global_step = (epoch - 1) * steps_per_epoch + num_steps_so_far
@@ -1441,9 +1552,17 @@ def _run_epoch(
             model, tokenizer, val_problems, epoch, use_wandb, steps_per_epoch
         )
 
+    epoch_time = time.time() - epoch_start_time
     logger.info(
-        "Epoch %d: train_loss=%.4f, val_loss=%.4f, reward_diff=%.4f",
-        epoch, averages["avg_train_loss"], val_loss, val_metrics["val/reward_diff"]
+        "Epoch %d/%d done | train_loss=%.4f | val_loss=%.4f | reward_diff=%.4f | "
+        "avg_chosen_tok=%.0f | avg_rejected_tok=%.0f | "
+        "epoch_time=%.0fs (%.1f min) | steps=%d",
+        epoch, "_",
+        averages["avg_train_loss"], val_loss,
+        val_metrics["val/reward_diff"],
+        averages["avg_chosen"], averages["avg_rejected"],
+        epoch_time, epoch_time / 60,
+        num_batches,
     )
     entry = _build_epoch_entry(epoch, averages["avg_train_loss"], val_loss, val_metrics)
     metrics_log.append(entry)

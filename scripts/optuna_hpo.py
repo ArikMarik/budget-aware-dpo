@@ -65,17 +65,17 @@ LOSS_TYPES = ["dpo", "simpo"]
 
 # Grid points used when --sampler grid. Keep small — every combo is tried.
 GRID_SEARCH_SPACE: dict[str, list[Any]] = {
-    "lr":                          [5e-6, 1e-5, 5e-5],
-    "dpo_beta":                    [0.05, 0.1, 0.2],
+    "lr":                          [5e-7, 5e-6, 1e-5],  # DPO needs ~10x lower LR than SFT
+    "dpo_beta":                    [0.1, 0.2, 0.5],     # add 0.5 (conservative), drop 0.05 (too aggressive)
     "lambda_easy":                 [0.01, 0.05, 0.1],
     "lambda_hard":                 [0.001, 0.01, 0.03],
     "kl_penalty_weight":           [0.0, 0.01, 0.1],
-    "batch_size":                  [4, 8],
-    "gradient_accumulation_steps": [1, 2],
+    "batch_size":                  [4, 8],   # bs=8 is safe after LoRA + seq-len fixes
+    "gradient_accumulation_steps": [2, 4],   # effective bs = physical bs × grad_accum; bs=8 × 4 = bs=32 matches literature
     "loss_type":                   ["dpo"],
     "length_ratio_easy":           [1.5, 2.0, 3.0, 4.0],
     "length_ratio_hard":           [1.5, 2.0, 2.5, 3.0],
-    "max_pairs_per_problem":       [20, 50, 100],
+    "max_pairs_per_problem":       [10, 15, 20, 25],
 }
 
 
@@ -93,6 +93,8 @@ class SearchConfig:
     output_root: Path
     study_name: str
     use_wandb: bool
+    max_unique_problems: int
+    max_seq_len: Optional[int]
 
 
 # ---------------------------------------------------------------------------
@@ -139,17 +141,17 @@ def _compute_objective(
 def _sample_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
     """Sample one configuration. Shared by TPE / Random."""
     return {
-        "lr":                          trial.suggest_float("lr", 1e-6, 1e-4, log=True),
-        "dpo_beta":                    trial.suggest_float("dpo_beta", 0.02, 0.5, log=True),
+        "lr":                          trial.suggest_float("lr", 5e-7, 1e-5, log=True),
+        "dpo_beta":                    trial.suggest_float("dpo_beta", 0.05, 0.5, log=True),
         "lambda_easy":                 trial.suggest_float("lambda_easy", 1e-3, 0.3, log=True),
         "lambda_hard":                 trial.suggest_float("lambda_hard", 1e-4, 0.1, log=True),
         "kl_penalty_weight":           trial.suggest_float("kl_penalty_weight", 1e-4, 1.0, log=True),
-        "batch_size":                  trial.suggest_categorical("batch_size", [4, 8, 12]),
+        "batch_size":                  trial.suggest_categorical("batch_size", [4, 8]),
         "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
         "loss_type":                   trial.suggest_categorical("loss_type", LOSS_TYPES),
         "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.0, 5.0),
         "length_ratio_hard":           trial.suggest_float("length_ratio_hard", 1.0, 3.0),
-        "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 1, 5),
+        "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 3, 25),
     }
 
 
@@ -212,6 +214,8 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
         else:
             os.environ.setdefault("WANDB_PROJECT", "budget-aware-dpo-hpo")
 
+        import time
+        trial_start = time.time()
         try:
             result = train_dpo(
                 use_budget_aware=search.budget_aware,
@@ -243,7 +247,8 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
                 length_ratio_easy=float(params["length_ratio_easy"]),
                 length_ratio_hard=float(params["length_ratio_hard"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
-                # max_unique_problems=50,  # TODO - VERY TEMPORARY (CHECK THE A SMALL FULL RUN)
+                max_unique_problems=search.max_unique_problems,
+                max_seq_len=search.max_seq_len,
                 ctx=ctx,
             )
         except torch.cuda.OutOfMemoryError:
@@ -270,10 +275,10 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
         trial.set_user_attr("output_dir", str(output_dir))
 
         score = _compute_objective(best_metrics, search.objective, search.accuracy_floor)
-
+        trial_elapsed = time.time() - trial_start
         logger.info(
-            "Trial %d done. score=%s best_metrics=%s",
-            trial.number, score, best_metrics,
+            "Trial %d done in %.0fs (%.1f min). score=%s best_metrics=%s",
+            trial.number, trial_elapsed, trial_elapsed / 60, score, best_metrics,
         )
 
         _cleanup_gpu()
@@ -353,8 +358,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--max-epochs", type=int, default=3)
     p.add_argument("--data-limit", type=int, default=None)
     p.add_argument("--model", type=str, default=None)
-    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--no-mixed-precision", action="store_true")
+    p.add_argument("--max-unique-problems", type=int, default=500,
+                   help="Cap unique problems loaded per trial (controls trial length). Default 500.")
+    p.add_argument("--max-seq-len", type=int, default=1024,
+                   help="Drop pairs where max(chosen, rejected) token length > this. Default 1024.")
     p.add_argument("--baseline", action="store_true",
                    help="Tune baseline DPO (no length penalty) instead of budget-aware")
 
@@ -389,6 +398,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         output_root=Path(args.output_root),
         study_name=args.study_name,
         use_wandb=args.wandb,
+        max_unique_problems=args.max_unique_problems,
+        max_seq_len=args.max_seq_len,
     )
     search.output_root.mkdir(parents=True, exist_ok=True)
 

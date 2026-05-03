@@ -111,7 +111,10 @@ def _generate_batch(
     device: torch.device,
 ) -> list[tuple[str, int]]:
     """Generate responses for a batch of prompts. Returns list of (response, num_tokens)."""
-    inputs = tokenizer(prompts, return_tensors="pt", padding=True, padding_side='left').to(device)
+    orig_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = 'left'
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+    tokenizer.padding_side = orig_padding_side
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
 

@@ -176,5 +176,13 @@ def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH
         combined["chosen_attention_mask"] = chosen_encodings["attention_mask"]
         combined["rejected_attention_mask"] = rejected_encodings["attention_mask"]
 
+    # Precompute actual tokenised sequence lengths for fast per-trial filtering
+    combined["chosen_seq_len"] = torch.tensor(
+        [len(x) for x in combined["chosen_input_ids"]], dtype=torch.long
+    )
+    combined["rejected_seq_len"] = torch.tensor(
+        [len(x) for x in combined["rejected_input_ids"]], dtype=torch.long
+    )
+
     logger.info(f"Combined data ready - {len(combined['prompt_length'])} total samples")
     return combined
