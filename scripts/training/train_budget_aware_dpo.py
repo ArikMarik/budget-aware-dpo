@@ -6,7 +6,7 @@ Train budget-aware DPO (custom R_budget loss with length penalty).
 import argparse
 from pathlib import Path
 
-from src.config import get_budget_aware_output_dir
+from src.config import SEED, get_budget_aware_output_dir
 from src.training.dpo_trainer import train_dpo
 
 
@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--data-limit", type=int, default=None)
     parser.add_argument("--resume-from", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--wandb", action="store_true", default=True)
     parser.add_argument("--early-stopping-patience", type=int, default=5)
     parser.add_argument("--early-stopping-threshold", type=float, default=0.0)
@@ -35,7 +35,8 @@ def main():
     parser.add_argument("--run-name", type=str, default=None, help="WandB run name (auto-generated if omitted)")
     parser.add_argument("--model", type=str, default=None, help="Model name/path (default: Qwen/Qwen2.5-0.5B)")
     parser.add_argument("--loss-type", type=str, default="dpo", choices=["dpo", "simpo"], help="Loss function type")
-    parser.add_argument("--length-ratio", type=float, default=1.5, help="Minimum length ratio between preferred and rejected solutions, default: 1.5 (1.0 = no filter)")
+    parser.add_argument("--length-ratio-easy", type=float, default=1.5, help="Min length ratio for easy pairs (complexity=0). 1.0 = no filter.")
+    parser.add_argument("--length-ratio-hard", type=float, default=1.0, help="Min length ratio for hard pairs (complexity=1). 1.0 = no filter.")
     parser.add_argument("--max-pairs-per-problem", type=int, default=10, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
     parser.add_argument(
         "--best-model-metric",
@@ -84,7 +85,8 @@ def main():
         num_workers=args.num_workers,
         model_name=args.model,
         loss_type=args.loss_type,
-        length_ratio=args.length_ratio,
+        length_ratio_easy=args.length_ratio_easy,
+        length_ratio_hard=args.length_ratio_hard,
         max_pairs_per_problem=args.max_pairs_per_problem,
         best_model_metric=args.best_model_metric,
         accuracy_floor=args.accuracy_floor,

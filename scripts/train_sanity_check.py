@@ -8,12 +8,12 @@ import json
 import os
 from pathlib import Path
 
-from src.config import CHECKPOINT_DIR, MODEL_NAME, DUMMY_PROCESSED_DATASET_PATH
+from src.config import CHECKPOINT_DIR, MODEL_NAME, DUMMY_PROCESSED_DATASET_PATH, SEED
 from src.utils import get_logger, set_seed
 
 logger = get_logger(__name__)
 
-set_seed(42)
+set_seed(SEED)
 
 
 def load_pairs(limit: int = 30):

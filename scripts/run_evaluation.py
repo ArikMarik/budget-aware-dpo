@@ -13,6 +13,7 @@ from pathlib import Path
 
 from src.config import (
     CHECKPOINT_DIR,
+    SEED,
     USE_DUMMY_DATA,
     get_baseline_output_dir,
     get_budget_aware_output_dir,
@@ -26,7 +27,7 @@ from src.utils import get_logger, set_seed, setup_global_exception_handler
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
 
-set_seed(42)
+set_seed(SEED)
 
 
 def main():

@@ -12,6 +12,7 @@ import json
 import random
 from pathlib import Path
 
+from src.config import SEED
 from src.evaluation.few_shot_exemplars import build_few_shots_prompt, build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
     evaluate_checkpoint,
@@ -21,7 +22,7 @@ from src.utils import get_logger, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
-set_seed(42)
+set_seed(SEED)
 
 
 def main():

@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 
+SEED = 42
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Use dummy data when USE_DUMMY_DATA=1
@@ -16,6 +17,8 @@ DATA_PATH = Path(
     )
 )
 
+PROBLEM_TO_LEVEL_PATH = DATA_PATH / "problem_to_level.pkl"
+
 DUMMY_DATASET_PATH = DATA_PATH / "dummy_openmathinstruct.jsonl"
 DUMMY_PROCESSED_DATASET_PATH = DATA_PATH / "dummy_processed_dpo_dataset"
 
@@ -23,12 +26,23 @@ DUMMY_PROCESSED_DATASET_PATH = DATA_PATH / "dummy_processed_dpo_dataset"
 DATASET_PATH = DATA_PATH / "openmathinstruct.jsonl"
 DATASET_PATH_LIMITED = DATA_PATH / "openmathinstruct.jsonl.limited"
 
+PROBLEM_TO_INDEX_PATH = DATA_PATH / "problem_to_index.pkl"
+INDEX_TO_PROBLEM_PATH = DATA_PATH / "index_to_problem.pkl"
+
 PROCESSED_DATASET_PATH = DATA_PATH / "processed_dpo_dataset"
 PROCESSED_DATASET_PATH_LIMITED = DATA_PATH / "processed_dpo_dataset_limited"
 PROCESSED_DATASET_PATH_BALANCED = DATA_PATH / "processed_dpo_dataset_balanced"
 
 GSM8K_TEST_PATH = DATA_PATH / "gsm8k_test.jsonl"
 MATH_TEST_PATH = DATA_PATH / "math_test.jsonl"
+
+# Similarity Search - Embedding
+SIMILARITY_INDEX_DIR = DATA_PATH / "math_problem_index"
+EMBEDDING_MODEL = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+
+# Token length analysis outputs
+OVER_LIMIT_PROBLEMS_PATH = PROJECT_ROOT / "reports" / "data" / "problems_over_token_limit.json"
+TOKEN_LENGTH_STATS_PATH = PROJECT_ROOT / "reports" / "data" / "token_length_stats.csv"
 
 
 def get_processed_dataset_path() -> Path:
@@ -42,9 +56,15 @@ def get_processed_dataset_path() -> Path:
     return DUMMY_PROCESSED_DATASET_PATH if USE_DUMMY_DATA else PROCESSED_DATASET_PATH
 
 
-def get_tokens_path() -> Path:
+# Tokenized and processed data files path - for training.
+CHOSEN_ENCODINGS_PATH = get_processed_dataset_path() / "chosen_encodings.pt"
+REJECTED_ENCODINGS_PATH = get_processed_dataset_path() / "rejected_encodings.pt"
+PROCESSED_PAIRS_INFO_PATH = get_processed_dataset_path() / "pairs_info.pt"
+
+
+def get_tokens_paths() -> tuple[Path, Path, Path]:
     """Return path to all tokenized pairs."""
-    return get_processed_dataset_path() / "tokens.pt"
+    return CHOSEN_ENCODINGS_PATH, REJECTED_ENCODINGS_PATH, PROCESSED_PAIRS_INFO_PATH
 
 
 def get_train_pairs_path() -> Path:

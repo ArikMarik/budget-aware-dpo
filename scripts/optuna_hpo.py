@@ -45,12 +45,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import CHECKPOINT_DIR, DATA_PATH, MODEL_NAME  # noqa: E402
+from src.config import CHECKPOINT_DIR, INDEX_TO_PROBLEM_PATH, MODEL_NAME, SEED  # noqa: E402
 from src.training.dpo_trainer import (  # noqa: E402
     train_dpo,
     build_static_context,
     StaticTrainingContext,
-    get_tokens_path,
+    get_tokens_paths,
 )
 from src.utils import get_logger  # noqa: E402
 
@@ -73,7 +73,8 @@ GRID_SEARCH_SPACE: dict[str, list[Any]] = {
     "batch_size":                  [4, 8],
     "gradient_accumulation_steps": [1, 2],
     "loss_type":                   ["dpo"],
-    "length_ratio":                [1.0, 1.5, 2.0],
+    "length_ratio_easy":           [1.5, 2.0, 3.0, 4.0],
+    "length_ratio_hard":           [1.5, 2.0, 2.5, 3.0],
     "max_pairs_per_problem":       [20, 50, 100],
 }
 
@@ -146,7 +147,8 @@ def _sample_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
         "batch_size":                  trial.suggest_categorical("batch_size", [4, 8, 12]),
         "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
         "loss_type":                   trial.suggest_categorical("loss_type", LOSS_TYPES),
-        "length_ratio":                trial.suggest_float("length_ratio", 1.5, 4.0),
+        "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.0, 5.0),
+        "length_ratio_hard":           trial.suggest_float("length_ratio_hard", 1.0, 3.0),
         "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 1, 5),
     }
 
@@ -238,7 +240,8 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
                 loss_type=str(params["loss_type"]),
                 best_model_metric="val_loss",
                 accuracy_floor=None,
-                length_ratio=float(params["length_ratio"]),
+                length_ratio_easy=float(params["length_ratio_easy"]),
+                length_ratio_hard=float(params["length_ratio_hard"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
                 # max_unique_problems=50,  # TODO - VERY TEMPORARY (CHECK THE A SMALL FULL RUN)
                 ctx=ctx,
@@ -344,7 +347,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--n-trials", type=int, default=20)
     p.add_argument("--timeout", type=int, default=None, help="Wall clock seconds")
     p.add_argument("--pruner", action="store_true", help="Enable MedianPruner (best-effort)")
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=SEED)
 
     # Training knobs (fixed across trials)
     p.add_argument("--max-epochs", type=int, default=3)
@@ -414,10 +417,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     effective_model = args.model or MODEL_NAME
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ctx = build_static_context(
-        get_tokens_path(),
+        get_tokens_paths(),
         effective_model,
         device,
-        DATA_PATH / "problem_index_dict.json",
+        INDEX_TO_PROBLEM_PATH,
     )
 
     objective_fn = _build_objective_fn(search, use_grid=(args.sampler == "grid"), ctx=ctx)

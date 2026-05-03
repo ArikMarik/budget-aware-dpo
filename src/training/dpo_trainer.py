@@ -4,7 +4,9 @@ Optimized for GPU utilization and training efficiency.
 """
 
 from collections import defaultdict
+from functools import partial
 import json
+import pickle
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -15,27 +17,27 @@ from tqdm import tqdm
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 import wandb
 
 from src.config import (
     CHECKPOINT_DIR,
-    DATA_PATH,
+    INDEX_TO_PROBLEM_PATH,
     MODEL_NAME,
-    get_tokens_path,
-    get_processed_dataset_path,
+    SEED,
+    get_tokens_paths,
 )
 from src.data.preprocessing import compute_pair_length_ratio, split_pairs_by_problem
-from src.evaluation.answer_extraction import verify_correctness
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
     generate_and_evaluate,
     compute_metrics,
     load_eval_problems,
 )
-from src.utils import get_logger, set_seed, setup_global_exception_handler
+from src.utils import get_logger, get_model_tokenizer, load_and_combine_pairs_tokens_info, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
 setup_global_exception_handler(__name__)
@@ -80,7 +82,7 @@ class TrainingConfig:
 class StaticTrainingContext:
     raw_data: dict
     tokenizer: PreTrainedTokenizer
-    problem_index: dict
+    index_to_problem: dict
     ref_model: nn.Module
 
 
@@ -309,14 +311,29 @@ class TokenizedDPODataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         real_idx = self.indices[idx]
+        chosen_ids = self.data["chosen_input_ids"][real_idx]
+        rejected_ids = self.data["rejected_input_ids"][real_idx]
+
+        len_chosen = len(chosen_ids)
+        len_rejected = len(rejected_ids)
+
+        chosen_attention_mask = torch.as_tensor(self.data.get(
+            "chosen_attention_mask",
+            torch.ones(size=(len_chosen,)).expand(real_idx+1, -1)
+        )[real_idx]).to(dtype=torch.long)
+        rejected_attention_mask = torch.as_tensor(self.data.get(
+            "rejected_attention_mask",
+            torch.ones(size=(len_rejected,)).expand(real_idx+1, -1)
+        )[real_idx]).to(dtype=torch.long)
+
         return {
-            "chosen_input_ids": self.data["chosen_input_ids"][real_idx],
-            "chosen_attention_mask": self.data["chosen_attention_mask"][real_idx],
-            "rejected_input_ids": self.data["rejected_input_ids"][real_idx],
-            "rejected_attention_mask": self.data["rejected_attention_mask"][real_idx],
-            "complexity": self.data["complexities"][real_idx],
-            "problem_id": self.data["problem_ids"][real_idx],
-            "prompt_length": self.data["prompt_lengths"][real_idx],
+            "chosen_input_ids": chosen_ids,
+            "chosen_attention_mask": chosen_attention_mask,
+            "rejected_input_ids": rejected_ids,
+            "rejected_attention_mask": rejected_attention_mask,
+            "complexity": self.data["complexity"][real_idx],
+            "problem_id": self.data["problem_id"][real_idx],
+            "prompt_length": self.data["prompt_length"][real_idx],
         }
 
 
@@ -330,7 +347,7 @@ def _cap_pairs_per_problem(
     import numpy as np
 
     rng = np.random.default_rng(seed)
-    problem_ids = data["problem_ids"].numpy()
+    problem_ids = data["problem_id"].numpy()
     rejection_reason = data["rejection_reason"].numpy()
 
     # Group the *filtered* indices by problem_id
@@ -357,65 +374,69 @@ def _cap_pairs_per_problem(
             quota = max(1, round(len(group) / total * max_pairs_per_problem))
             quota = min(quota, len(group), remaining)
             chosen = rng.choice(group, size=quota, replace=False).tolist()
-            kept.extend(int(x) for x in chosen)
+            kept.extend(chosen)
             remaining -= quota
 
     return sorted(kept)
 
 
-def _filter_by_length_ratio(data: dict, length_ratio: float) -> list[int]:
-    """Vectorized filtering using numpy."""
+def _filter_by_length_ratio(
+    data: dict,
+    length_ratio_easy: float,
+    length_ratio_hard: float,
+) -> list[int]:
+    """Vectorized per-complexity filtering using numpy."""
     import numpy as np
-
-    if length_ratio <= 1.0:
-        return np.arange(len(data["chosen_input_ids"])).tolist()
 
     rejection_reason = data["rejection_reason"].numpy()
     chosen_length = data["chosen_length"].numpy()
     rejected_length = data["rejected_length"].numpy()
+    complexities = data["complexity"].numpy()
 
-    ratio_mask = compute_pair_length_ratio(chosen_length, rejected_length) >= length_ratio
+    ratio = compute_pair_length_ratio(chosen_length, rejected_length)
     not_rejected_by_length = rejection_reason != 0
 
+    # Per-pair threshold: complexity 0 (easy) → length_ratio_easy, 1 (hard) → length_ratio_hard
+    threshold = np.where(complexities == 0, length_ratio_easy, length_ratio_hard)
+
+    # Keep pair if ratio >= threshold
+    ratio_mask = ratio >= threshold
     valid_mask = ratio_mask | not_rejected_by_length
 
     return np.where(valid_mask)[0].tolist()
 
 
 def load_tokenized_datasets(
-    tokens_path: Path,
+    tokens_paths: tuple[Path, Path, Path],
     *,
     raw_data: Optional[dict] = None,
-    length_ratio: float = 1.0,
+    length_ratio_easy: float = 1.0,
+    length_ratio_hard: float = 1.0,
     val_split: float = 0.2,
-    seed: int = 42,
+    seed: int = SEED,
     max_pairs_per_problem: Optional[int] = None,
     max_unique_problems: int = 100_000
 ) -> tuple[TokenizedDPODataset, TokenizedDPODataset]:
     """
-    Load all tokenized pairs, filter by length_ratio, optionally cap pairs per
-    problem, then split by problem_id. Returns (train_dataset, val_dataset).
+    Load all tokenized pairs, filter by per-complexity length ratios, optionally cap pairs
+    per problem, then split by problem_id. Returns (train_dataset, val_dataset).
 
     Processing order:
     1. Load all data from tokens_path (or use raw_data if provided to skip torch.load)
-    2. Apply length_ratio filter to all pairs
+    2. Apply per-complexity length_ratio filter (easy/hard) to all pairs
     3. Apply max_pairs_per_problem cap (stratified by rejection_reason)
     4. Split filtered pairs by problem_id (stratified by complexity)
     """
-    if raw_data is None and not tokens_path.exists():
+    if raw_data is None and not all(tok_path.exists() for tok_path in tokens_paths):
         raise FileNotFoundError(
-            f"Tokenized dataset not found at {tokens_path}. "
+            f"Tokenized dataset not found at {tokens_paths}. "
             "Run preprocess_dpo_data.py first."
         )
 
-    logger.debug(f'{" START LOAD TOKENS ":#^100}')
-    data = raw_data if raw_data is not None else torch.load(tokens_path)
-    logger.debug(f'{" END LOAD TOKENS ":#^100}')
+    data = raw_data if raw_data is not None else load_and_combine_pairs_tokens_info(*tokens_paths)
 
-    logger.debug(f'{" START FILTER BY LENGTH ":#^100}')
-    # 1. Apply length_ratio filter (vectorized)
-    filtered_indices = _filter_by_length_ratio(data, length_ratio)
-    logger.debug(f'{" END FILTER BY LENGTH ":#^100}')
+    # 1. Apply per-complexity length_ratio filter (vectorized)
+    filtered_indices = _filter_by_length_ratio(data, length_ratio_easy, length_ratio_hard)
 
     # 2. Cap pairs per problem (stratified by rejection_reason)
     if max_pairs_per_problem is not None and max_pairs_per_problem > 0:
@@ -423,18 +444,16 @@ def load_tokenized_datasets(
             data, filtered_indices, max_pairs_per_problem, seed
         )
 
-    logger.debug(f'{" START SPLIT BY PROBLEM ":#^100}')
     # 3. Split by problem_id (stratified by complexity of filtered data)
     train_indices, val_indices = split_pairs_by_problem(
         data, val_split, seed, filtered_indices, max_unique_problems
     )
-    logger.debug(f'{" END SPLIT BY PROBLEM ":#^100}')
 
     train_dataset = TokenizedDPODataset(data, train_indices)
     val_dataset = TokenizedDPODataset(data, val_indices)
 
     logger.info(
-        f"Data split (length_ratio={length_ratio}, "
+        f"Data split (length_ratio_easy={length_ratio_easy}, length_ratio_hard={length_ratio_hard}, "
         f"max_pairs_per_problem={max_pairs_per_problem}): "
         f"Train (pairs)={len(train_indices)}, Val (pairs)={len(val_indices)}"
     )
@@ -442,24 +461,30 @@ def load_tokenized_datasets(
     return train_dataset, val_dataset
 
 
-def collate_fn_tokenized(batch: list[dict]) -> dict:
-    keys = ["chosen_input_ids", "chosen_attention_mask", "rejected_input_ids", "rejected_attention_mask", "complexity", "problem_id", "prompt_length"]
-    collated_batch = {key: [] for key in keys}
+def collate_fn_tokenized(batch: list[dict], pad_token_id: int) -> dict:
+    chosen_input_ids, chosen_attention_mask = [], []
+    rejected_input_ids, rejected_attention_mask = [], []
+    complexity, problem_id, prompt_length = [], [], []
+
     for item in batch:
-        for key, value in item.items():
-            collated_batch[key].append(value)
-    return {key: torch.stack(values) for key, values in collated_batch.items()}
+        chosen_input_ids.append(item["chosen_input_ids"])
+        chosen_attention_mask.append(item["chosen_attention_mask"])
+        rejected_input_ids.append(item["rejected_input_ids"])
+        rejected_attention_mask.append(item["rejected_attention_mask"])
+        complexity.append(item["complexity"])
+        problem_id.append(item["problem_id"])
+        prompt_length.append(item["prompt_length"])
 
+    return {
+        "chosen_input_ids": pad_sequence(chosen_input_ids, batch_first=True, padding_value=pad_token_id),
+        "chosen_attention_mask": pad_sequence(chosen_attention_mask, batch_first=True, padding_value=0),
+        "rejected_input_ids": pad_sequence(rejected_input_ids, batch_first=True, padding_value=pad_token_id),
+        "rejected_attention_mask": pad_sequence(rejected_attention_mask, batch_first=True, padding_value=0),
+        "complexity": torch.stack(complexity),
+        "problem_id": torch.stack(problem_id),
+        "prompt_length": torch.stack(prompt_length),
+    }
 
-def _pad_token_if_needed(tokenizer: PreTrainedTokenizer) -> None:
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-
-def create_tokenizer(model_name: str) -> PreTrainedTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    _pad_token_if_needed(tokenizer)
-    return tokenizer
 
 def create_model(
     model_name: str,
@@ -509,26 +534,24 @@ def create_ref_model(model_name: str, device: str) -> PeftModel:
 
 
 def build_static_context(
-    tokens_path: Path,
+    tokens_paths: tuple[Path, Path, Path],
     model_name: str,
     device: str,
-    problem_index_path: Path,
+    index_to_problem_path: Path,
 ) -> StaticTrainingContext:
     """Load all trial-invariant state once. Pass the result to every train_dpo call."""
-    raw_data = torch.load(tokens_path)
-    tokenizer = create_tokenizer(model_name)
-    if problem_index_path.exists():
-        with open(problem_index_path) as f:
-            problem_index = json.load(
-                f, object_hook=lambda obj: {int(k) if k.isdigit() else k: v for k, v in obj.items()}
-            )
+    raw_data = load_and_combine_pairs_tokens_info(*tokens_paths)
+    tokenizer = get_model_tokenizer(model_name)
+    if index_to_problem_path.exists():
+        with open(index_to_problem_path, "rb") as f:
+            index_to_problem = pickle.load(f)
     else:
-        problem_index = {}
+        index_to_problem = {}
     ref_model = create_ref_model(model_name, device)
     return StaticTrainingContext(
         raw_data=raw_data,
         tokenizer=tokenizer,
-        problem_index=problem_index,
+        index_to_problem=index_to_problem,
         ref_model=ref_model,
     )
 
@@ -553,8 +576,6 @@ def _compute_batch_forward(
     tokenizer: PreTrainedTokenizer,
     prompt_lengths: Optional[torch.Tensor] = None,
 ) -> tuple:
-    _pad_token_if_needed(tokenizer)
-
     with torch.no_grad():
         ref_chosen = ref_model(input_ids=chosen_ids, attention_mask=chosen_mask).logits
         ref_rejected = ref_model(input_ids=rejected_ids, attention_mask=rejected_mask).logits
@@ -580,7 +601,7 @@ def compute_batch_loss_train(
     tokenizer: PreTrainedTokenizer,
     loss_fn: Callable,
     use_compile: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
     chosen_ids, chosen_mask, rejected_ids, rejected_mask, complexities, prompt_lengths = _move_batch_to_device(batch)
 
     policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens = _compute_batch_forward(
@@ -597,7 +618,7 @@ def compute_batch_loss_train(
         complexities,
     )
 
-    return loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, extra
+    return loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens, extra
 
 
 def _compute_val_accuracy(
@@ -683,7 +704,7 @@ def compute_batch_loss_eval(
 
 def build_val_problems(
     val_loader: DataLoader,
-    problem_index: dict,
+    index_to_problem: dict,
     max_val_problems: int = 1000,
 ) -> list[dict]:
     """Build list of unique validation problems with pre-tokenized prompts."""
@@ -695,7 +716,7 @@ def build_val_problems(
         for pid in problem_ids:
             if pid not in seen_problem_ids:
                 seen_problem_ids.add(pid)
-                info = problem_index[pid]
+                info = index_to_problem[pid]
                 problem_text = info["problem"]
                 val_problems.append({
                     "problem_id": pid,
@@ -887,12 +908,14 @@ def _build_dataloaders(
     batch_size: int,
     num_workers: int,
     pin_memory: bool,
+    pad_token_id: int,
 ) -> tuple[DataLoader, DataLoader]:
+    collate = partial(collate_fn_tokenized, pad_token_id=pad_token_id)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate_fn_tokenized,
+        collate_fn=collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
@@ -902,7 +925,7 @@ def _build_dataloaders(
         val_dataset,
         batch_size=batch_size,
         shuffle=True,  # Shuffle val for more even problem coverage during accuracy eval
-        collate_fn=collate_fn_tokenized,
+        collate_fn=collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
@@ -921,7 +944,7 @@ def train_dpo(
     checkpoint_every: int = 1,
     data_limit: Optional[int] = None,
     resume_from: Optional[str] = None,
-    seed: int = 42,
+    seed: int = SEED,
     use_wandb: bool = False,
     run_name: Optional[str] = None,
     early_stopping_patience: int = 5,
@@ -936,31 +959,32 @@ def train_dpo(
     num_workers: int = 4,
     model_name: Optional[str] = None,
     loss_type: str = "dpo",
-    length_ratio: float = 1.0,
+    length_ratio_easy: float = 1.0,
+    length_ratio_hard: float = 1.0,
     max_pairs_per_problem: Optional[int] = 3,
     best_model_metric: BestModelMetric = "val_loss",
     accuracy_floor: Optional[float] = None,
     max_unique_problems: int = 65_000,
-    problem_index_path: Path = DATA_PATH / "problem_index_dict.json",
+    index_to_problem_path: Path = INDEX_TO_PROBLEM_PATH,
     ctx: Optional[StaticTrainingContext] = None,
 ) -> dict:
-    logger.debug(f'{" STARTED DPO TRAINER ":#^100}')
     set_seed(seed)
     effective_model_name = model_name or MODEL_NAME
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if ctx is None:
-        ctx = build_static_context(get_tokens_path(), effective_model_name, device, problem_index_path)
+        ctx = build_static_context(effective_model_name, device, index_to_problem_path)
 
     tokenizer = ctx.tokenizer
-    problem_index = ctx.problem_index
+    index_to_problem = ctx.index_to_problem
     ref_model = ctx.ref_model
 
     # Load, filter, and split in one call
     train_dataset, val_dataset = load_tokenized_datasets(
-        get_tokens_path(),
+        tokens_paths=get_tokens_paths(),
         raw_data=ctx.raw_data,
-        length_ratio=length_ratio,
+        length_ratio_easy=length_ratio_easy,
+        length_ratio_hard=length_ratio_hard,
         val_split=val_split,
         seed=seed,
         max_pairs_per_problem=max_pairs_per_problem,
@@ -969,21 +993,20 @@ def train_dpo(
 
     num_train = len(train_dataset)
     num_val = len(val_dataset)
-    logger.info("Data split: Train=%s, Val=%s (length_ratio=%.1f)", num_train, num_val, length_ratio)
+    logger.info("Data split: Train=%s, Val=%s (length_ratio_easy=%.1f, length_ratio_hard=%.1f)", num_train, num_val, length_ratio_easy, length_ratio_hard)
 
     pin_memory = device == "cuda"
 
     train_loader, val_loader = _build_dataloaders(
-        train_dataset, val_dataset, batch_size, num_workers, pin_memory
+        train_dataset, val_dataset, batch_size, num_workers, pin_memory,
+        pad_token_id=tokenizer.pad_token_id,
     )
 
-    logger.debug(f'{" START BUILD VALIDATION PROBLEMS ":#^100}')
-    if problem_index:
-        val_problems = build_val_problems(val_loader, problem_index)
+    if index_to_problem:
+        val_problems = build_val_problems(val_loader, index_to_problem)
     else:
-        logger.warning(f"Problem index not found at {problem_index_path}, skipping val_problems")
+        logger.warning(f"Problem index not found at {index_to_problem_path}, skipping val_problems")
         val_problems = []
-    logger.debug(f'{" END BUILD VALIDATION PROBLEMS ":#^100}')
 
     steps_per_epoch = len(train_loader)
     effective_batch_size = batch_size * gradient_accumulation_steps
@@ -1037,7 +1060,9 @@ def train_dpo(
         threshold=early_stopping_threshold,
         threshold_mode="rel",
     )
-    autocast_dtype = torch.float16 if device == "cuda" else torch.float32
+    # bfloat16 has the same exponent range as float32 so GradScaler is not
+    # needed (and its unscale kernel is not implemented for bf16 — it crashes).
+    autocast_dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
     logger.info("Using model: %s (loss_type=%s)", effective_model_name, loss_type)
     model = create_model(
@@ -1050,7 +1075,7 @@ def train_dpo(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
     loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
-    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda" and autocast_dtype == torch.float16))
 
     # TODO - what is it used for
     # Load generation eval problems once (50 easy + 50 hard)
@@ -1339,7 +1364,7 @@ def _run_epoch(
             dtype=autocast_dtype,
             enabled=use_mixed_precision,
         ):
-            loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, extra = compute_batch_loss_train(
+            loss, policy_chosen_lp, policy_rejected_lp, ref_chosen_lp, ref_rejected_lp, chosen_lens, rejected_lens, extra = compute_batch_loss_train(
                 model, ref_model, batch, tokenizer, loss_fn, compile_model
             )
             loss = loss / gradient_accumulation_steps
@@ -1356,11 +1381,6 @@ def _run_epoch(
             )
             per_sample_loss = -F.logsigmoid(reward_diff_per_sample)
             complexities = batch['complexity'].cuda(non_blocking=True)
-            rejected_lens = (batch['rejected_attention_mask'] != tokenizer.pad_token_id).sum(dim=-1).float()
-            if rejected_lens.device != device:
-                rejected_lens = rejected_lens.to(device)
-            elif not isinstance(rejected_lens, torch.Tensor):
-                rejected_lens = torch.tensor(rejected_lens, device=device, dtype=torch.float)
 
             accum.update(
                 loss.detach() * gradient_accumulation_steps,

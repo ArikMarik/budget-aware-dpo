@@ -17,18 +17,23 @@ See docs/preprocessing_analysis_and_spec.md and docs/PRD_next_stage_preprocessin
 
 import json
 import os
-import random
+import pickle
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import faiss
+import numpy as np
+import torch
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 from torch import Tensor
 
+from src.config import EMBEDDING_MODEL, PROBLEM_TO_LEVEL_PATH, SEED, SIMILARITY_INDEX_DIR
 from src.evaluation.answer_extraction import verify_correctness
 from src.utils import count_tokens, get_logger, set_seed
 
-set_seed(42)
+set_seed(SEED)
 
 logger = get_logger(__name__)
 
@@ -48,6 +53,97 @@ HARD_PREF_PCT_LOW = float(os.environ.get("HARD_PREF_PCT_LOW", 20))
 HARD_PREF_PCT_HIGH = float(os.environ.get("HARD_PREF_PCT_HIGH", 45))
 
 REJECTION_REASONS = {'unknown': -1, 'length': 0, 'incorrect': 1}
+SOURCE_TO_INT = {"gsm8k": 0, "math": 1, "augmented_math": 2, "augmented_gsm8k": 3}
+INT_TO_SOURCE = {v: k for k, v in SOURCE_TO_INT. items ()}
+
+MATH_CONFIGS = [
+    "algebra", "counting_and_probability", "geometry", "intermediate_algebra",
+    "number_theory", "prealgebra", "precalculus",
+]
+
+
+def _source_to_int(source: str) -> int:
+    return SOURCE_TO_INT.get (source. lower(), -1) # -1 for unknown
+
+
+def load_math_problem_to_level(use_cache: bool = True) -> dict[str, str]:
+    """Load MATH train split and build problem text -> level mapping.
+
+    Loads from HuggingFace with fallback sources, and caches result to
+    data/problem_to_level.pkl to avoid re-downloading.
+
+    Args:
+        use_cache: If True, load from pickle cache if exists.
+
+    Returns:
+        dict mapping normalized problem text -> level string (e.g., "Level 1")
+    """
+    from datasets import load_dataset, concatenate_datasets
+
+    if use_cache and PROBLEM_TO_LEVEL_PATH.exists():
+        with open(PROBLEM_TO_LEVEL_PATH, "rb") as f:
+            import pickle
+            mapping = pickle.load(f)
+        logger.info("Loaded problem to level mapping from %s (%d problems)", PROBLEM_TO_LEVEL_PATH, len(mapping))
+        return mapping
+
+    try:
+        parts = [
+            load_dataset("EleutherAI/hendrycks_math", cfg, split="train", trust_remote_code=False)
+            for cfg in MATH_CONFIGS
+        ]
+        ds = concatenate_datasets(parts)
+    except Exception as e:
+        logger.warning("Failed to load EleutherAI/hendrycks_math: %s. Trying fallback...", e)
+        try:
+            ds = load_dataset("hendrycks/competition_math", split="train")
+        except Exception as e2:
+            logger.warning("Failed to load hendrycks/competition_math: %s. Using final fallback...", e2)
+            ds = load_dataset("lighteval/MATH", split="train")
+
+    mapping = {}
+    for item in ds:
+        problem = normalize_problem(item.get("problem", item.get("question", "")))
+        level = item.get("level", "")
+        if problem and level:
+            mapping[problem] = str(level)
+
+    # Cache the result
+    import pickle
+    PROBLEM_TO_LEVEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(PROBLEM_TO_LEVEL_PATH, "wb") as f:
+        pickle.dump(mapping, f)
+    logger.info("Built and cached level map for %d MATH problems to %s", len(mapping), PROBLEM_TO_LEVEL_PATH)
+
+    return mapping
+
+
+def load_math_problems_with_complexity(use_cache: bool = True) -> dict[str, dict]:
+    """Load MATH train problems with level and complexity classification.
+
+    Args:
+        use_cache: If True, load from pickle cache if exists.
+
+    Returns:
+        dict mapping problem text -> {"level": int, "complexity": int}
+        Complexity: 0 (Easy) for level 1, 1 (Hard) for levels 2-5
+    """
+    problem_to_level = load_math_problem_to_level(use_cache=use_cache)
+
+    math_problems = {}
+    for problem, level_str in problem_to_level.items():
+        level = _normalize_level(level_str)
+        if level is None:
+            continue
+        # Level 1 = Easy (0), Level 2-5 = Hard (1)
+        complexity, _ = classify_complexity({"problem": problem, "level": level_str, "problem_source": "math"})
+        if problem not in math_problems:
+            math_problems[problem] = {
+                "level": level,
+                "complexity": complexity,
+            }
+
+    return math_problems
 
 
 def _normalize_level(level: Any) -> int | None:
@@ -71,6 +167,8 @@ class SimilarityIndex:
         self._index: Any = None
         self._metadata: list[dict] | None = None
         self._model: Any = None
+        self._model_name: str = EMBEDDING_MODEL
+        self._device: str = "cpu"
         self._loaded = False
 
     def ensure_loaded(self) -> None:
@@ -79,39 +177,37 @@ class SimilarityIndex:
             return
 
         try:
-            import faiss
-            from sentence_transformers import SentenceTransformer
-
-            index_path = Path(__file__).parent.parent.parent / "data" / "math_problem_index"
-            if not index_path.exists():
-                logger.warning(f"Similarity index not found at {index_path}")
+            if not SIMILARITY_INDEX_DIR.exists():
+                logger.warning(f"Similarity index not found at {SIMILARITY_INDEX_DIR}")
                 self._loaded = True
                 return
 
-            self._index = faiss.read_index(str(index_path / "index.faiss"))
+            self._index = faiss.read_index(str(SIMILARITY_INDEX_DIR / "index.faiss"))
 
             self._metadata = []
-            with open(index_path / "metadata.jsonl", "r") as f:
+            with open(SIMILARITY_INDEX_DIR / "metadata.jsonl", "r") as f:
                 for line in f:
                     self._metadata.append(json.loads(line))
 
-            config_path = index_path / "config.json"
+            config_path = SIMILARITY_INDEX_DIR / "config.json"
             if config_path.exists():
                 with open(config_path) as f:
                     config = json.load(f)
-                    model_name = config.get("embedding_model", "sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
+                    self._model_name = config.get("embedding_model", EMBEDDING_MODEL)
             else:
-                model_name = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+                self._model_name = EMBEDDING_MODEL
 
-            self._model = SentenceTransformer(model_name)
+            # Auto-detect GPU for SentenceTransformer (FAISS stays on CPU)
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._model = SentenceTransformer(self._model_name, device=self._device)
 
-            logger.info(f"Loaded similarity index with {self._index.ntotal} problems")
+            logger.info(f"Loaded similarity index with {self._index.ntotal} problems (model on {self._device})")
         except Exception as e:
             logger.warning(f"Failed to load similarity index: {e}")
 
         self._loaded = True
 
-    def find_similar(self, problem: str, threshold: float = 0.7) -> tuple[int | None, int | None]:
+    def find_similar(self, problem: str, threshold: float = 0.6) -> tuple[int | None, int | None]:
         """Find similar original MATH problem. Returns (complexity, level)."""
         self.ensure_loaded()
 
@@ -119,8 +215,6 @@ class SimilarityIndex:
             return None, None
 
         try:
-            import faiss
-
             query = self._model.encode([problem], convert_to_numpy=True)
             faiss.normalize_L2(query)
 
@@ -135,6 +229,59 @@ class SimilarityIndex:
             logger.warning(f"Similarity search failed: {e}")
 
         return None, None
+
+    def find_similar_batch(
+        self,
+        problems: list[str],
+        threshold: float = 0.6,
+        batch_size: int = 256,
+    ) -> list[tuple[int | None, int | None]]:
+        """Batch find similar MATH problems.
+
+        Args:
+            problems: List of problem texts to search for.
+            threshold: Minimum similarity score (default 0.6).
+            batch_size: Batch size for encoding (default 128).
+
+        Returns:
+            List of (complexity, level) tuples, one per problem.
+            complexity is None and level is None when no match found.
+        """
+        self.ensure_loaded()
+
+        if self._index is None or self._metadata is None or self._model is None:
+            return [(None, None)] * len(problems)
+
+        embeddings = []
+        embeddings = self._model.encode(problems, batch_size=batch_size, convert_to_numpy=True, show_progress_bar=True)
+
+        faiss.normalize_L2(embeddings)
+
+        # Process in batches for progress bar
+        scores_list, indices_list = [], []
+        num_batches = (len(embeddings) + batch_size - 1) // batch_size
+        for i in tqdm(range(num_batches), desc="Searching index", unit=" batch"):
+            start_idx = i * batch_size
+            end_idx = min(start_idx + batch_size, len(embeddings))
+            batch = embeddings[start_idx:end_idx]
+            scores_batch, indices_batch = self._index.search(batch, k=1)
+            scores_list.append(scores_batch)
+            indices_list.append(indices_batch)
+
+        scores = np.vstack(scores_list)
+        indices = np.vstack(indices_list)
+
+        results = []
+        for i in range(len(problems)):
+            if scores[i][0] >= threshold:
+                meta_idx = indices[i][0]
+                if meta_idx >= 0 and meta_idx < len(self._metadata):
+                    meta = self._metadata[meta_idx]
+                    results.append((meta.get("complexity"), _normalize_level(meta.get("level"))))
+                    continue
+            results.append((None, None))
+
+        return results
 
 
 _similarity_index = SimilarityIndex()
@@ -266,15 +413,14 @@ def label_preference(
     return "rejected", REJECTION_REASONS["length"]
 
 
-def load_problem_index(path: Path) -> dict[str, dict]:
-    """Load problem index from JSON and build problem_text -> problem data mapping."""
-    with open(path) as f:
-        index = json.load(f)
-    return {normalize_problem(item["problem"]): item for item in index}
+def load_problem_to_index(path: Path) -> dict[str, dict]:
+    """Load problem to index from pickle."""
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
 
-def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int) -> list[dict]:
-    """Stratified sampling by rejection_reason to limit pairs per problem."""
+def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem: int, seed: int = SEED) -> list[dict]:
+    """Stratified sampling by rejection_reason with weighted selection based on length_ratio."""
     by_reason: dict[int, list[dict]] = defaultdict(list)
     for p in pairs:
         by_reason[p["rejection_reason"]].append(p)
@@ -284,10 +430,31 @@ def stratified_max_pairs_per_problem_sampling(pairs: list[dict], max_per_problem
     remaining = max_per_problem
 
     # TODO - should we add a bias for incorrect pairs ???
+    rng = np.random.default_rng(seed)
     for reason, group in by_reason.items():
         quota = max(1, round(len(group) / total * max_per_problem))
         quota = min(quota, len(group), remaining)
-        selected.extend(random.sample(group, quota))
+        if quota <= 0:
+            continue
+
+        # Compute weights based on log(length_ratio), set to 0 if log(ratio) < 0
+        weights = []
+        for p in group:
+            ratio = compute_pair_length_ratio(p["chosen_length"], p["rejected_length"])
+            # avoid log(0) and set to 0 if negative
+            weights.append(max(np.log(max(ratio, 1e-6)), 0.0))
+
+        sum_weights = sum(weights)
+        if sum_weights > 0:
+            # Normalize to probabilities
+            probabilities = np.array(weights) / sum_weights
+            # Weighted sampling without replacement
+            indices = rng.choice(len(group), size=quota, replace=False, p=probabilities)
+        else:
+            # Fallback to uniform sampling if all weights are zero
+            indices = rng.choice(len(group), size=quota, replace=False)
+
+        selected.extend(group[i] for i in indices)
         remaining -= quota
         if remaining <= 0:
             break
@@ -332,9 +499,10 @@ def compute_pair_length_ratio(preferred_length: Tensor | int, rejected_length: T
 
 def build_dpo_pairs(
     raw_data: list[dict],
-    problem_index_path: Path,
+    problem_to_index_path: Path,
     max_per_problem: int | None = None,
     length_ratio: float | int = 1,
+    over_limit_json_path: Path | None = None,
 ) -> list[dict]:
     """
     Group by problem and build preferred/rejected pairs.
@@ -345,34 +513,44 @@ def build_dpo_pairs(
 
     Args:
         raw_data: List of examples with problem, generated_solution, etc.
-        problem_index_path: Path to problem_index.json. If provided, uses existing IDs and complexity.
+        problem_to_index_path: Path to problem_to_index.pkl. If provided, uses existing IDs and complexity.
         max_per_problem: If set (and not -1), limit number of pairs per problem using stratified sampling by rejection_reason.
+        over_limit_json_path: Path to JSON file with problems exceeding token limit (to skip).
     """
-    problem_index = load_problem_index(problem_index_path)
-    logger.info(f"Loaded problem index with {len(problem_index)} problems")
+    problem_to_index_dict = load_problem_to_index(problem_to_index_path)
+    logger.info(f"Loaded problem to index with {len(problem_to_index_dict)} problems")
+
+    # Load over-limit problem IDs to skip
+    over_limit_ids = set()
+    if over_limit_json_path and Path(over_limit_json_path).exists():
+        with open(over_limit_json_path) as f:
+            over_limit_data = json.load(f)
+        over_limit_ids = {item["problem_id"] for item in over_limit_data}
+        logger.info(f"Loaded {len(over_limit_ids)} over-limit problem IDs to skip")
 
     # Pass 1: group raw examples by problem (no labeling yet — we need the whole
     # group to compute per-problem percentile ranks).
     raw_groups: dict[str, list[dict]] = defaultdict(list)
-    problem_meta: dict[str, dict] = {}
     for ex in tqdm(raw_data, desc="Grouping by problem", unit=" examples"):
-        problem = normalize_problem(ex["problem"])
-        problem_data = problem_index.get(problem)
-        if problem_data is None:
-            raise ValueError(f"Problem not found in problem index:\n{problem}")
-        raw_groups[problem].append(ex)
-        problem_meta[problem] = problem_data
+        normalized_problem = normalize_problem(ex["problem"])
+        raw_groups[normalized_problem].append(ex)
 
     # Pass 2: label each solution using precomputed token bounds per problem.
     # Instead of calculating percentile rank per example (O(log N) per example),
     # compute bounds once per problem (O(1)) then simple comparison.
     groups: dict[str, list[dict]] = defaultdict(list)
-    for problem, items in tqdm(raw_groups.items(), desc="Labeling by per-problem percentile", unit=" problems"):
-        problem_data = problem_meta[problem]
+    for normalized_problem, items in tqdm(raw_groups.items(), desc="Labeling by per-problem percentile", unit=" problems"):
+        problem_data = problem_to_index_dict.get(normalized_problem)
+        if problem_data is None:
+            raise ValueError(f"Problem not found in problem to index:\n{normalized_problem}")
+
         problem_id = problem_data["problem_id"]
         level = problem_data["level"]
-        # complexity = problem_data["complexity"] # TODO - bring back after running load_real_data.py
-        complexity, _ = classify_complexity(problem_data, problem_data['avg_token_length'])
+        complexity = problem_data["complexity"]
+
+        # Skip problems that exceed token limit
+        if problem_id in over_limit_ids:
+            continue
 
         index_lengths = problem_data.get("token_lengths")
         if index_lengths:
@@ -386,7 +564,7 @@ def build_dpo_pairs(
         for ex in items:
             label, rejection_reason = label_preference(ex, low_tokens, high_tokens)
 
-            groups[problem].append({
+            groups[normalized_problem].append({
                 "problem_id": problem_id,
                 **ex,
                 "level": level,
@@ -397,20 +575,24 @@ def build_dpo_pairs(
 
     pairs: list[dict] = []
 
-    for problem, items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
+    for normalized_problem, items in tqdm(groups.items(), desc="Building pairs from groups", unit=" groups"):
         preferred, rejected = [], []
         for x in items:
             (preferred if x["label"] == "preferred" else rejected).append(x)
 
         problem_id = items[0]["problem_id"]
+        problem = items[0]["problem"]
         complexity = items[0]["complexity"]
+        problem_source = items[0]["problem_source"]
 
         if preferred and rejected:
             problem_pairs = []
+            skipped_ratio = 0
             for pw in preferred:
                 for rj in rejected:
                     # Skip pairs where the length ratio condition is not satisfied
                     if compute_pair_length_ratio(pw["teacher_token_count"], rj["teacher_token_count"]) < length_ratio:
+                        skipped_ratio += 1
                         continue
 
                     problem_pairs.append({
@@ -422,6 +604,7 @@ def build_dpo_pairs(
                         "rejection_reason": rj["rejection_reason"],
                         "chosen_length": pw["teacher_token_count"],
                         "rejected_length": rj["teacher_token_count"],
+                        "problem_source": _source_to_int(problem_source),
                     })
 
             if max_per_problem and max_per_problem > 0 and len(problem_pairs) > max_per_problem:
@@ -429,7 +612,7 @@ def build_dpo_pairs(
 
             pairs.extend(problem_pairs)
 
-    logger.info(f'Created a total of {len(pairs):,} pairs')
+    logger.info(f'Created a total of {len(pairs):,} pairs (skipped by length ratio: {skipped_ratio:,})')
 
     return pairs
 
@@ -447,11 +630,157 @@ def load_jsonl(path: Path) -> list[dict]:
     return data
 
 
+def safe_stratified_split(
+    *arrays: np.ndarray,
+    strata: np.ndarray,
+    test_size: float | int | None = None,
+    train_size: float | int | None = None,
+    random_state: int | None = None,
+) -> tuple[np.ndarray, ...]:
+    """
+    Split multiple arrays handling single-member strata gracefully.
+
+    Accepts variadic arrays (e.g., problems, strata, metadata) and splits them
+    identically by stratifying on the `strata` array, handling single-member strata
+    by splitting them randomly.
+    """
+    from sklearn.model_selection import train_test_split
+    from tqdm import tqdm
+
+    if not arrays:
+        raise ValueError("At least one array must be provided")
+
+    total_items = len(arrays[0])
+    for arr in arrays:
+        if len(arr) != total_items:
+            raise ValueError("All arrays must have the same length")
+
+    # Calculate test count
+    if test_size is not None and train_size is not None:
+        raise ValueError("Cannot specify both test_size and train_size")
+    if test_size is not None:
+        test_item_count = int(total_items * test_size) if isinstance(test_size, float) else test_size
+    elif train_size is not None:
+        train_item_count = int(total_items * train_size) if isinstance(train_size, float) else train_size
+        test_item_count = total_items - train_item_count
+    else:
+        raise ValueError("Must specify either test_size or train_size")
+
+    # Count items per stratum using np.unique with axis=0 and return_counts
+    unique_stratum_values, stratum_counts = np.unique(strata, axis=0, return_counts=True)
+    stratum_to_count_mapping = {
+        tuple(stratum_value): count
+        for stratum_value, count in zip(unique_stratum_values, stratum_counts)
+    }
+
+    # Separate multi-member vs single-member strata
+    multi_member_mask = np.array([
+        stratum_to_count_mapping.get(tuple(stratum_value), 0) >= 2
+        for stratum_value in tqdm(strata, desc="Checking stratum membership", unit=" strata")
+    ])
+
+    multi_member_indices = np.where(multi_member_mask)[0]
+    single_member_indices = np.where(~multi_member_mask)[0]
+
+    multi_member_strata = strata[multi_member_mask]
+    single_member_strata = strata[~multi_member_mask]
+
+    # Allocate test count proportionally, but ensure minimum for stratification
+    if len(multi_member_indices) > 0:
+        # Count unique strata in multi-member group
+        unique_multi_strata, multi_strata_counts = np.unique(multi_member_strata, axis=0, return_counts=True)
+        num_multi_classes = len(unique_multi_strata)
+
+        # Calculate proportional test count
+        proportional_test_count = round(test_item_count * len(multi_member_indices) / total_items)
+
+        # Check if stratified split is possible (need at least 2 per class: 1 train, 1 test)
+        min_for_stratify = num_multi_classes * 2
+
+        if len(multi_member_indices) >= min_for_stratify:
+            # Ensure test count >= num_classes and train count >= num_classes
+            multi_member_test_count = max(num_multi_classes, min(proportional_test_count, len(multi_member_indices) - num_multi_classes))
+            multi_member_test_count = max(0, min(multi_member_test_count, len(multi_member_indices)))
+        else:
+            # Not enough samples for stratification, will use random split
+            multi_member_test_count = max(0, min(proportional_test_count, len(multi_member_indices)))
+    else:
+        multi_member_test_count = 0
+
+    # Split multi-member: use stratification if possible, else random
+    if len(multi_member_indices) > 0 and 0 < multi_member_test_count < len(multi_member_indices):
+        # Check if we can use stratified split
+        unique_multi_strata = np.unique(multi_member_strata, axis=0)
+        num_multi_classes = len(unique_multi_strata)
+
+        can_stratify = (
+            len(multi_member_indices) - multi_member_test_count >= num_multi_classes and
+            multi_member_test_count >= num_multi_classes
+        )
+
+        if can_stratify:
+            multi_member_train_indices, multi_member_test_indices = train_test_split(
+                multi_member_indices,
+                test_size=multi_member_test_count / len(multi_member_indices),
+                stratify=multi_member_strata,
+                random_state=random_state
+            )
+        else:
+            # Fall back to random split
+            multi_member_train_indices, multi_member_test_indices = train_test_split(
+                multi_member_indices,
+                test_size=multi_member_test_count / len(multi_member_indices),
+                random_state=random_state
+            )
+    elif len(multi_member_indices) > 0:
+        multi_member_train_indices, multi_member_test_indices = (
+            (multi_member_indices, np.array([])) if multi_member_test_count == 0
+            else (np.array([]), multi_member_indices)
+        )
+    else:
+        multi_member_train_indices, multi_member_test_indices = np.array([]), np.array([])
+
+    single_member_test_count = test_item_count - multi_member_test_count
+
+    # Split single-member indices randomly
+    if len(single_member_indices) > 0 and 0 < single_member_test_count < len(single_member_indices):
+        single_member_train_indices, single_member_test_indices = train_test_split(
+            single_member_indices,
+            test_size=single_member_test_count / len(single_member_indices),
+            random_state=random_state
+        )
+    elif len(single_member_indices) > 0:
+        single_member_train_indices, single_member_test_indices = (
+            (single_member_indices, np.array([])) if single_member_test_count == 0
+            else (np.array([]), single_member_indices)
+        )
+    else:
+        single_member_train_indices, single_member_test_indices = np.array([]), np.array([])
+
+    # Combine indices
+    combined_train_indices = np.concatenate([
+        np.array(multi_member_train_indices, dtype=int),
+        np.array(single_member_train_indices, dtype=int)
+    ])
+    combined_test_indices = np.concatenate([
+        np.array(multi_member_test_indices, dtype=int),
+        np.array(single_member_test_indices, dtype=int)
+    ])
+
+    # Split all arrays using the combined indices
+    result = []
+    for arr in tqdm(arrays, desc="Splitting arrays", unit=" array"):
+        result.append(arr[combined_train_indices])
+        result.append(arr[combined_test_indices])
+
+    return tuple(result)
+
+
 def split_pairs_by_problem(
     pairs: dict,
     val_split: float,
-    seed: int = 42,
-    filtered_indices: list[int] | None = None,
+    seed: int = SEED,
+    filtered_indices: list[int] | np.ndarray | None = None,
     max_unique_problems: int = 100_000
 ) -> tuple[list[int], list[int]]:
     """
@@ -460,56 +789,57 @@ def split_pairs_by_problem(
 
     Stratifies by problem-level complexity (majority complexity among pairs for each problem).
     """
-    import numpy as np
-    from sklearn.model_selection import train_test_split
-
     set_seed(seed)
 
-
+    num_pairs = len(pairs["problem_id"])
     if filtered_indices is None:
-        filtered_indices = np.arange(len(pairs)).tolist()
+        filtered_indices = np.arange(num_pairs)
+    else:
+        filtered_indices = np.array(filtered_indices)
 
-    problem_ids = pairs["problem_ids"].numpy()[filtered_indices]
-    complexities = pairs["complexities"].numpy()[filtered_indices]
+    problem_ids = pairs["problem_id"].numpy()[filtered_indices]
+    complexities = pairs["complexity"].numpy()[filtered_indices]
+    problem_sources = pairs["problem_source"].numpy()[filtered_indices]
 
     # Get unique problems
     unique_problems = np.unique(problem_ids)
 
-    # Build problem -> complexity mapping (pick first sample's complexity)
-    problem_to_complexity = {}
-    for pid in unique_problems:
-        first_idx = np.where(problem_ids == pid)[0][0]
-        problem_to_complexity[pid] = complexities[first_idx]
+    # Build problem -> complexity and source mapping (pick first sample's complexity)
+    problem_to_complexity_and_sources = {}
+    iterator = tqdm(problem_ids, desc='Build problem -> complexity and source mapping')
+    for i, pid in enumerate(iterator):
+        if pid not in problem_to_complexity_and_sources:
+            problem_to_complexity_and_sources[pid] = (complexities[i], problem_sources[i])
+            if len(problem_to_complexity_and_sources) >= len(unique_problems):
+                iterator.close()
+                break
 
-    problem_complexities = np.array([problem_to_complexity[p] for p in unique_problems])
+    problem_strata = np.array([problem_to_complexity_and_sources[p] for p in unique_problems])
 
-    # TODO - stratify by problem_source too
-    # Stratified split
+    # Safe stratified split (handles single-member strata)
     if len(unique_problems) > max_unique_problems:
-        unique_problems, discarded_problems, problem_complexities, discarded_problem_complexities = train_test_split(
-        unique_problems, problem_complexities,
-        train_size=max_unique_problems,
-        stratify=problem_complexities,
-        random_state=seed,
-    )
-    unique_train_problem_ids, unique_val_problem_ids = train_test_split(
+        unique_problems, discarded_problems, problem_strata, discarded_problem_strata = safe_stratified_split(
+            unique_problems, problem_strata,
+            strata=problem_strata,
+            train_size=max_unique_problems,
+            random_state=seed,
+        )
+
+    unique_train_problem_ids, unique_val_problem_ids = safe_stratified_split(
         unique_problems,
+        strata=problem_strata,
         test_size=val_split,
-        stratify=problem_complexities,
         random_state=seed,
     )
 
     # Single loop - assign to train or val
-    train_indices = []
-    val_indices = []
-    for i, pid in enumerate(problem_ids):
-        if pid in unique_train_problem_ids:
-            train_indices.append(filtered_indices[i])
-        elif pid in unique_val_problem_ids:
-            val_indices.append(filtered_indices[i])
+    train_mask = np.isin(problem_ids, unique_train_problem_ids)
+    val_mask = np.isin(problem_ids, unique_val_problem_ids)
+    train_indices = filtered_indices[train_mask].tolist()
+    val_indices = filtered_indices[val_mask].tolist()
 
     logger.info(
-        f"Data split, filtered indices: {len(filtered_indices):,} out of {len(pairs):,} pairs\n\t"
+        f"Data split, filtered indices: {len(filtered_indices):,} out of {num_pairs:,} pairs\n\t"
         f"max_unique_problems={max_unique_problems}): "
         f"Train (unique problems)={len(unique_train_problem_ids)}, Val (unique problems)={len(unique_val_problem_ids)}"
     )
@@ -518,9 +848,10 @@ def split_pairs_by_problem(
 
 
 def compute_statistics(
-    pairs: list[dict],
+    dataset_path: Path,
 ) -> dict[str, Any]:
     """Compute full statistics per spec (Section 4), including length ratio histogram."""
+    pairs = load_jsonl(dataset_path)
     total = len(pairs)
 
     if total == 0:

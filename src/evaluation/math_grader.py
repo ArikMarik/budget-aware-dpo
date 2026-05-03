@@ -1,3 +1,4 @@
+import functools
 import re
 
 from math_verify import parse, verify
@@ -8,7 +9,6 @@ from src.utils import get_logger, setup_global_exception_handler
 
 
 logger = get_logger(__name__)
-setup_global_exception_handler(__name__)
 
 
 def strip_text_commands(s: str) -> str:
@@ -96,6 +96,7 @@ def remove_spaces(s: str) -> str:
     return re.sub(r'\s+', '', s)
 
 
+@functools.lru_cache(maxsize=1024)
 def verify_answer(
     pred: str | None,
     expected: str,
@@ -103,25 +104,35 @@ def verify_answer(
     if pred is None:
         return False
 
-    no_text_pred = strip_text_commands(pred)
-    no_text_expected = strip_text_commands(expected)
-
     no_space_pred = remove_spaces(pred)
     no_space_expected = remove_spaces(expected)
+
+    if math_equal(no_space_pred, no_space_expected):
+        return True
 
     stripped_no_space_pred = remove_spaces(strip_string(pred))
     stripped_no_space_expected = remove_spaces(strip_string(expected))
 
+    if math_equal(stripped_no_space_pred, stripped_no_space_expected):
+        return True
+
+    no_text_pred = strip_text_commands(pred)
+    no_text_expected = strip_text_commands(expected)
+
+    if math_equal(remove_spaces(no_text_pred), remove_spaces(no_text_expected)) or\
+        math_equal(no_space_pred, stripped_no_space_expected) or \
+            math_equal(stripped_no_space_pred, no_space_expected) or \
+                math_equal(strip_string(no_space_pred), strip_string(no_space_expected)):
+        return True
+
     stripped_no_text_pred = remove_spaces(strip_string(strip_text_commands(pred)))
     stripped_no_text_expected = remove_spaces(strip_string(strip_text_commands(expected)))
 
+    if  math_equal(stripped_no_text_pred, stripped_no_text_expected):
+        return True
+
     try:
-        return verify(parse(_wrap(no_text_expected)), parse(_wrap(no_text_pred))) or verify(parse(_wrap(stripped_no_space_pred)), parse(_wrap(stripped_no_space_expected)))
+        return verify(parse(_wrap(no_text_expected)), parse(_wrap(no_text_pred)), timeout_seconds=2)
     except Exception as exc:
         logger.debug("math-verify inconclusive for %r vs %r: %s", pred, expected, exc)
-
-    return math_equal(no_space_pred, no_space_expected) or math_equal(stripped_no_space_pred, stripped_no_space_expected) or \
-        math_equal(remove_spaces(no_text_pred), remove_spaces(no_text_expected))or \
-        math_equal(no_space_pred, stripped_no_space_expected) or math_equal(stripped_no_space_pred, no_space_expected) or \
-        math_equal(strip_string(no_space_pred), strip_string(no_space_expected)) or \
-        math_equal(stripped_no_text_pred, stripped_no_text_expected)
+    return False

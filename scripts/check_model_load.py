@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Load Qwen-2.5-0.5B and run a forward pass on a single dummy example.
+Load UNSLOTH_MODEL_NAME and run a forward pass on a single dummy example.
 Uses Unsloth when available, otherwise falls back to transformers.
 """
 
 import os
 from pathlib import Path
 
+from src.config import UNSLOTH_MODEL_NAME
 from src.utils import get_logger, set_seed
 
 logger = get_logger(__name__)
@@ -35,7 +36,7 @@ def main():
         import torch
 
         model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name="unsloth/Qwen2.5-0.5B",
+            model_name=UNSLOTH_MODEL_NAME,
             max_seq_length=512,
             dtype=None,  # auto
             load_in_4bit=False,
@@ -53,8 +54,8 @@ def main():
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
 
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B", torch_dtype=torch.float32)
+        tokenizer = AutoTokenizer.from_pretrained(UNSLOTH_MODEL_NAME)
+        model = AutoModelForCausalLM.from_pretrained(UNSLOTH_MODEL_NAME, torch_dtype=torch.float32)
         model.eval()
 
         inputs = tokenizer(prompt, return_tensors="pt")

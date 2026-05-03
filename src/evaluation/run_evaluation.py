@@ -15,6 +15,7 @@ from src.config import (
     GSM8K_TEST_PATH,
     MATH_TEST_PATH,
     MODEL_NAME,
+    SEED,
     get_processed_dataset_path,
 )
 from src.data.preprocessing import classify_complexity
@@ -22,7 +23,7 @@ from src.evaluation.answer_extraction import extract_answer, verify_correctness
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.utils import count_tokens, set_seed
 
-set_seed(42)
+set_seed(SEED)
 
 
 def load_eval_problems(limit: Optional[int] = None, use_real: bool = False) -> list[dict]:
@@ -53,7 +54,7 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
                 problems.append({
                     "problem": p["problem"],
                     "expected": p.get("expected_answer", ""),
-                    "complexity": classify_complexity(p),
+                    "complexity": classify_complexity(p)[0],
                     "source": "gsm8k",
                     "level": None,
                 })
@@ -70,7 +71,7 @@ def load_eval_problems_real(limit: Optional[int] = None) -> list[dict]:
                 problems.append({
                     "problem": p["problem"],
                     "expected": p.get("expected_answer", ""),
-                    "complexity": classify_complexity(p),
+                    "complexity": classify_complexity(p)[0],
                     "source": "math",
                     "level": level,
                 })
@@ -192,7 +193,9 @@ def compute_metrics(results: list[dict]) -> dict:
 
     with_expected, correct, easy_results, hard_results = [],  [], [], []
     easy_correct, hard_correct = [], []
-    total_tokens = 0
+    total_tokens, total_tokens_correct = 0, 0
+    total_tokens_easy, total_tokens_hard = 0, 0
+    total_tokens_easy_correct, total_tokens_hard_correct = 0, 0
     math_by_level = {}
     math_45_with_exp, math_45_correct = [], []
 
@@ -201,15 +204,20 @@ def compute_metrics(results: list[dict]) -> dict:
             with_expected.append(r)
             if r["correct"]:
                 correct.append(r)
+                total_tokens_correct += r["tokens"]
         total_tokens += r["tokens"]
         if r["complexity"] == 0:
             easy_results.append(r)
             if r["correct"]:
                 easy_correct.append(r)
+                total_tokens_easy_correct += r["tokens"]
+            total_tokens_easy += r["tokens"]
         elif r["complexity"] == 1:
             hard_results.append(r)
             if r["correct"]:
                 hard_correct.append(r)
+                total_tokens_hard_correct += r["tokens"]
+            total_tokens_hard += r["tokens"]
 
         level = r.get("level")
         if level is None:
@@ -228,7 +236,8 @@ def compute_metrics(results: list[dict]) -> dict:
                     math_45_correct.append(r)
 
     accuracy = len(correct) / len(with_expected) if with_expected else 0
-    tpca = total_tokens / len(correct) if correct else float("inf")
+    tpca = total_tokens_correct / len(correct) if correct else float("inf")
+    average_tokens_length = total_tokens / len(results) if results else 0
 
     for v in math_by_level.values():
         v["accuracy"] = v["correct"] / v["total"] if v["total"] > 0 else 0
@@ -238,9 +247,13 @@ def compute_metrics(results: list[dict]) -> dict:
         "num_correct": len(correct),
         "num_total": len(with_expected),
         "tpca": tpca,
+        "average_tokens_length": average_tokens_length,
         "total_tokens": total_tokens,
-        "avg_tokens_easy": sum(r["tokens"] for r in easy_results) / len(easy_results) if easy_results else 0,
-        "avg_tokens_hard": sum(r["tokens"] for r in hard_results) / len(hard_results) if hard_results else 0,
+        "total_tokens_correct": total_tokens_correct,
+        "avg_tokens_easy": total_tokens_easy / len(easy_results) if easy_results else 0,
+        "avg_tokens_hard": total_tokens_hard / len(hard_results) if hard_results else 0,
+        "avg_tokens_easy_correct": total_tokens_easy_correct / len(easy_correct) if easy_correct else 0,
+        "avg_tokens_hard_correct": total_tokens_hard_correct / len(hard_correct) if hard_correct else 0,
         "num_easy": len(easy_results),
         "num_hard": len(hard_results),
         "num_easy_correct": len(easy_correct),

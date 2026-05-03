@@ -10,9 +10,11 @@ from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+import concurrent.futures
+import torch
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
-from src.config import MODEL_NAME
+from src.config import CHOSEN_ENCODINGS_PATH, MODEL_NAME, PROCESSED_PAIRS_INFO_PATH, REJECTED_ENCODINGS_PATH, SEED
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs" / "cli"
@@ -82,7 +84,7 @@ def setup_global_exception_handler(logger_name: str = "main") -> None:
     atexit.register(lambda: logger.info("Script exited normally"))
 
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = SEED) -> None:
     """Fix random seeds for reproducibility across torch, numpy, transformers."""
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -112,9 +114,12 @@ def approx_tokens(text: str) -> int:
 
 
 @lru_cache(maxsize=1)
-def _get_model_tokenizer():
+def get_model_tokenizer(model_name: str = MODEL_NAME) -> PreTrainedTokenizer:
     """Get cached Qwen tokenizer (lazy loading)."""
-    return AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 
 def count_tokens(text: str, tokenizer: PreTrainedTokenizer | None = None) -> int:
@@ -124,5 +129,52 @@ def count_tokens(text: str, tokenizer: PreTrainedTokenizer | None = None) -> int
     to ensure token counts match what the model sees during training/inference.
     """
     if tokenizer is None:
-        tokenizer = _get_model_tokenizer()
+        tokenizer = get_model_tokenizer()
     return len(tokenizer.encode(str(text) if text else "", add_special_tokens=False))
+
+
+def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH, rejected_path: Path = REJECTED_ENCODINGS_PATH, info_path: Path = PROCESSED_PAIRS_INFO_PATH) -> dict:
+    """Load tokenized prompts and problem info, and combine into single dict."""
+    import time
+    from tqdm import tqdm
+
+    logger = get_logger(__name__)
+    logger.info("Loading and combining tokenized data (parallel)...")
+
+    def _load_file(name: str, path: Path, key: str):
+        size_mb = path.stat().st_size / 1e6
+        logger.info(f"Loading {name} from {path} ({size_mb:.2f} MB)...")
+        start = time.time()
+        data = torch.load(path, weights_only=False)
+        elapsed = time.time() - start
+        logger.info(f"Loaded {name} in {elapsed:.2f}s")
+        return key, data
+
+    loads = [
+        ("chosen encodings", chosen_path, "chosen_encodings"),
+        ("rejected encodings", rejected_path, "rejected_encodings"),
+        ("pairs info", info_path, "pairs_info"),
+    ]
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(_load_file, name, path, key): key for name, path, key in loads}
+        for future in tqdm(concurrent.futures.as_completed(futures), desc="Loading files", total=3, unit="file"):
+            key, data = future.result()
+            results[key] = data
+
+    chosen_encodings = results["chosen_encodings"]
+    rejected_encodings = results["rejected_encodings"]
+    pairs_info = results["pairs_info"]
+
+    assert len(chosen_encodings["input_ids"]) == len(rejected_encodings["input_ids"]) == len(pairs_info["prompt_length"]), "Mismatched lengths of encodings and info"
+
+    combined = pairs_info
+    combined["chosen_input_ids"] = chosen_encodings["input_ids"]
+    combined["rejected_input_ids"] = rejected_encodings["input_ids"]
+    if "attention_mask" in chosen_encodings and "attention_mask" in rejected_encodings:
+        combined["chosen_attention_mask"] = chosen_encodings["attention_mask"]
+        combined["rejected_attention_mask"] = rejected_encodings["attention_mask"]
+
+    logger.info(f"Combined data ready - {len(combined['prompt_length'])} total samples")
+    return combined
