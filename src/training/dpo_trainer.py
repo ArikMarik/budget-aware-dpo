@@ -444,12 +444,10 @@ def load_tokenized_datasets(
             data, filtered_indices, max_pairs_per_problem, seed
         )
 
-    logger.debug(f'{" START SPLIT BY PROBLEM ":#^100}')
     # 3. Split by problem_id (stratified by complexity of filtered data)
     train_indices, val_indices = split_pairs_by_problem(
         data, val_split, seed, filtered_indices, max_unique_problems
     )
-    logger.debug(f'{" END SPLIT BY PROBLEM ":#^100}')
 
     train_dataset = TokenizedDPODataset(data, train_indices)
     val_dataset = TokenizedDPODataset(data, val_indices)
