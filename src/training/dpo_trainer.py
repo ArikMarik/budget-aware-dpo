@@ -313,11 +313,24 @@ class TokenizedDPODataset(Dataset):
         real_idx = self.indices[idx]
         chosen_ids = self.data["chosen_input_ids"][real_idx]
         rejected_ids = self.data["rejected_input_ids"][real_idx]
+
+        len_chosen = len(chosen_ids)
+        len_rejected = len(rejected_ids)
+
+        chosen_attention_mask = torch.as_tensor(self.data.get(
+            "chosen_attention_mask",
+            torch.ones(size=(len_chosen,)).expand(real_idx+1, -1)
+        )[real_idx]).to(dtype=torch.long)
+        rejected_attention_mask = torch.as_tensor(self.data.get(
+            "rejected_attention_mask",
+            torch.ones(size=(len_rejected,)).expand(real_idx+1, -1)
+        )[real_idx]).to(dtype=torch.long)
+
         return {
             "chosen_input_ids": chosen_ids,
-            "chosen_attention_mask": torch.ones(len(chosen_ids), dtype=torch.long),
+            "chosen_attention_mask": chosen_attention_mask,
             "rejected_input_ids": rejected_ids,
-            "rejected_attention_mask": torch.ones(len(rejected_ids), dtype=torch.long),
+            "rejected_attention_mask": rejected_attention_mask,
             "complexity": self.data["complexity"][real_idx],
             "problem_id": self.data["problem_id"][real_idx],
             "prompt_length": self.data["prompt_length"][real_idx],
