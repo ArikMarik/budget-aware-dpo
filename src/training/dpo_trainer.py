@@ -433,14 +433,10 @@ def load_tokenized_datasets(
             "Run preprocess_dpo_data.py first."
         )
 
-    logger.debug(f'{" START LOAD TOKENS ":#^100}')
     data = raw_data if raw_data is not None else load_and_combine_pairs_tokens_info(*tokens_paths)
-    logger.debug(f'{" END LOAD TOKENS ":#^100}')
 
-    logger.debug(f'{" START FILTER BY LENGTH ":#^100}')
     # 1. Apply per-complexity length_ratio filter (vectorized)
     filtered_indices = _filter_by_length_ratio(data, length_ratio_easy, length_ratio_hard)
-    logger.debug(f'{" END FILTER BY LENGTH ":#^100}')
 
     # 2. Cap pairs per problem (stratified by rejection_reason)
     if max_pairs_per_problem is not None and max_pairs_per_problem > 0:
@@ -974,7 +970,6 @@ def train_dpo(
     index_to_problem_path: Path = INDEX_TO_PROBLEM_PATH,
     ctx: Optional[StaticTrainingContext] = None,
 ) -> dict:
-    logger.debug(f'{" STARTED DPO TRAINER ":#^100}')
     set_seed(seed)
     effective_model_name = model_name or MODEL_NAME
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1009,13 +1004,11 @@ def train_dpo(
         pad_token_id=tokenizer.pad_token_id,
     )
 
-    logger.debug(f'{" START BUILD VALIDATION PROBLEMS ":#^100}')
     if index_to_problem:
         val_problems = build_val_problems(val_loader, index_to_problem)
     else:
         logger.warning(f"Problem index not found at {index_to_problem_path}, skipping val_problems")
         val_problems = []
-    logger.debug(f'{" END BUILD VALIDATION PROBLEMS ":#^100}')
 
     steps_per_epoch = len(train_loader)
     effective_batch_size = batch_size * gradient_accumulation_steps
