@@ -585,6 +585,7 @@ def build_dpo_pairs(
         problem_id = items[0]["problem_id"]
         problem = items[0]["problem"]
         complexity = items[0]["complexity"]
+        level = _normalize_level(items[0]["level"])
         problem_source = items[0]["problem_source"]
 
         if preferred and rejected:
@@ -603,6 +604,7 @@ def build_dpo_pairs(
                         "chosen": pw["generated_solution"],
                         "rejected": rj["generated_solution"],
                         "complexity": complexity,
+                        "level": level,
                         "rejection_reason": rj["rejection_reason"],
                         "chosen_length": pw["teacher_token_count"],
                         "rejected_length": rj["teacher_token_count"],
@@ -688,7 +690,6 @@ def safe_stratified_split(
     single_member_indices = np.where(~multi_member_mask)[0]
 
     multi_member_strata = strata[multi_member_mask]
-    single_member_strata = strata[~multi_member_mask]
 
     # Allocate test count proportionally, but ensure minimum for stratification
     if len(multi_member_indices) > 0:
@@ -774,7 +775,7 @@ def safe_stratified_split(
 
     # Split all arrays using the combined indices
     result = []
-    for arr in tqdm(arrays, desc="Splitting arrays", unit=" array"):
+    for arr in arrays:
         result.append(arr[combined_train_indices])
         result.append(arr[combined_test_indices])
 
@@ -792,7 +793,7 @@ def split_pairs_by_problem(
     Split pairs into train/val by unique problem to prevent data leakage.
     Ensures the same problem doesn't appear in both sets.
 
-    Stratifies by problem-level complexity (majority complexity among pairs for each problem).
+    Stratifies by problem-level complexity (majority complexity among pairs for each problem) and source.
     """
     set_seed(seed)
 
@@ -804,22 +805,23 @@ def split_pairs_by_problem(
 
     problem_ids = pairs["problem_id"].numpy()[filtered_indices]
     complexities = pairs["complexity"].numpy()[filtered_indices]
+    levels = pairs["level"].numpy()[filtered_indices]
     problem_sources = pairs["problem_source"].numpy()[filtered_indices]
 
     # Get unique problems
     unique_problems = np.unique(problem_ids)
 
     # Build problem -> complexity and source mapping (pick first sample's complexity)
-    problem_to_complexity_and_sources = {}
+    problem_to_complexity_sources_and_level = {}
     iterator = tqdm(problem_ids, desc='Build problem -> complexity and source mapping')
     for i, pid in enumerate(iterator):
-        if pid not in problem_to_complexity_and_sources:
-            problem_to_complexity_and_sources[pid] = (complexities[i], problem_sources[i])
-            if len(problem_to_complexity_and_sources) >= len(unique_problems):
+        if pid not in problem_to_complexity_sources_and_level:
+            problem_to_complexity_sources_and_level[pid] = (complexities[i], problem_sources[i], levels[i])
+            if len(problem_to_complexity_sources_and_level) >= len(unique_problems):
                 iterator.close()
                 break
 
-    problem_strata = np.array([problem_to_complexity_and_sources[p] for p in unique_problems])
+    problem_strata = np.array([problem_to_complexity_sources_and_level[p] for p in unique_problems])
 
     # Safe stratified split (handles single-member strata)
     if len(unique_problems) > max_unique_problems:
@@ -837,7 +839,6 @@ def split_pairs_by_problem(
         random_state=seed,
     )
 
-    # Single loop - assign to train or val
     train_mask = np.isin(problem_ids, unique_train_problem_ids)
     val_mask = np.isin(problem_ids, unique_val_problem_ids)
     train_indices = filtered_indices[train_mask].tolist()
@@ -850,6 +851,139 @@ def split_pairs_by_problem(
     )
 
     return train_indices, val_indices
+
+
+def _split_pairs_by_problem(
+    pairs: dict,
+    split_size: float | int,
+    filtered_indices: list[int] | np.ndarray | None = None,
+    max_unique_problems: int | None = 100_000,
+    seed: int = SEED,
+) -> np.ndarray:
+    """
+    Split pairs by unique problem to prevent data leakage.
+    Ensures the same problem doesn't appear in both sets.
+
+    Stratifies by problem-level complexity (majority complexity among pairs for each problem) and source.
+    """
+    set_seed(seed)
+
+    num_pairs = len(pairs["problem_id"])
+    if filtered_indices is None:
+        filtered_indices = np.arange(num_pairs)
+    else:
+        filtered_indices = np.array(filtered_indices)
+
+    problem_ids = pairs["problem_id"].numpy()[filtered_indices]
+    complexities = pairs["complexity"].numpy()[filtered_indices]
+    levels = pairs["level"].numpy()[filtered_indices]
+    problem_sources = pairs["problem_source"].numpy()[filtered_indices]
+
+    # Get unique problems
+    unique_problems = np.unique(problem_ids)
+
+    # Build problem -> complexity and source mapping (pick first sample's complexity)
+    problem_to_complexity_sources_and_level = {}
+    iterator = tqdm(problem_ids, desc='Build problem -> complexity and source mapping')
+    for i, pid in enumerate(iterator):
+        if pid not in problem_to_complexity_sources_and_level:
+            problem_to_complexity_sources_and_level[pid] = (complexities[i], problem_sources[i], levels[i])
+            if len(problem_to_complexity_sources_and_level) >= len(unique_problems):
+                iterator.close()
+                break
+
+    problem_strata = np.array([problem_to_complexity_sources_and_level[p] for p in unique_problems])
+
+    selected_problem_ids, discarded_problem_ids, selected_problem_strata, discarded_problem_strata = safe_stratified_split(
+        unique_problems, problem_strata,
+        strata=problem_strata,
+        train_size=split_size,
+        random_state=seed,
+    )
+
+    # Safe stratified split (handles single-member strata)
+    if max_unique_problems is not None and len(selected_problem_ids) > max_unique_problems:
+        selected_problem_ids, discarded_problem_ids = safe_stratified_split(
+            selected_problem_ids,
+            strata=problem_strata,
+            train_size=max_unique_problems,
+            random_state=seed,
+        )
+
+    selected_mask = np.isin(problem_ids, selected_problem_ids)
+    selected_indices = filtered_indices[selected_mask]
+
+    logger.info(
+        f"Data split, filtered indices: {len(filtered_indices):,} out of {num_pairs:,} pairs\n\t"
+        f"Size (unique problems)={len(selected_problem_ids)}"
+    )
+
+    return selected_indices
+
+
+def extract_balanced_set(pairs: dict, size: int | float, filtered_indices: list[int] | np.ndarray | None = None, seed: int = SEED) -> list[int]:
+    """Extract a set containing an equal number of easy and hard problems"""
+    problem_ids = pairs["problem_id"].numpy()
+    complexities = pairs["complexity"].numpy()
+
+    # Get unique problems
+    unique_problems = np.unique(problem_ids)
+    total_problems = len(unique_problems)
+
+    # Build problem -> complexity (pick first sample's complexity)
+    problem_to_complexity = {}
+    iterator = tqdm(problem_ids, desc='Build problem -> complexity mapping')
+    for i, pid in enumerate(iterator):
+        if pid not in problem_to_complexity:
+            problem_to_complexity[pid] = complexities[i]
+            if len(problem_to_complexity) >= len(unique_problems):
+                iterator.close()
+                break
+
+    _, (count_easy, count_hard) = np.unique(list(problem_to_complexity.values()), return_counts=True)
+    if abs(count_easy - count_hard) < 10: # already balanced, about the same number of easy and hard problems
+        return _split_pairs_by_problem(pairs, split_size=size, filtered_indices=filtered_indices, seed=seed).tolist()
+
+    if count_easy < count_hard:
+        extra_size = size * (total_problems / count_easy) / 2
+    else:
+        extra_size = size * (total_problems / count_hard) / 2
+    if extra_size >= 1:
+        extra_size = int(np.ceil(extra_size))
+
+    extra_val_indices = _split_pairs_by_problem(pairs, split_size=extra_size, filtered_indices=filtered_indices, seed=seed)
+
+    if count_easy < count_hard:
+        first_part_mask = complexities[extra_val_indices] == 0
+        remaining_size = count_easy / count_hard
+    else:
+        first_part_mask = complexities[extra_val_indices] == 1
+        remaining_size = count_hard / count_easy
+
+    first_part_val_indices = extra_val_indices[first_part_mask]
+    second_part_val_indices = _split_pairs_by_problem(pairs, split_size=remaining_size, filtered_indices=extra_val_indices[~first_part_mask], seed=seed)
+
+    return sorted(np.concatenate((first_part_val_indices, second_part_val_indices)))
+
+
+def train_validation_split(
+    pairs: dict,
+    train_size: int | float,
+    validation_size: int | float,
+    filtered_indices: list[int] | np.ndarray | None = None,
+    seed=SEED
+) -> tuple[list[int], list[int]]:
+    validation_indices = extract_balanced_set(pairs, size=validation_size, seed=seed)
+
+    if filtered_indices is None:
+        filtered_indices = np.arange(len(pairs['problem_id']))
+
+    still_available_mask = ~np.isin(filtered_indices, validation_indices)
+    filtered_indices = np.array(filtered_indices)[still_available_mask]
+
+    train_indices = extract_balanced_set(pairs, size=train_size, filtered_indices=filtered_indices)
+
+    return train_indices, validation_indices
 
 
 def compute_statistics(

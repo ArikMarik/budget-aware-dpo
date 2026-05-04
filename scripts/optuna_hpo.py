@@ -88,14 +88,14 @@ class SearchConfig:
     accuracy_floor: float     # trials with acc_easy < floor → infeasible
     max_epochs: int
     seed: int
-    data_limit: Optional[int]
+    train_size: int
+    val_size: int
     model_name: Optional[str]
     num_workers: int
     use_mixed_precision: bool
     output_root: Path
     study_name: str
     use_wandb: bool
-    max_unique_problems: int
     max_seq_len: Optional[int]
     val_gen_batch_size: int
 
@@ -230,13 +230,13 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
             result = train_dpo(
                 use_budget_aware=search.budget_aware,
                 output_dir=output_dir,
-                val_split=0.2,
+                train_size=search.train_size,
+                val_size=search.val_size,
                 max_epochs=search.max_epochs,
                 batch_size=int(params["batch_size"]),
                 lr=float(params["lr"]),
                 checkpoint_every=10**9,  # skip per-epoch checkpoint writes
                 gradient_accumulation_steps=int(params["gradient_accumulation_steps"]),
-                data_limit=search.data_limit,
                 resume_from=None,
                 seed=search.seed,
                 use_wandb=search.use_wandb,
@@ -257,7 +257,6 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
                 length_ratio_easy=float(params["length_ratio_easy"]),
                 length_ratio_hard=float(params["length_ratio_hard"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
-                max_unique_problems=search.max_unique_problems,
                 max_seq_len=search.max_seq_len,
                 val_gen_batch_size=search.val_gen_batch_size,
                 ctx=ctx,
@@ -367,12 +366,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
     # Training knobs (fixed across trials)
     p.add_argument("--max-epochs", type=int, default=3)
-    p.add_argument("--data-limit", type=int, default=None)
+    p.add_argument("--train-size", type=int, default=1000)
+    p.add_argument("--val-size", type=int, default=500)
     p.add_argument("--model", type=str, default=None)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--no-mixed-precision", action="store_true")
-    p.add_argument("--max-unique-problems", type=int, default=1250,
-                   help="Cap unique problems loaded per trial (controls trial length). Default 1250.")
     p.add_argument("--max-seq-len", type=int, default=1536,
                    help="Drop pairs where max(chosen, rejected) token length > this. Default 1536.")
     p.add_argument("--val-gen-batch-size", type=int, default=8,
@@ -415,14 +413,14 @@ def main(argv: Optional[list[str]] = None) -> None:
         accuracy_floor=args.accuracy_floor,
         max_epochs=args.max_epochs,
         seed=args.seed,
-        data_limit=args.data_limit,
+        train_size=args.train_size,
+        val_size=args.val_size,
         model_name=args.model,
         num_workers=args.num_workers,
         use_mixed_precision=not args.no_mixed_precision,
         output_root=Path(args.output_root),
         study_name=study_name,
         use_wandb=args.wandb,
-        max_unique_problems=args.max_unique_problems,
         max_seq_len=args.max_seq_len,
         val_gen_batch_size=args.val_gen_batch_size,
     )

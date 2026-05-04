@@ -32,7 +32,7 @@ from src.config import (
     SEED,
     get_tokens_paths,
 )
-from src.data.preprocessing import compute_pair_length_ratio, split_pairs_by_problem
+from src.data.preprocessing import compute_pair_length_ratio, split_pairs_by_problem, train_validation_split
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
 from src.evaluation.run_evaluation import (
     generate_and_evaluate,
@@ -64,7 +64,6 @@ class TrainingConfig:
     batch_size: int
     lr: float
     seed: int
-    data_limit: Optional[int]
     num_pairs: int
     num_train_pairs: int
     num_val_pairs: int
@@ -390,10 +389,10 @@ def load_tokenized_datasets(
     raw_data: Optional[dict] = None,
     length_ratio_easy: float = 1.0,
     length_ratio_hard: float = 1.0,
-    val_split: float = 0.2,
+    train_size: int = 10_000,
+    val_size: int | float = 1000,
     seed: int = SEED,
     max_pairs_per_problem: Optional[int] = None,
-    max_unique_problems: int = 100_000,
     max_seq_len: Optional[int] = None,
 ) -> tuple[TokenizedDPODataset, TokenizedDPODataset]:
     """
@@ -433,9 +432,7 @@ def load_tokenized_datasets(
         )
 
     # 3. Split by problem_id (stratified by complexity of filtered data)
-    train_indices, val_indices = split_pairs_by_problem(
-        data, val_split, seed, filtered_indices, max_unique_problems
-    )
+    train_indices, val_indices = train_validation_split(data, train_size=train_size, validation_size=val_size, filtered_indices=filtered_indices)
 
     train_dataset = TokenizedDPODataset(data, train_indices)
     val_dataset = TokenizedDPODataset(data, val_indices)
@@ -947,12 +944,12 @@ def train_dpo(
     *,
     use_budget_aware: bool,
     output_dir: Path,
-    val_split: float = 0.2,
+    train_size: int = 65_000,
+    val_size: int | float = 1000,
     max_epochs: int = 10,
     batch_size: int = 4,
     lr: float = 1e-5,
     checkpoint_every: int = 1,
-    data_limit: Optional[int] = None,
     resume_from: Optional[str] = None,
     seed: int = SEED,
     use_wandb: bool = False,
@@ -974,7 +971,6 @@ def train_dpo(
     max_pairs_per_problem: Optional[int] = 3,
     best_model_metric: BestModelMetric = "val_loss",
     accuracy_floor: Optional[float] = None,
-    max_unique_problems: int = 65_000,
     max_seq_len: Optional[int] = None,
     val_gen_batch_size: int = 8,
     index_to_problem_path: Path = INDEX_TO_PROBLEM_PATH,
@@ -997,10 +993,10 @@ def train_dpo(
         raw_data=ctx.raw_data,
         length_ratio_easy=length_ratio_easy,
         length_ratio_hard=length_ratio_hard,
-        val_split=val_split,
+        train_size=train_size,
+        val_size=val_size,
         seed=seed,
         max_pairs_per_problem=max_pairs_per_problem,
-        max_unique_problems=max_unique_problems,
         max_seq_len=max_seq_len,
     )
 
@@ -1034,11 +1030,10 @@ def train_dpo(
         batch_size=batch_size,
         lr=lr,
         seed=seed,
-        data_limit=data_limit,
         num_pairs=num_train + num_val,
         num_train_pairs=num_train,
         num_val_pairs=num_val,
-        val_split=val_split,
+        val_split=val_size,
         early_stopping_patience=early_stopping_patience,
         early_stopping_threshold=early_stopping_threshold,
         dpo_beta=dpo_beta,

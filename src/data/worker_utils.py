@@ -168,6 +168,7 @@ def tokenize_and_save(
         for start in iterator:
             batch = pairs[start:start + batch_size]
             for p in batch:
+                pairs_info["level"].append(level if (level := p.pop("level")) else -1)
                 pairs_info["complexity"].append(p.pop("complexity"))
                 pairs_info["rejection_reason"].append(p.pop("rejection_reason"))
                 pairs_info["chosen_length"].append(p.pop("chosen_length"))

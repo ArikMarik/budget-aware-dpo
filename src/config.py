@@ -29,7 +29,7 @@ DATASET_PATH_LIMITED = DATA_PATH / "openmathinstruct.jsonl.limited"
 PROBLEM_TO_INDEX_PATH = DATA_PATH / "problem_to_index.pkl"
 INDEX_TO_PROBLEM_PATH = DATA_PATH / "index_to_problem.pkl"
 
-PROCESSED_DATASET_PATH = DATA_PATH / "processed_dpo_dataset_full"
+PROCESSED_DATASET_PATH = DATA_PATH / "processed_dpo_dataset"
 PROCESSED_DATASET_PATH_LIMITED = DATA_PATH / "processed_dpo_dataset_limited"
 PROCESSED_DATASET_PATH_BALANCED = DATA_PATH / "processed_dpo_dataset_balanced"
 
