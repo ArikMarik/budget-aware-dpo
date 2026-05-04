@@ -4,7 +4,7 @@ Supports dummy data (processed DPO dataset) and real data (Phase 9: GSM8K, MATH)
 """
 
 import json
-from concurrent.futures import ProcessPoolExecutor
+import os
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -145,12 +145,10 @@ def generate_and_evaluate(
     max_new_tokens: int = 1024,
     prompt_fn: Optional[Callable] = None,
     batch_size: int = 8,
-    num_workers: int = 4,
 ) -> list[dict]:
     """Generate for each problem, extract answer, compute metrics.
 
-    Uses batched generation for GPU parallelism and parallel post-processing
-    for CPU-bound tasks (answer extraction + verification).
+    Uses batched generation for GPU parallelism; post-processing is sequential.
     """
     if prompt_fn is None:
         prompt_fn = build_zero_shot_prompt
@@ -177,12 +175,7 @@ def generate_and_evaluate(
         for idx, p in enumerate(problems)
     ]
 
-    if num_workers > 1:
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            processed_results = list(executor.map(_process_result, post_process_args))
-        results = processed_results
-    else:
-        results = [_process_result(args) for args in post_process_args]
+    results = [_process_result(args) for args in tqdm(post_process_args, desc='Verifying Correctness')]
 
     return results
 
