@@ -1,22 +1,22 @@
 {
   "metrics": {
-    "accuracy": 0.32742522551036557,
-    "num_correct": 2069,
+    "accuracy": 0.32726697262225035,
+    "num_correct": 2068,
     "num_total": 6319,
-    "tpca": 374.4204929917835,
+    "tpca": 374.1063829787234,
     "average_tokens_length": 470.8858996676689,
     "total_tokens": 2975528,
-    "total_tokens_correct": 774676,
+    "total_tokens_correct": 773652,
     "avg_tokens_easy": 254.79555808656036,
     "avg_tokens_hard": 554.0449265833881,
     "avg_tokens_easy_correct": 220.47218453188603,
-    "avg_tokens_hard_correct": 459.6006006006006,
+    "avg_tokens_hard_correct": 459.17655897821186,
     "num_easy": 1756,
     "num_hard": 4563,
     "num_easy_correct": 737,
-    "num_hard_correct": 1332,
+    "num_hard_correct": 1331,
     "easy_accuracy": 0.41970387243735763,
-    "hard_accuracy": 0.29191321499013806,
+    "hard_accuracy": 0.29169406092483013,
     "math_by_level": {
       "Level 3": {
         "total": 1131,
@@ -35,8 +35,8 @@
       },
       "Level 5": {
         "total": 1324,
-        "correct": 190,
-        "accuracy": 0.14350453172205438
+        "correct": 189,
+        "accuracy": 0.14274924471299094
       },
       "Level 2": {
         "total": 894,
@@ -44,12 +44,12 @@
         "accuracy": 0.43847874720357943
       }
     },
-    "math_level_4_5_accuracy": 0.2017336485421592,
+    "math_level_4_5_accuracy": 0.2013396375098503,
     "math_level_4_5_num": 2538,
     "model": "Qwen/Qwen2.5-Math-1.5B",
     "mode": "raw_base+zero-shot",
     "max_new_tokens": 1024,
-    "eval_time_minutes": 60.00715169906616
+    "eval_time_minutes": 52.39716468254725
   },
   "results": [
     {
@@ -67477,7 +67477,7 @@
       "complexity": 1,
       "predicted": "0",
       "expected": "20x + 23y + 26z - 69 = 0",
-      "correct": true,
+      "correct": false,
       "level": "Level 5",
       "source": "math",
       "tokens": 1024
