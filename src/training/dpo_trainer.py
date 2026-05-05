@@ -4,7 +4,6 @@ Optimized for GPU utilization and training efficiency.
 """
 
 from collections import defaultdict
-from functools import partial
 import gc
 import json
 import pickle
@@ -13,14 +12,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Callable, Literal
 
-from tqdm import tqdm
-
-import importlib.util
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 import wandb
@@ -32,12 +29,9 @@ from src.config import (
     SEED,
     get_tokens_paths,
 )
-from src.data.preprocessing import compute_pair_length_ratio, split_pairs_by_problem, train_validation_split
+from src.data.preprocessing import compute_pair_length_ratio, train_validation_split
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
-from src.evaluation.run_evaluation import (
-    generate_and_evaluate,
-    load_eval_problems,
-)
+from src.evaluation.run_evaluation import generate_and_evaluate
 from src.utils import get_logger, get_model_tokenizer, load_and_combine_pairs_tokens_info, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
@@ -51,6 +45,7 @@ setup_global_exception_handler(__name__)
 
 BestModelMetric = Literal[
     "val_loss",
+    "efficiency",
     "gen_tokens_easy",
     "gen_tpca",
     "gen_tokens_easy_with_accuracy_floor",
@@ -623,7 +618,7 @@ def _compute_val_accuracy(
     """Run generation on val_problems and compute accuracy."""
     model.eval()
     results = generate_and_evaluate(
-        model, tokenizer, val_problems, max_new_tokens=max_new_tokens, prompt_fn=build_zero_shot_prompt, batch_size=batch_size, num_workers=4)
+        model, tokenizer, val_problems, max_new_tokens=max_new_tokens, prompt_fn=build_zero_shot_prompt, batch_size=batch_size)
     model.train()
 
     easy_results, hard_results = [], []
@@ -943,7 +938,7 @@ def _build_dataloaders(
 def train_dpo(
     *,
     use_budget_aware: bool,
-    output_dir: Path,
+    output_dir: Path = CHECKPOINT_DIR,
     train_size: int = 65_000,
     val_size: int | float = 1000,
     max_epochs: int = 10,
@@ -969,7 +964,7 @@ def train_dpo(
     length_ratio_easy: float = 1.0,
     length_ratio_hard: float = 1.0,
     max_pairs_per_problem: Optional[int] = 3,
-    best_model_metric: BestModelMetric = "val_loss",
+    best_model_metric: BestModelMetric = "efficiency",
     accuracy_floor: Optional[float] = None,
     max_seq_len: Optional[int] = None,
     val_gen_batch_size: int = 8,
@@ -1194,6 +1189,16 @@ def train_dpo(
         json.dump(metrics_log, f, indent=2)
     logger.info("Training complete. Saved to %s", output_dir)
 
+    # Explicit VRAM release — Python GC alone is insufficient across HPO trials because
+    # gradient-checkpointing hooks, W&B tensor references, and LoRA hook chains can keep
+    # the policy model alive past function return, causing progressive fragmentation.
+    del model, optimizer, scaler, train_loader, val_loader, train_dataset, val_dataset
+    best_model_state = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
     with open(output_dir / "summary.json", "w") as f:
         json.dump(
             {
@@ -1224,18 +1229,10 @@ def _get_best_value_for_epoch(
     if best_model_metric == "val_loss":
         return float(epoch_metrics["val_loss"])
 
-    # gen_metrics = epoch_metrics.get("gen_metrics") or {}
-    # if best_model_metric == "gen_tokens_easy":
-    #     return float(gen_metrics["gen/avg_tokens_easy"])
-    # if best_model_metric == "gen_tpca":
-    #     return float(gen_metrics["gen/tpca"])
-    # if best_model_metric == "gen_tokens_easy_with_accuracy_floor":
-    #     if accuracy_floor is None:
-    #         raise ValueError("--accuracy-floor is required when --best-model-metric=gen_tokens_easy_with_accuracy_floor")
-    #     acc_easy = float(gen_metrics["gen/accuracy_easy"])
-    #     if acc_easy < float(accuracy_floor):
-    #         return None
-    #     return float(gen_metrics["gen/avg_tokens_easy"])
+    val_acc = epoch_metrics.get("val_accuracy") or {}
+    if best_model_metric == "efficiency":
+        eff = val_acc.get("val/efficiency", 0.0)
+        return -float(eff)  # negate: lower return value = better (higher efficiency)
 
     raise ValueError(f"Unsupported best_model_metric: {best_model_metric}")
 
