@@ -85,6 +85,7 @@ def plot_histograms(
     output_path: Path,
     sample_size: int = 30000,
     total_problems: int = 0,
+    over_prompt_data: list[tuple[int, int]] | None = None,
 ) -> None:
     """Plot overlapping histograms of prompt and solution token lengths per complexity."""
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -99,17 +100,39 @@ def plot_histograms(
     sol_easy = [t for c, t in solution_data if c == 0]
     sol_hard = [t for c, t in solution_data if c == 1]
 
+    # Separate over-limit data by complexity
+    over_prompt_easy = []
+    over_prompt_hard = []
+    if over_prompt_data:
+        over_prompt_easy = [t for c, t in over_prompt_data if c == 0]
+        over_prompt_hard = [t for c, t in over_prompt_data if c == 1]
+
     # Panel 1: Prompt token histogram (overlapping)
     ax = axes[0, 0]
-    max_val = max(max(prompt_easy, default=0), max(prompt_hard, default=0))
+    # Include over-limit data in bin range
+    all_prompt_tokens = prompt_easy + prompt_hard + over_prompt_easy + over_prompt_hard
+    max_val = max(all_prompt_tokens, default=0)
     bins = np.linspace(0, max_val, 50)
     ax.hist(prompt_easy, bins=bins, alpha=0.6, label="Easy (0)", color="steelblue", edgecolor="black")
     ax.hist(prompt_hard, bins=bins, alpha=0.6, label="Hard (1)", color="darkorange", edgecolor="black")
     ax.set_xlabel("Prompt Token Length")
     ax.set_ylabel("Count")
     ax.set_title("Prompt Token Length Distribution by Complexity")
-    ax.legend()
     ax.grid(True, alpha=0.3)
+
+    # Add over-limit data on secondary y-axis (shared x-axis)
+    if over_prompt_easy or over_prompt_hard:
+        ax2 = ax.twinx()
+        ax2.hist(over_prompt_easy, bins=bins, alpha=0.5, label="Over-limit Easy", color="red", edgecolor="darkred", hatch="//")
+        ax2.hist(over_prompt_hard, bins=bins, alpha=0.5, label="Over-limit Hard", color="darkred", edgecolor="black", hatch="\\\\")
+        ax2.set_ylabel("Over-limit Count", color="red")
+        ax2.tick_params(axis='y', labelcolor="red")
+        # Combine legends
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+    else:
+        ax.legend()
 
     # Panel 2: Prompt token density (KDE)
     ax = axes[0, 1]
@@ -120,8 +143,23 @@ def plot_histograms(
     ax.set_xlabel("Prompt Token Length")
     ax.set_ylabel("Density")
     ax.set_title("Prompt Token Length Density by Complexity")
-    ax.legend()
     ax.grid(True, alpha=0.3)
+
+    # Add over-limit data on secondary y-axis (shared x-axis)
+    if over_prompt_easy or over_prompt_hard:
+        ax2 = ax.twinx()
+        if over_prompt_easy:
+            sns.kdeplot(over_prompt_easy, ax=ax2, label="Over-limit Easy", color="red", linestyle="--", alpha=0.6)
+        if over_prompt_hard:
+            sns.kdeplot(over_prompt_hard, ax=ax2, label="Over-limit Hard", color="darkred", linestyle="--", alpha=0.6)
+        ax2.set_ylabel("Over-limit Density", color="red")
+        ax2.tick_params(axis='y', labelcolor="red")
+        # Combine legends
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+    else:
+        ax.legend()
 
     # Panel 3: Solution token histogram (overlapping)
     ax = axes[1, 0]
@@ -237,9 +275,9 @@ def save_over_limit_json(over_limit: list[dict], output_path: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze prompt and solution token lengths by complexity")
-    parser.add_argument("--sample-size", type=int, default=30000, help="Number of problems to sample (default: 30000)")
+    parser.add_argument("--sample-size", type=int, default=606922, help="Number of problems to sample (default: 606922)")
     parser.add_argument("--output", type=str, default="reports/figures/token_lengths.png", help="Output path for histogram")
-    parser.add_argument("--token-limit", type=int, default=1500, help="Token count limit for flagging problems (default: 1500)")
+    parser.add_argument("--token-limit", type=int, default=768, help="Token count limit for flagging problems (default: 768)")
     parser.add_argument("--stats-csv", type=str, default=str(TOKEN_LENGTH_STATS_PATH), help="Output path for summary statistics CSV")
     parser.add_argument("--over-limit-json", type=str, default=str(OVER_LIMIT_PROBLEMS_PATH), help="Output path for problems exceeding token limit")
     args = parser.parse_args()
@@ -257,6 +295,9 @@ def main():
     # Extract solution token lengths (avg_token_length from pickle)
     solution_data = [(p["complexity"], p["avg_token_length"]) for p in problems]
 
+    # Convert over-limit data to (complexity, token_count) tuples for plotting
+    over_prompt_data = [(p["complexity"], p["token_count"]) for p in over_limit]
+
     # Print stats
     print_stats(prompt_data, solution_data)
 
@@ -270,7 +311,8 @@ def main():
 
     # Plot with sample size annotation
     plot_histograms(prompt_data, solution_data, Path(args.output),
-                    sample_size=sample_size, total_problems=total_problems)
+                    sample_size=sample_size, total_problems=total_problems,
+                    over_prompt_data=over_prompt_data)
 
 
 if __name__ == "__main__":
