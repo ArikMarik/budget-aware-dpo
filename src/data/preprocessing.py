@@ -905,7 +905,7 @@ def _split_pairs_by_problem(
     if max_unique_problems is not None and len(selected_problem_ids) > max_unique_problems:
         selected_problem_ids, discarded_problem_ids = safe_stratified_split(
             selected_problem_ids,
-            strata=problem_strata,
+            strata=selected_problem_strata,
             train_size=max_unique_problems,
             random_state=seed,
         )
