@@ -63,21 +63,21 @@ logger = get_logger(__name__)
 # Search space definitions
 # ---------------------------------------------------------------------------
 
-LOSS_TYPES = ["dpo", "simpo"]
+LOSS_TYPES = ["dpo"]
 
 # Grid points used when --sampler grid. Keep small — every combo is tried.
 GRID_SEARCH_SPACE: dict[str, list[Any]] = {
-    "lr":                          [5e-7, 5e-6, 1e-5],  # DPO needs ~10x lower LR than SFT
-    "dpo_beta":                    [0.1, 0.2, 0.5],     # add 0.5 (conservative), drop 0.05 (too aggressive)
-    "lambda_easy":                 [0.01, 0.05, 0.1],
-    "lambda_hard":                 [0.001, 0.01, 0.03],
-    "kl_penalty_weight":           [0.0, 0.01, 0.1],
-    "batch_size":                  [8, 16],
-    "gradient_accumulation_steps": [2, 4],   # effective bs = physical bs × grad_accum; bs=8 × 4 = bs=32 matches literature
+    "lr":                          [4e-7, 8e-7, 1.5e-6, 2e-6],
+    "dpo_beta":                    [0.08, 0.12, 0.20, 0.25],
+    "lambda_easy":                 [0.10, 0.15, 0.22, 0.30],
+    "lambda_hard":                 [0.0001, 0.0002, 0.0005],
+    "kl_penalty_weight":           [0.0],
+    "batch_size":                  [8],
+    "gradient_accumulation_steps": [1, 2],
     "loss_type":                   ["dpo"],
-    "length_ratio_easy":           [1.5, 2.0, 3.0, 4.0],
-    "length_ratio_hard":           [1.5, 2.0, 2.5, 3.0],
-    "max_pairs_per_problem":       [10, 15, 20, 25],
+    "length_ratio_easy":           [1.5, 2.0, 2.5, 3.0],
+    "length_ratio_hard":           [2.0, 2.5, 3.0],
+    "max_pairs_per_problem":       [10, 13, 16, 20],
 }
 
 
@@ -151,17 +151,17 @@ def _compute_objective(
 def _sample_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
     """Sample one configuration. Shared by TPE / Random."""
     return {
-        "lr":                          trial.suggest_float("lr", 5e-7, 1e-5, log=True),
-        "dpo_beta":                    trial.suggest_float("dpo_beta", 0.05, 0.5, log=True),
-        "lambda_easy":                 trial.suggest_float("lambda_easy", 1e-3, 0.3, log=True),
-        "lambda_hard":                 trial.suggest_float("lambda_hard", 1e-4, 0.1, log=True),
-        "kl_penalty_weight":           trial.suggest_float("kl_penalty_weight", 1e-4, 1.0, log=True),
-        "batch_size":                  trial.suggest_categorical("batch_size", [8, 16]),
-        "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
-        "loss_type":                   trial.suggest_categorical("loss_type", LOSS_TYPES),
-        "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.0, 5.0),
-        "length_ratio_hard":           trial.suggest_float("length_ratio_hard", 1.0, 3.0),
-        "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 3, 25),
+        "lr":                          trial.suggest_float("lr", 4e-7, 2e-6, log=True),
+        "dpo_beta":                    trial.suggest_float("dpo_beta", 0.08, 0.25, log=True),
+        "lambda_easy":                 trial.suggest_float("lambda_easy", 0.10, 0.35, log=True),
+        "lambda_hard":                 trial.suggest_float("lambda_hard", 1e-4, 5e-4, log=True),
+        "kl_penalty_weight":           0.0,
+        "batch_size":                  8,
+        "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2]),
+        "loss_type":                   "dpo",
+        "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.5, 3.0),
+        "length_ratio_hard":           trial.suggest_float("length_ratio_hard", 2.0, 3.0),
+        "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 10, 20),
     }
 
 
@@ -367,7 +367,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     # Training knobs (fixed across trials)
     p.add_argument("--max-epochs", type=int, default=3)
     p.add_argument("--train-size", type=int, default=1000)
-    p.add_argument("--val-size", type=int, default=500)
+    p.add_argument("--val-size", type=int, default=250)
     p.add_argument("--model", type=str, default=None)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--no-mixed-precision", action="store_true")
