@@ -817,7 +817,7 @@ def save_checkpoint(
     ckpt_path = output_dir / f"checkpoint-epoch-{epoch}"
     ckpt_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(ckpt_path))
-    tokenizer.save_pretrained(ckpt_path)
+    tokenizer.save_pretrained(str(ckpt_path)+'_tokenizer')
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics_log, f, indent=2)
     logger.info("Saved checkpoint to %s", ckpt_path)
@@ -835,7 +835,7 @@ def save_best_model(
     best_model_path = output_dir / "best-model"
     best_model_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(best_model_path))
-    tokenizer.save_pretrained(best_model_path)
+    tokenizer.save_pretrained(str(best_model_path)+'_tokenizer')
     selection_payload = {
         "best_model_metric": best_model_metric,
         "best_epoch": best_epoch,
@@ -1189,7 +1189,7 @@ def train_dpo(
         logger.warning("No best model state was selected; skipping best-model save.")
 
     model.save_pretrained(str(output_dir))
-    tokenizer.save_pretrained(str(output_dir))
+    tokenizer.save_pretrained(str(output_dir)+'_tokenizer')
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics_log, f, indent=2)
     logger.info("Training complete. Saved to %s", output_dir)
