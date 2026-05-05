@@ -144,7 +144,7 @@ def generate_and_evaluate(
     problems: list[dict],
     max_new_tokens: int = 1024,
     prompt_fn: Optional[Callable] = None,
-    batch_size: int = 8,
+    batch_size: int = 32,
 ) -> list[dict]:
     """Generate for each problem, extract answer, compute metrics.
 
@@ -169,6 +169,9 @@ def generate_and_evaluate(
         for response, num_tokens in batch_results:
             all_responses.append(response)
             all_num_tokens.append(num_tokens)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     post_process_args = [
         (idx, all_responses[idx], all_num_tokens[idx], p["expected"], p["complexity"], p.get("level"), p.get("source"), p["problem"])

@@ -20,6 +20,7 @@ data/processed_dpo_dataset/*.jsonl
 wandb/
 logs/
 /data/
+src/qwen_evaluation/data/
 .agents/
 .claude/
 .vscode/
