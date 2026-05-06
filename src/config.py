@@ -89,8 +89,7 @@ def get_baseline_output_dir() -> Path:
 
 def get_budget_aware_output_dir() -> Path:
     """Return budget-aware DPO checkpoint dir (dummy vs real)."""
-    # TODO - Temp
-    suffix = "_limited"
+    suffix = "_full"
     # suffix = "" if USE_DUMMY_DATA else "_real"
     return CHECKPOINT_DIR / f"budget_aware_dpo{suffix}"
 

@@ -4,7 +4,7 @@ Optimized for GPU utilization and training efficiency.
 """
 
 from collections import defaultdict
-from functools import partial
+import gc
 import json
 import pickle
 import os
@@ -12,13 +12,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Callable, Literal
 
-from tqdm import tqdm
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 import wandb
@@ -30,20 +29,23 @@ from src.config import (
     SEED,
     get_tokens_paths,
 )
-from src.data.preprocessing import compute_pair_length_ratio, split_pairs_by_problem
+from src.data.preprocessing import compute_pair_length_ratio, train_validation_split
 from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
-from src.evaluation.run_evaluation import (
-    generate_and_evaluate,
-    compute_metrics,
-    load_eval_problems,
-)
+from src.evaluation.run_evaluation import generate_and_evaluate
 from src.utils import get_logger, get_model_tokenizer, load_and_combine_pairs_tokens_info, set_seed, setup_global_exception_handler
 
 logger = get_logger(__name__)
+
+try:
+    import flash_attn  # noqa: F401
+    _FLASH_ATTN_AVAILABLE = True
+except Exception:
+    _FLASH_ATTN_AVAILABLE = False
 setup_global_exception_handler(__name__)
 
 BestModelMetric = Literal[
     "val_loss",
+    "efficiency",
     "gen_tokens_easy",
     "gen_tpca",
     "gen_tokens_easy_with_accuracy_floor",
@@ -57,7 +59,6 @@ class TrainingConfig:
     batch_size: int
     lr: float
     seed: int
-    data_limit: Optional[int]
     num_pairs: int
     num_train_pairs: int
     num_val_pairs: int
@@ -73,6 +74,7 @@ class TrainingConfig:
     use_mixed_precision: bool = True
     compile_model: bool = False
     num_workers: int = 4
+    val_gen_batch_size: int = 8
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -141,9 +143,6 @@ class MetricsAccumulator:
         self.total_reward_diff_hard = torch.zeros((), device=self.device)
         self.total_complexity_0 = torch.zeros((), device=self.device)
         self.total_complexity_1 = torch.zeros((), device=self.device)
-        self.total_accuracy = torch.zeros((), device=self.device)
-        self.total_accuracy_easy = torch.zeros((), device=self.device)
-        self.total_accuracy_hard = torch.zeros((), device=self.device)
         self.total_chosen_easy = torch.zeros((), device=self.device)
         self.total_chosen_hard = torch.zeros((), device=self.device)
         self.total_rejected_easy = torch.zeros((), device=self.device)
@@ -171,17 +170,12 @@ class MetricsAccumulator:
         easy_count = mask_easy.sum()
         hard_count = mask_hard.sum()
 
-        batch_accuracy = (reward_diff_per_sample > 0).float()
-
         self.total_loss += loss.detach()
         self.total_reward_diff += reward_diff_per_sample.mean().detach()
         self.total_reward_diff_easy += (reward_diff_per_sample * mask_easy).sum().detach() / easy_count.clamp(min=1)
         self.total_reward_diff_hard += (reward_diff_per_sample * mask_hard).sum().detach() / hard_count.clamp(min=1)
         self.total_complexity_0 += (per_sample_loss * mask_easy).sum() / easy_count.clamp(min=1)
         self.total_complexity_1 += (per_sample_loss * mask_hard).sum() / hard_count.clamp(min=1)
-        self.total_accuracy += batch_accuracy.mean().detach()
-        self.total_accuracy_easy += (batch_accuracy * mask_easy).sum().detach() / easy_count.clamp(min=1)
-        self.total_accuracy_hard += (batch_accuracy * mask_hard).sum().detach() / hard_count.clamp(min=1)
         self.total_chosen_tokens += chosen_lens.mean().detach()
         self.total_rejected_tokens += rejected_lens.mean().detach()
         self.total_chosen_easy += (chosen_lens * mask_easy).sum().detach()
@@ -197,42 +191,12 @@ class MetricsAccumulator:
                 self.total_kl_penalty += extra["kl_penalty"]
         self.num_batches += 1
 
-    def compute_metrics(self) -> dict[str, float]:
-        n = max(self.num_batches, 1)
-        easy_n = max(self.total_easy_count.clamp(min=1).cpu().item(), 1)
-        hard_n = max(self.total_hard_count.clamp(min=1).cpu().item(), 1)
-
-        return {
-            "loss": (self.total_loss / n).cpu().item(),
-            "reward_diff": (self.total_reward_diff / n).cpu().item(),
-            "reward_diff_easy": (self.total_reward_diff_easy / n).cpu().item(),
-            "reward_diff_hard": (self.total_reward_diff_hard / n).cpu().item(),
-            "complexity_0_loss": (self.total_complexity_0 / n).cpu().item(),
-            "complexity_1_loss": (self.total_complexity_1 / n).cpu().item(),
-            "accuracy": (self.total_accuracy / n).cpu().item(),
-            "accuracy_easy": (self.total_accuracy_easy / n).cpu().item(),
-            "accuracy_hard": (self.total_accuracy_hard / n).cpu().item(),
-            "avg_chosen_tokens": (self.total_chosen_tokens / n).cpu().item(),
-            "avg_rejected_tokens": (self.total_rejected_tokens / n).cpu().item(),
-            "avg_chosen_tokens_easy": self.total_chosen_easy.cpu().item() / easy_n,
-            "avg_chosen_tokens_hard": self.total_chosen_hard.cpu().item() / hard_n,
-            "avg_rejected_tokens_easy": self.total_rejected_easy.cpu().item() / easy_n,
-            "avg_rejected_tokens_hard": self.total_rejected_hard.cpu().item() / hard_n,
-            "easy_count": self.total_easy_count.cpu().item(),
-            "hard_count": self.total_hard_count.cpu().item(),
-            "length_penalty": self.total_length_penalty,
-            "kl_penalty": self.total_kl_penalty,
-        }
-
     def to_wandb_dict(self, n: int, grad_norm: Optional[float] = None) -> dict:
         easy_n = max(self.total_easy_count.item(), 1)
         hard_n = max(self.total_hard_count.item(), 1)
         result = {
             "reward_diff_easy": self.total_reward_diff_easy.item() / n,
             "reward_diff_hard": self.total_reward_diff_hard.item() / n,
-            "accuracy": self.total_accuracy.item() / n,
-            "accuracy_easy": self.total_accuracy_easy.item() / n,
-            "accuracy_hard": self.total_accuracy_hard.item() / n,
             "avg_chosen_tokens_easy": self.total_chosen_easy.item() / easy_n,
             "avg_chosen_tokens_hard": self.total_chosen_hard.item() / hard_n,
             "avg_rejected_tokens_easy": self.total_rejected_easy.item() / easy_n,
@@ -268,9 +232,6 @@ class MetricsAccumulator:
             "val/reward_diff_hard": (self.total_reward_diff_hard / n).cpu().item(),
             "val/complexity_0_loss": (self.total_complexity_0 / n).cpu().item(),
             "val/complexity_1_loss": (self.total_complexity_1 / n).cpu().item(),
-            "val/accuracy": (self.total_accuracy / n).cpu().item(),
-            "val/accuracy_easy": (self.total_accuracy_easy / n).cpu().item(),
-            "val/accuracy_hard": (self.total_accuracy_hard / n).cpu().item(),
             "val/avg_chosen_tokens_easy": self.total_chosen_easy.cpu().item() / easy_n,
             "val/avg_chosen_tokens_hard": self.total_chosen_hard.cpu().item() / hard_n,
             "val/avg_rejected_tokens_easy": self.total_rejected_easy.cpu().item() / easy_n,
@@ -314,17 +275,14 @@ class TokenizedDPODataset(Dataset):
         chosen_ids = self.data["chosen_input_ids"][real_idx]
         rejected_ids = self.data["rejected_input_ids"][real_idx]
 
-        len_chosen = len(chosen_ids)
-        len_rejected = len(rejected_ids)
+        # Build attention masks from saved true lengths (tokenized sequence lengths before padding)
+        chosen_len = int(self.data["chosen_seq_len"][real_idx])
+        rejected_len = int(self.data["rejected_seq_len"][real_idx])
 
-        chosen_attention_mask = torch.as_tensor(self.data.get(
-            "chosen_attention_mask",
-            torch.ones(size=(len_chosen,)).expand(real_idx+1, -1)
-        )[real_idx]).to(dtype=torch.long)
-        rejected_attention_mask = torch.as_tensor(self.data.get(
-            "rejected_attention_mask",
-            torch.ones(size=(len_rejected,)).expand(real_idx+1, -1)
-        )[real_idx]).to(dtype=torch.long)
+        chosen_attention_mask = torch.ones_like(chosen_ids)
+        chosen_attention_mask[chosen_len:] = 0
+        rejected_attention_mask = torch.ones_like(rejected_ids)
+        rejected_attention_mask[rejected_len:] = 0
 
         return {
             "chosen_input_ids": chosen_ids,
@@ -406,16 +364,31 @@ def _filter_by_length_ratio(
     return np.where(valid_mask)[0].tolist()
 
 
+def _filter_by_seq_len(
+    data: dict,
+    indices: list[int],
+    max_seq_len: int,
+) -> list[int]:
+    """Remove pairs whose longest side (chosen or rejected) exceeds max_seq_len tokens."""
+    import numpy as np
+
+    c_lens = data["chosen_seq_len"].numpy()[indices]
+    r_lens = data["rejected_seq_len"].numpy()[indices]
+    keep_mask = np.maximum(c_lens, r_lens) <= max_seq_len
+    return np.array(indices)[keep_mask].tolist()
+
+
 def load_tokenized_datasets(
     tokens_paths: tuple[Path, Path, Path],
     *,
     raw_data: Optional[dict] = None,
     length_ratio_easy: float = 1.0,
     length_ratio_hard: float = 1.0,
-    val_split: float = 0.2,
+    train_size: int = 10_000,
+    val_size: int | float = 1000,
     seed: int = SEED,
     max_pairs_per_problem: Optional[int] = None,
-    max_unique_problems: int = 100_000
+    max_seq_len: Optional[int] = None,
 ) -> tuple[TokenizedDPODataset, TokenizedDPODataset]:
     """
     Load all tokenized pairs, filter by per-complexity length ratios, optionally cap pairs
@@ -438,6 +411,15 @@ def load_tokenized_datasets(
     # 1. Apply per-complexity length_ratio filter (vectorized)
     filtered_indices = _filter_by_length_ratio(data, length_ratio_easy, length_ratio_hard)
 
+    # 1b. Filter by absolute sequence length to prevent OOM from outlier-padded batches
+    if max_seq_len is not None and "chosen_seq_len" in data:
+        pre_count = len(filtered_indices)
+        filtered_indices = _filter_by_seq_len(data, filtered_indices, max_seq_len)
+        logger.info(
+            "Seq-len filter (max_seq_len=%d): %d → %d pairs (dropped %d)",
+            max_seq_len, pre_count, len(filtered_indices), pre_count - len(filtered_indices),
+        )
+
     # 2. Cap pairs per problem (stratified by rejection_reason)
     if max_pairs_per_problem is not None and max_pairs_per_problem > 0:
         filtered_indices = _cap_pairs_per_problem(
@@ -445,23 +427,22 @@ def load_tokenized_datasets(
         )
 
     # 3. Split by problem_id (stratified by complexity of filtered data)
-    train_indices, val_indices = split_pairs_by_problem(
-        data, val_split, seed, filtered_indices, max_unique_problems
-    )
+    train_indices, val_indices = train_validation_split(data, train_size=train_size, validation_size=val_size, filtered_indices=filtered_indices)
 
     train_dataset = TokenizedDPODataset(data, train_indices)
     val_dataset = TokenizedDPODataset(data, val_indices)
 
     logger.info(
         f"Data split (length_ratio_easy={length_ratio_easy}, length_ratio_hard={length_ratio_hard}, "
-        f"max_pairs_per_problem={max_pairs_per_problem}): "
+        f"max_pairs_per_problem={max_pairs_per_problem}, max_seq_len={max_seq_len}): "
         f"Train (pairs)={len(train_indices)}, Val (pairs)={len(val_indices)}"
     )
 
     return train_dataset, val_dataset
 
 
-def collate_fn_tokenized(batch: list[dict], pad_token_id: int) -> dict:
+def collate_fn_tokenized(batch: list[dict]) -> dict:
+    """Collate function for TokenizedDPODataset."""
     chosen_input_ids, chosen_attention_mask = [], []
     rejected_input_ids, rejected_attention_mask = [], []
     complexity, problem_id, prompt_length = [], [], []
@@ -476,10 +457,10 @@ def collate_fn_tokenized(batch: list[dict], pad_token_id: int) -> dict:
         prompt_length.append(item["prompt_length"])
 
     return {
-        "chosen_input_ids": pad_sequence(chosen_input_ids, batch_first=True, padding_value=pad_token_id),
-        "chosen_attention_mask": pad_sequence(chosen_attention_mask, batch_first=True, padding_value=0),
-        "rejected_input_ids": pad_sequence(rejected_input_ids, batch_first=True, padding_value=pad_token_id),
-        "rejected_attention_mask": pad_sequence(rejected_attention_mask, batch_first=True, padding_value=0),
+        "chosen_input_ids": torch.stack(chosen_input_ids, dim=0).long(),
+        "chosen_attention_mask": torch.stack(chosen_attention_mask, dim=0),
+        "rejected_input_ids": torch.stack(rejected_input_ids, dim=0).long(),
+        "rejected_attention_mask": torch.stack(rejected_attention_mask, dim=0),
         "complexity": torch.stack(complexity),
         "problem_id": torch.stack(problem_id),
         "prompt_length": torch.stack(prompt_length),
@@ -493,24 +474,29 @@ def create_model(
     resume_from: Optional[str] = None,
     use_compile: bool = False,
 ) -> PeftModel:
+    attn_impl = "flash_attention_2" if (_FLASH_ATTN_AVAILABLE and device == "cuda") else "sdpa"
+    logger.info("Attention implementation: %s", attn_impl)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
-        device_map="auto" if device == "cuda" else None,
+        attn_implementation=attn_impl,
     )
-    if device == "cpu":
-        model = model.to(device)
+    if device == "cuda":
+        model = model.cuda()
+    elif device == "cpu":
+        model = model.to("cpu")
 
     if lora_config is not None:
         model = get_peft_model(model, lora_config)
+        if device == "cuda":
+            model.enable_input_require_grads()
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            logger.info("Gradient checkpointing enabled (use_reentrant=False)")
 
     if resume_from:
         model = PeftModel.from_pretrained(model, resume_from, is_trainable=True)
 
     model.train()
-
-    for p in model.parameters():
-        p.requires_grad = True
 
     if use_compile and hasattr(torch, "compile") and device == "cuda":
         logger.info("Compiling model with torch.compile()...")
@@ -520,13 +506,16 @@ def create_model(
 
 
 def create_ref_model(model_name: str, device: str) -> PeftModel:
+    attn_impl = "flash_attention_2" if (_FLASH_ATTN_AVAILABLE and device == "cuda") else "sdpa"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
-        device_map="auto" if device == "cuda" else None,
+        attn_implementation=attn_impl,
     )
-    if device == "cpu":
-        model = model.to(device)
+    if device == "cuda":
+        model = model.cuda()
+    elif device == "cpu":
+        model = model.to("cpu")
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
@@ -577,16 +566,11 @@ def _compute_batch_forward(
     prompt_lengths: Optional[torch.Tensor] = None,
 ) -> tuple:
     with torch.no_grad():
-        ref_chosen = ref_model(input_ids=chosen_ids, attention_mask=chosen_mask).logits
-        ref_rejected = ref_model(input_ids=rejected_ids, attention_mask=rejected_mask).logits
+        ref_chosen_lp = log_prob(ref_model(input_ids=chosen_ids, attention_mask=chosen_mask).logits, chosen_ids, chosen_mask, prompt_lengths)
+        ref_rejected_lp = log_prob(ref_model(input_ids=rejected_ids, attention_mask=rejected_mask).logits, rejected_ids, rejected_mask, prompt_lengths)
 
-    policy_chosen = model(input_ids=chosen_ids, attention_mask=chosen_mask).logits
-    policy_rejected = model(input_ids=rejected_ids, attention_mask=rejected_mask).logits
-
-    policy_chosen_lp = log_prob(policy_chosen, chosen_ids, chosen_mask, prompt_lengths)
-    policy_rejected_lp = log_prob(policy_rejected, rejected_ids, rejected_mask, prompt_lengths)
-    ref_chosen_lp = log_prob(ref_chosen, chosen_ids, chosen_mask, prompt_lengths)
-    ref_rejected_lp = log_prob(ref_rejected, rejected_ids, rejected_mask, prompt_lengths)
+    policy_chosen_lp = log_prob(model(input_ids=chosen_ids, attention_mask=chosen_mask).logits, chosen_ids, chosen_mask, prompt_lengths)
+    policy_rejected_lp = log_prob(model(input_ids=rejected_ids, attention_mask=rejected_mask).logits, rejected_ids, rejected_mask, prompt_lengths)
 
     chosen_lens = (chosen_ids != tokenizer.pad_token_id).sum(dim=-1).float()
     rejected_lens = (rejected_ids != tokenizer.pad_token_id).sum(dim=-1).float()
@@ -629,15 +613,17 @@ def _compute_val_accuracy(
     use_wandb: bool,
     num_batches: int,
     max_new_tokens: int = 1024,
+    batch_size: int = 8,
 ) -> dict[str, float]:
     """Run generation on val_problems and compute accuracy."""
     model.eval()
     results = generate_and_evaluate(
-        model, tokenizer, val_problems, max_new_tokens=max_new_tokens, prompt_fn=build_zero_shot_prompt, batch_size=32, num_workers=4)
+        model, tokenizer, val_problems, max_new_tokens=max_new_tokens, prompt_fn=build_zero_shot_prompt, batch_size=batch_size)
     model.train()
 
     easy_results, hard_results = [], []
     correct_count = defaultdict(int)
+    tokens_count = defaultdict(int)
     for r in results:
         if r["complexity"] == 1:
             hard_results.append(r)
@@ -645,20 +631,37 @@ def _compute_val_accuracy(
             easy_results.append(r)
 
         correct_count[r['complexity']] += r["correct"]
+        tokens_count[(r['complexity'], r["correct"])] += r["tokens"]
 
     accuracy = sum(correct_count.values()) / max(len(results), 1)
     accuracy_easy = correct_count[0] / max(len(easy_results), 1)
     accuracy_hard = correct_count[1] / max(len(hard_results), 1)
 
+    tpca = (tokens_count[(0, True)] + tokens_count[(1, True)]) / (correct_count[0] + correct_count[1]) if (correct_count[0] + correct_count[1]) > 0 else 0.0
+    tpca_easy = tokens_count[(0, True)] / correct_count[0] if correct_count[0] > 0 else 0.0
+    tpca_hard = tokens_count[(1, True)] / correct_count[1] if correct_count[1] > 0 else 0.0
+
+    mean_gen_length = sum(r["tokens"] for r in results) / max(len(results), 1)
+    # efficiency = correct fraction per unit of token budget spent (higher is better).
+    # Normalizing by max_new_tokens makes the scale independent of the budget setting.
+    efficiency = accuracy / (mean_gen_length / max_new_tokens) if mean_gen_length > 0 else 0.0
+
     val_accuracy = {
         "val/accuracy": accuracy,
         "val/accuracy_easy": accuracy_easy,
         "val/accuracy_hard": accuracy_hard,
+        "val/tpca": tpca,
+        "val/tpca_easy": tpca_easy,
+        "val/tpca_hard": tpca_hard,
+        "val/token_easy": (tokens_count[(0, False)] + tokens_count[(0, True)]) / len(easy_results) if len(easy_results) > 0 else 0.0,
+        "val/token_hard": (tokens_count[(1, False)] + tokens_count[(1, True)]) / len(hard_results) if len(hard_results) > 0 else 0.0,
+        "val/mean_gen_length": mean_gen_length,
+        "val/efficiency": efficiency,
     }
 
     logger.info(
-        "Epoch %d val accuracy: %.4f (easy=%.4f, hard=%.4f)",
-        epoch, accuracy, accuracy_easy, accuracy_hard
+        "Epoch %d val accuracy: %.4f (easy=%.4f, hard=%.4f), mean_gen_length=%.1f, efficiency=%.4f",
+        epoch, accuracy, accuracy_easy, accuracy_hard, mean_gen_length, efficiency,
     )
 
     if use_wandb:
@@ -721,7 +724,7 @@ def build_val_problems(
                 val_problems.append({
                     "problem_id": pid,
                     "problem": problem_text,
-                    "expected_answer": info["expected_answer"],
+                    "expected": info.get("expected", info.get("expected_answer", "")),
                     "complexity": info["complexity"],
                 })
                 if len(val_problems) >= max_val_problems:
@@ -809,7 +812,7 @@ def save_checkpoint(
     ckpt_path = output_dir / f"checkpoint-epoch-{epoch}"
     ckpt_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(ckpt_path))
-    tokenizer.save_pretrained(ckpt_path)
+    tokenizer.save_pretrained(str(ckpt_path))
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics_log, f, indent=2)
     logger.info("Saved checkpoint to %s", ckpt_path)
@@ -827,7 +830,7 @@ def save_best_model(
     best_model_path = output_dir / "best-model"
     best_model_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(best_model_path))
-    tokenizer.save_pretrained(best_model_path)
+    tokenizer.save_pretrained(str(best_model_path))
     selection_payload = {
         "best_model_metric": best_model_metric,
         "best_epoch": best_epoch,
@@ -910,12 +913,11 @@ def _build_dataloaders(
     pin_memory: bool,
     pad_token_id: int,
 ) -> tuple[DataLoader, DataLoader]:
-    collate = partial(collate_fn_tokenized, pad_token_id=pad_token_id)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate,
+        collate_fn=collate_fn_tokenized,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
@@ -925,7 +927,7 @@ def _build_dataloaders(
         val_dataset,
         batch_size=batch_size,
         shuffle=True,  # Shuffle val for more even problem coverage during accuracy eval
-        collate_fn=collate,
+        collate_fn=collate_fn_tokenized,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
@@ -936,13 +938,13 @@ def _build_dataloaders(
 def train_dpo(
     *,
     use_budget_aware: bool,
-    output_dir: Path,
-    val_split: float = 0.2,
+    output_dir: Path = CHECKPOINT_DIR,
+    train_size: int = 65_000,
+    val_size: int | float = 1000,
     max_epochs: int = 10,
     batch_size: int = 4,
     lr: float = 1e-5,
     checkpoint_every: int = 1,
-    data_limit: Optional[int] = None,
     resume_from: Optional[str] = None,
     seed: int = SEED,
     use_wandb: bool = False,
@@ -962,9 +964,10 @@ def train_dpo(
     length_ratio_easy: float = 1.0,
     length_ratio_hard: float = 1.0,
     max_pairs_per_problem: Optional[int] = 3,
-    best_model_metric: BestModelMetric = "val_loss",
+    best_model_metric: BestModelMetric = "efficiency",
     accuracy_floor: Optional[float] = None,
-    max_unique_problems: int = 65_000,
+    max_seq_len: Optional[int] = None,
+    val_gen_batch_size: int = 8,
     index_to_problem_path: Path = INDEX_TO_PROBLEM_PATH,
     ctx: Optional[StaticTrainingContext] = None,
 ) -> dict:
@@ -973,7 +976,7 @@ def train_dpo(
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if ctx is None:
-        ctx = build_static_context(effective_model_name, device, index_to_problem_path)
+        ctx = build_static_context(get_tokens_paths(), effective_model_name, device, index_to_problem_path)
 
     tokenizer = ctx.tokenizer
     index_to_problem = ctx.index_to_problem
@@ -985,10 +988,11 @@ def train_dpo(
         raw_data=ctx.raw_data,
         length_ratio_easy=length_ratio_easy,
         length_ratio_hard=length_ratio_hard,
-        val_split=val_split,
+        train_size=train_size,
+        val_size=val_size,
         seed=seed,
         max_pairs_per_problem=max_pairs_per_problem,
-        max_unique_problems=max_unique_problems
+        max_seq_len=max_seq_len,
     )
 
     num_train = len(train_dataset)
@@ -1021,11 +1025,10 @@ def train_dpo(
         batch_size=batch_size,
         lr=lr,
         seed=seed,
-        data_limit=data_limit,
         num_pairs=num_train + num_val,
         num_train_pairs=num_train,
         num_val_pairs=num_val,
-        val_split=val_split,
+        val_split=val_size,
         early_stopping_patience=early_stopping_patience,
         early_stopping_threshold=early_stopping_threshold,
         dpo_beta=dpo_beta,
@@ -1036,6 +1039,7 @@ def train_dpo(
         use_mixed_precision=use_mixed_precision,
         compile_model=compile_model,
         num_workers=num_workers,
+        val_gen_batch_size=val_gen_batch_size,
     )
 
     output_dir = Path(output_dir)
@@ -1060,9 +1064,11 @@ def train_dpo(
         threshold=early_stopping_threshold,
         threshold_mode="rel",
     )
-    # bfloat16 has the same exponent range as float32 so GradScaler is not
-    # needed (and its unscale kernel is not implemented for bf16 — it crashes).
     autocast_dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    # GradScaler only needed for fp16; bf16 has fp32's exponent range and the CUDA
+    # unscale_ kernel is not implemented for bf16 — it crashes if enabled.
+    use_fp16_scaler = use_mixed_precision and device == "cuda" and autocast_dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_fp16_scaler)
 
     logger.info("Using model: %s (loss_type=%s)", effective_model_name, loss_type)
     model = create_model(
@@ -1073,13 +1079,32 @@ def train_dpo(
         use_compile=compile_model and device == "cuda"
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
-    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
-    scaler = torch.amp.GradScaler("cuda", enabled=(use_mixed_precision and device == "cuda" and autocast_dtype == torch.float16))
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    logger.info(
+        "Model: %s | trainable params: %s / %s (%.3f%%) | device: %s | dtype: %s | "
+        "use_mixed_precision: %s | use_fp16_scaler: %s | autocast_dtype: %s",
+        effective_model_name,
+        f"{trainable:,}", f"{total:,}", 100 * trainable / total,
+        next(model.parameters()).device,
+        next(model.parameters()).dtype,
+        use_mixed_precision, use_fp16_scaler, autocast_dtype,
+    )
 
-    # TODO - what is it used for
-    # Load generation eval problems once (50 easy + 50 hard)
-    # gen_eval_problems = _load_gen_eval_problems(n_easy=50, n_hard=50)
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=lr, betas=(0.9, 0.999), weight_decay=0.01,
+    )
+    opt_param_count = sum(p.numel() for g in optimizer.param_groups for p in g['params'])
+    logger.info(
+        "Optimizer: AdamW | params in optimizer: %s | lr: %.2e | wd: %.3f",
+        f"{opt_param_count:,}", lr, 0.01,
+    )
+    assert opt_param_count == trainable, (
+        f"Optimizer has {opt_param_count:,} params but only {trainable:,} are trainable — mismatch!"
+    )
+    loss_fn = _build_loss_fn(use_budget_aware, dpo_beta, lambda_easy, lambda_hard, kl_penalty_weight, loss_type=loss_type)
+
 
     for epoch in range(1, max_epochs + 1):
         epoch_metrics = _run_epoch(
@@ -1098,25 +1123,19 @@ def train_dpo(
             steps_per_epoch=steps_per_epoch,
             gradient_accumulation_steps=gradient_accumulation_steps,
             use_mixed_precision=use_mixed_precision and device == "cuda",
+            use_fp16_scaler=use_fp16_scaler,
             autocast_dtype=autocast_dtype,
             compile_model=compile_model,
             val_problems=val_problems,
+            val_gen_batch_size=val_gen_batch_size,
         )
 
-        # # Generation-based evaluation after each epoch
-        # gen_metrics = _run_gen_eval(
-        #     model=model,
-        #     tokenizer=tokenizer,
-        #     problems=gen_eval_problems,
-        #     epoch=epoch,
-        #     use_wandb=use_wandb,
-        #     steps_per_epoch=steps_per_epoch,
-        # )
-        # epoch_metrics["gen_metrics"] = gen_metrics
+        gc.collect()
+        torch.cuda.empty_cache()
+
 
         # Persist generation metrics into the epoch entry so we can compare epochs later.
         if metrics_log:
-            # metrics_log[-1].update(gen_metrics)
             metrics_log[-1]["best_model_metric"] = best_model_metric
             if best_model_metric == "gen_tokens_easy_with_accuracy_floor":
                 metrics_log[-1]["accuracy_floor"] = accuracy_floor
@@ -1170,6 +1189,16 @@ def train_dpo(
         json.dump(metrics_log, f, indent=2)
     logger.info("Training complete. Saved to %s", output_dir)
 
+    # Explicit VRAM release — Python GC alone is insufficient across HPO trials because
+    # gradient-checkpointing hooks, W&B tensor references, and LoRA hook chains can keep
+    # the policy model alive past function return, causing progressive fragmentation.
+    del model, optimizer, scaler, train_loader, val_loader, train_dataset, val_dataset
+    best_model_state = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
     with open(output_dir / "summary.json", "w") as f:
         json.dump(
             {
@@ -1200,77 +1229,12 @@ def _get_best_value_for_epoch(
     if best_model_metric == "val_loss":
         return float(epoch_metrics["val_loss"])
 
-    # gen_metrics = epoch_metrics.get("gen_metrics") or {}
-    # if best_model_metric == "gen_tokens_easy":
-    #     return float(gen_metrics["gen/avg_tokens_easy"])
-    # if best_model_metric == "gen_tpca":
-    #     return float(gen_metrics["gen/tpca"])
-    # if best_model_metric == "gen_tokens_easy_with_accuracy_floor":
-    #     if accuracy_floor is None:
-    #         raise ValueError("--accuracy-floor is required when --best-model-metric=gen_tokens_easy_with_accuracy_floor")
-    #     acc_easy = float(gen_metrics["gen/accuracy_easy"])
-    #     if acc_easy < float(accuracy_floor):
-    #         return None
-    #     return float(gen_metrics["gen/avg_tokens_easy"])
+    val_acc = epoch_metrics.get("val_accuracy") or {}
+    if best_model_metric == "efficiency":
+        eff = val_acc.get("val/efficiency", 0.0)
+        return -float(eff)  # negate: lower return value = better (higher efficiency)
 
     raise ValueError(f"Unsupported best_model_metric: {best_model_metric}")
-
-
-def _load_gen_eval_problems(n_easy: int = 50, n_hard: int = 50) -> list[dict]:
-    """Load a balanced set of eval problems for generation-based validation."""
-    all_problems = load_eval_problems(limit=None)
-    easy = [p for p in all_problems if p["complexity"] == 0][:n_easy]
-    hard = [p for p in all_problems if p["complexity"] == 1][:n_hard]
-    problems = easy + hard
-    logger.info(
-        "Loaded %d gen-eval problems (%d easy, %d hard)",
-        len(problems), len(easy), len(hard),
-    )
-    return problems
-
-
-# def _run_gen_eval(
-#     model: nn.Module,
-#     tokenizer: PreTrainedTokenizer,
-#     problems: list[dict],
-#     epoch: int,
-#     use_wandb: bool,
-#     steps_per_epoch: int,
-# ) -> dict[str, float]:
-#     """Run generation-based evaluation and log results."""
-#     model.eval()
-#     results = generate_and_evaluate(model, tokenizer, problems, use_llm_judge=False)
-#     metrics = compute_metrics(results)
-#     model.train()
-
-#     gen_metrics = {
-#         "gen/accuracy": metrics["accuracy"],
-#         "gen/accuracy_easy": len([r for r in results if r["complexity"] == 0 and r["correct"]]) / max(len([r for r in results if r["complexity"] == 0]), 1),
-#         "gen/accuracy_hard": len([r for r in results if r["complexity"] == 1 and r["correct"]]) / max(len([r for r in results if r["complexity"] == 1]), 1),
-#         "gen/avg_tokens_easy": metrics["avg_tokens_easy"],
-#         "gen/avg_tokens_hard": metrics["avg_tokens_hard"],
-#         "gen/tpca": metrics["tpca"],
-#     }
-
-#     logger.info(
-#         "Epoch %d gen-eval: accuracy=%.4f (easy=%.4f, hard=%.4f), "
-#         "avg_tokens_easy=%.1f, avg_tokens_hard=%.1f, tpca=%.1f",
-#         epoch,
-#         gen_metrics["gen/accuracy"],
-#         gen_metrics["gen/accuracy_easy"],
-#         gen_metrics["gen/accuracy_hard"],
-#         gen_metrics["gen/avg_tokens_easy"],
-#         gen_metrics["gen/avg_tokens_hard"],
-#         gen_metrics["gen/tpca"],
-#     )
-
-#     if use_wandb:
-#         wandb.log(
-#             {**gen_metrics, "train/epoch": epoch},
-#             step=(epoch * steps_per_epoch),
-#         )
-
-#     return gen_metrics
 
 
 def _build_extra_wandb_dict(
@@ -1283,9 +1247,6 @@ def _build_extra_wandb_dict(
     result = {
         "reward_diff_easy": accum.total_reward_diff_easy.item() / n,
         "reward_diff_hard": accum.total_reward_diff_hard.item() / n,
-        "accuracy": accum.total_accuracy.item() / n,
-        "accuracy_easy": accum.total_accuracy_easy.item() / n,
-        "accuracy_hard": accum.total_accuracy_hard.item() / n,
         "avg_chosen_tokens_easy": accum.total_chosen_easy.item() / easy_n,
         "avg_chosen_tokens_hard": accum.total_chosen_hard.item() / hard_n,
         "avg_rejected_tokens_easy": accum.total_rejected_easy.item() / easy_n,
@@ -1344,9 +1305,11 @@ def _run_epoch(
     steps_per_epoch: int,
     gradient_accumulation_steps: int,
     use_mixed_precision: bool,
+    use_fp16_scaler: bool,
     autocast_dtype: torch.dtype,
     compile_model: bool,
     val_problems: Optional[list[dict]] = None,
+    val_gen_batch_size: int = 8,
 ) -> dict:
     model.train()
     device = next(model.parameters()).device
@@ -1369,9 +1332,8 @@ def _run_epoch(
             )
             loss = loss / gradient_accumulation_steps
 
-        if use_mixed_precision:
-            scaled_loss = scaler.scale(loss)
-            scaled_loss.backward()
+        if use_fp16_scaler:
+            scaler.scale(loss).backward()
         else:
             loss.backward()
 
@@ -1393,10 +1355,11 @@ def _run_epoch(
             )
 
         if is_last_accum:
-            if use_mixed_precision:
+            if use_fp16_scaler:
                 scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # type: ignore[assignment]
-            if use_mixed_precision:
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)  # type: ignore[assignment]
+            if use_fp16_scaler:
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -1434,11 +1397,16 @@ def _run_epoch(
         model, ref_model, val_loader, tokenizer, loss_fn, dpo_beta
     )
 
+    # Clear training caches before generation to reduce VRAM peak during val-gen
+    gc.collect()
+    torch.cuda.empty_cache()
+
     # Compute accuracy on validation problems if available
     val_accuracy = {}
     if val_problems:
         val_accuracy = _compute_val_accuracy(
-            model, tokenizer, val_problems, epoch, use_wandb, steps_per_epoch
+            model, tokenizer, val_problems, epoch, use_wandb, steps_per_epoch,
+            batch_size=val_gen_batch_size,
         )
 
     logger.info(
@@ -1501,7 +1469,7 @@ def _update_best_model(
             best_model_metric,
             float(accuracy_floor or 0.0),
             val_loss,
-            float((epoch_metrics.get("gen_metrics") or {}).get("gen/accuracy_easy", float("nan"))),
+            float((epoch_metrics.get("val_accuracy") or {}).get("val/accuracy_easy", float("nan"))),
         )
         return best_val_loss, best_model_state, best_epoch, best_epoch_metrics
 
@@ -1518,19 +1486,22 @@ def _update_best_model(
         should_update = (prev_value is None) or (float(candidate_value) < float(prev_value))
 
     if should_update:
-        gen_metrics = epoch_metrics.get("gen_metrics") or {}
+        val_acc = epoch_metrics.get("val_accuracy") or {}
         best_epoch_metrics = {
             "val_loss": val_loss,
-            "gen/accuracy": float(gen_metrics.get("gen/accuracy", float("nan"))),
-            "gen/accuracy_easy": float(gen_metrics.get("gen/accuracy_easy", float("nan"))),
-            "gen/avg_tokens_easy": float(gen_metrics.get("gen/avg_tokens_easy", float("nan"))),
-            "gen/tpca": float(gen_metrics.get("gen/tpca", float("nan"))),
+            "gen/accuracy": float(val_acc.get("val/accuracy", float("nan"))),
+            "gen/accuracy_easy": float(val_acc.get("val/accuracy_easy", float("nan"))),
+            "gen/avg_tokens_easy": float(val_acc.get("val/token_easy", float("nan"))),
+            "gen/tpca": float(val_acc.get("val/tpca", float("nan"))),
+            "gen/mean_gen_length": float(val_acc.get("val/mean_gen_length", float("nan"))),
+            "gen/efficiency": float(val_acc.get("val/efficiency", float("nan"))),
         }
         best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         best_epoch = epoch
         logger.info(
             "New best model by metric=%s at epoch %d (value=%.4f). "
-            "val_loss=%.4f, gen/accuracy=%.4f, gen/accuracy_easy=%.4f, gen/avg_tokens_easy=%.1f, gen/tpca=%.1f",
+            "val_loss=%.4f, gen/accuracy=%.4f, gen/accuracy_easy=%.4f, "
+            "gen/avg_tokens_easy=%.1f, gen/tpca=%.1f, gen/efficiency=%.4f",
             best_model_metric,
             epoch,
             float(candidate_value),
@@ -1539,6 +1510,7 @@ def _update_best_model(
             best_epoch_metrics["gen/accuracy_easy"],
             best_epoch_metrics["gen/avg_tokens_easy"],
             best_epoch_metrics["gen/tpca"],
+            best_epoch_metrics["gen/efficiency"],
         )
 
     return best_val_loss, best_model_state, best_epoch, best_epoch_metrics

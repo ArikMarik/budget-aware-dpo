@@ -4,7 +4,7 @@ Supports dummy data (processed DPO dataset) and real data (Phase 9: GSM8K, MATH)
 """
 
 import json
-from concurrent.futures import ProcessPoolExecutor
+import os
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -111,7 +111,10 @@ def _generate_batch(
     device: torch.device,
 ) -> list[tuple[str, int]]:
     """Generate responses for a batch of prompts. Returns list of (response, num_tokens)."""
-    inputs = tokenizer(prompts, return_tensors="pt", padding=True, padding_side='left').to(device)
+    orig_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = 'left'
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+    tokenizer.padding_side = orig_padding_side
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
 
@@ -122,7 +125,7 @@ def _generate_batch(
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=[151645, 151643],
+            eos_token_id=[151645, tokenizer.eos_token_id],
         )
 
     results = []
@@ -141,13 +144,11 @@ def generate_and_evaluate(
     problems: list[dict],
     max_new_tokens: int = 1024,
     prompt_fn: Optional[Callable] = None,
-    batch_size: int = 8,
-    num_workers: int = 4,
+    batch_size: int = 32,
 ) -> list[dict]:
     """Generate for each problem, extract answer, compute metrics.
 
-    Uses batched generation for GPU parallelism and parallel post-processing
-    for CPU-bound tasks (answer extraction + verification).
+    Uses batched generation for GPU parallelism; post-processing is sequential.
     """
     if prompt_fn is None:
         prompt_fn = build_zero_shot_prompt
@@ -169,22 +170,20 @@ def generate_and_evaluate(
             all_responses.append(response)
             all_num_tokens.append(num_tokens)
 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     post_process_args = [
         (idx, all_responses[idx], all_num_tokens[idx], p["expected"], p["complexity"], p.get("level"), p.get("source"), p["problem"])
         for idx, p in enumerate(problems)
     ]
 
-    if num_workers > 1:
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            processed_results = list(executor.map(_process_result, post_process_args))
-        results = processed_results
-    else:
-        results = [_process_result(args) for args in post_process_args]
+    results = [_process_result(args) for args in tqdm(post_process_args, desc='Verifying Correctness')]
 
     return results
 
 
-def compute_metrics(results: list[dict]) -> dict:
+def compute_metrics(results: list[dict], max_new_tokens: int = 1024) -> dict:
     """Compute accuracy, TPCA, avg tokens by complexity. MATH level 4-5 when available."""
     # MATH level 4-5 retention (Phase 9)
     def is_math_level_45(level) -> bool:
@@ -239,27 +238,36 @@ def compute_metrics(results: list[dict]) -> dict:
     tpca = total_tokens_correct / len(correct) if correct else float("inf")
     average_tokens_length = total_tokens / len(results) if results else 0
 
+    accuracy_easy = len(easy_correct) / len(easy_results) if easy_results else 0
+    accuracy_hard = len(hard_correct) / len(hard_results) if hard_results else 0
+
+    avg_tokens_easy = total_tokens_easy / len(easy_results) if easy_results else 0
+    avg_tokens_hard = total_tokens_hard / len(hard_results) if hard_results else 0
+
     for v in math_by_level.values():
         v["accuracy"] = v["correct"] / v["total"] if v["total"] > 0 else 0
 
     out = {
         "accuracy": accuracy,
+        "efficiency": accuracy / (average_tokens_length / max_new_tokens),
+        "tpca": tpca,
         "num_correct": len(correct),
         "num_total": len(with_expected),
-        "tpca": tpca,
         "average_tokens_length": average_tokens_length,
         "total_tokens": total_tokens,
         "total_tokens_correct": total_tokens_correct,
-        "avg_tokens_easy": total_tokens_easy / len(easy_results) if easy_results else 0,
-        "avg_tokens_hard": total_tokens_hard / len(hard_results) if hard_results else 0,
+        "avg_tokens_easy": avg_tokens_easy,
+        "avg_tokens_hard": avg_tokens_hard,
+        "efficiency_easy": accuracy_easy / (avg_tokens_easy / max_new_tokens) if easy_correct else 0,
+        "efficiency_hard": accuracy_hard / (avg_tokens_hard / max_new_tokens) if hard_correct else 0,
         "avg_tokens_easy_correct": total_tokens_easy_correct / len(easy_correct) if easy_correct else 0,
         "avg_tokens_hard_correct": total_tokens_hard_correct / len(hard_correct) if hard_correct else 0,
         "num_easy": len(easy_results),
         "num_hard": len(hard_results),
         "num_easy_correct": len(easy_correct),
         "num_hard_correct": len(hard_correct),
-        "easy_accuracy": len(easy_correct) / len(easy_results) if easy_results else 0,
-        "hard_accuracy": len(hard_correct) / len(hard_results) if hard_results else 0,
+        "accuracy_easy": accuracy_easy,
+        "accuracy_hard": accuracy_hard,
         "math_by_level": math_by_level
     }
 
@@ -276,13 +284,29 @@ def evaluate_checkpoint(
     output_path: Optional[Path] = None,
     base_model: Optional[str] = None,
     prompt_fn: Optional[callable] = None,
+    max_new_tokens: int = 1024,
+    batch_size: int = 32,
 ) -> dict:
-    """Load model, run evaluation, return metrics."""
+    """Load model, run evaluation, return metrics and results."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_name = base_model or MODEL_NAME
+
+    # Determine base model: explicit param > adapter config > default MODEL_NAME
+    if base_model:
+        model_name = base_model
+    else:
+        adapter_config_path = checkpoint_path / "adapter_config.json"
+        if adapter_config_path.exists():
+            with open(adapter_config_path) as f:
+                adapter_config = json.load(f)
+                model_name = adapter_config.get("base_model_name_or_path", MODEL_NAME)
+        else:
+            model_name = MODEL_NAME
+
+    # Load tokenizer from base model, not checkpoint (adapter may have corrupted tokenizer)
+    # tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path), trust_remote_code=True)
     base = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -292,14 +316,17 @@ def evaluate_checkpoint(
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model.eval()
 
-    results = generate_and_evaluate(model, tokenizer, problems, prompt_fn=prompt_fn)
+    results = generate_and_evaluate(
+        model, tokenizer, problems,
+        max_new_tokens=max_new_tokens,
+        prompt_fn=prompt_fn,
+        batch_size=batch_size,
+    )
     metrics = compute_metrics(results)
 
     out = {"metrics": metrics, "results": results}
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        # Truncate results for JSON (full responses can be long)
-        out_save = {"metrics": metrics, "results": results}
         with open(output_path, "w") as f:
-            json.dump(out_save, f, indent=2)
-    return metrics
+            json.dump(out, f, indent=2)
+    return out

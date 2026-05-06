@@ -2,6 +2,7 @@
 
 import atexit
 import logging
+from multiprocessing import Pool
 import os
 import random
 import sys
@@ -134,12 +135,19 @@ def count_tokens(text: str, tokenizer: PreTrainedTokenizer | None = None) -> int
 
 
 def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH, rejected_path: Path = REJECTED_ENCODINGS_PATH, info_path: Path = PROCESSED_PAIRS_INFO_PATH) -> dict:
-    """Load tokenized prompts and problem info, and combine into single dict."""
+    """Load tokenized prompts and problem info, and combine into single dict.
+
+    Args:
+        chosen_path: Path to chosen encodings file
+        rejected_path: Path to rejected encodings file
+        info_path: Path to pairs info file
+    """
     import time
     from tqdm import tqdm
 
     logger = get_logger(__name__)
-    logger.info("Loading and combining tokenized data (parallel)...")
+
+    logger.info("Loading and combining tokenized data ...")
 
     def _load_file(name: str, path: Path, key: str):
         size_mb = path.stat().st_size / 1e6
@@ -167,14 +175,19 @@ def load_and_combine_pairs_tokens_info(chosen_path: Path = CHOSEN_ENCODINGS_PATH
     rejected_encodings = results["rejected_encodings"]
     pairs_info = results["pairs_info"]
 
-    assert len(chosen_encodings["input_ids"]) == len(rejected_encodings["input_ids"]) == len(pairs_info["prompt_length"]), "Mismatched lengths of encodings and info"
+    assert len(pairs_info["prompt_length"]) > 0, "No data in pairs_info"
+
+    assert "input_ids" in chosen_encodings and "true_lengths" in chosen_encodings, "'input_ids' and 'true_lengths' keys are required in the chosen encodings"
+    assert "input_ids" in rejected_encodings and "true_lengths" in rejected_encodings, "'input_ids' and 'true_lengths' keys are required in the rejected encodings"
+
+    num_samples = len(chosen_encodings["input_ids"])
+    assert num_samples == len(rejected_encodings["input_ids"]) == len(pairs_info["prompt_length"]), "Mismatched lengths of encodings and info"
 
     combined = pairs_info
-    combined["chosen_input_ids"] = chosen_encodings["input_ids"]
-    combined["rejected_input_ids"] = rejected_encodings["input_ids"]
-    if "attention_mask" in chosen_encodings and "attention_mask" in rejected_encodings:
-        combined["chosen_attention_mask"] = chosen_encodings["attention_mask"]
-        combined["rejected_attention_mask"] = rejected_encodings["attention_mask"]
+    combined["chosen_input_ids"] = chosen_encodings["input_ids"].long()  # 2D tensor [N, max_len]
+    combined["rejected_input_ids"] = rejected_encodings["input_ids"].long()  # 2D tensor [N, max_len]
+    combined["chosen_seq_len"] = chosen_encodings["true_lengths"]  # 1D tensor [N]
+    combined["rejected_seq_len"] = rejected_encodings["true_lengths"]  # 1D tensor [N]
 
     logger.info(f"Combined data ready - {len(combined['prompt_length'])} total samples")
     return combined

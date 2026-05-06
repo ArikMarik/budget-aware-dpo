@@ -29,8 +29,10 @@ import json
 import math
 import os
 import sys
+import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,21 +63,21 @@ logger = get_logger(__name__)
 # Search space definitions
 # ---------------------------------------------------------------------------
 
-LOSS_TYPES = ["dpo", "simpo"]
+LOSS_TYPES = ["dpo"]
 
 # Grid points used when --sampler grid. Keep small — every combo is tried.
 GRID_SEARCH_SPACE: dict[str, list[Any]] = {
-    "lr":                          [5e-6, 1e-5, 5e-5],
-    "dpo_beta":                    [0.05, 0.1, 0.2],
-    "lambda_easy":                 [0.01, 0.05, 0.1],
-    "lambda_hard":                 [0.001, 0.01, 0.03],
-    "kl_penalty_weight":           [0.0, 0.01, 0.1],
-    "batch_size":                  [4, 8],
+    "lr":                          [4e-7, 8e-7, 1.5e-6, 2e-6],
+    "dpo_beta":                    [0.08, 0.12, 0.20, 0.25],
+    "lambda_easy":                 [0.10, 0.15, 0.22, 0.30],
+    "lambda_hard":                 [0.0001, 0.0002, 0.0005],
+    "kl_penalty_weight":           [0.0],
+    "batch_size":                  [8],
     "gradient_accumulation_steps": [1, 2],
     "loss_type":                   ["dpo"],
-    "length_ratio_easy":           [1.5, 2.0, 3.0, 4.0],
-    "length_ratio_hard":           [1.5, 2.0, 2.5, 3.0],
-    "max_pairs_per_problem":       [20, 50, 100],
+    "length_ratio_easy":           [1.5, 2.0, 2.5, 3.0],
+    "length_ratio_hard":           [2.0, 2.5, 3.0],
+    "max_pairs_per_problem":       [10, 13, 16, 20],
 }
 
 
@@ -86,13 +88,16 @@ class SearchConfig:
     accuracy_floor: float     # trials with acc_easy < floor → infeasible
     max_epochs: int
     seed: int
-    data_limit: Optional[int]
+    train_size: int
+    val_size: int
     model_name: Optional[str]
     num_workers: int
     use_mixed_precision: bool
     output_root: Path
     study_name: str
     use_wandb: bool
+    max_seq_len: Optional[int]
+    val_gen_batch_size: int
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +134,13 @@ def _compute_objective(
     if objective == "val_loss":
         val_loss = float(best_metrics.get("val_loss", INFEASIBLE) or INFEASIBLE)
         return val_loss
+    if objective == "efficiency":
+        # efficiency = accuracy / (mean_gen_length / max_new_tokens): correct answers per token budget.
+        # Higher is better → negate for Optuna minimization.
+        efficiency = float(best_metrics.get("gen/efficiency", 0.0) or 0.0)
+        if not math.isfinite(efficiency) or efficiency == 0.0:
+            return INFEASIBLE
+        return -efficiency
     if objective == "composite":
         # lower tpca is better; accuracy pulls it down. α weights accuracy.
         alpha = 500.0  # 1% accuracy ≈ 5 tokens of tpca
@@ -139,17 +151,17 @@ def _compute_objective(
 def _sample_hyperparams(trial: optuna.Trial) -> dict[str, Any]:
     """Sample one configuration. Shared by TPE / Random."""
     return {
-        "lr":                          trial.suggest_float("lr", 1e-6, 1e-4, log=True),
-        "dpo_beta":                    trial.suggest_float("dpo_beta", 0.02, 0.5, log=True),
-        "lambda_easy":                 trial.suggest_float("lambda_easy", 1e-3, 0.3, log=True),
-        "lambda_hard":                 trial.suggest_float("lambda_hard", 1e-4, 0.1, log=True),
-        "kl_penalty_weight":           trial.suggest_float("kl_penalty_weight", 1e-4, 1.0, log=True),
-        "batch_size":                  trial.suggest_categorical("batch_size", [4, 8, 12]),
-        "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4]),
-        "loss_type":                   trial.suggest_categorical("loss_type", LOSS_TYPES),
-        "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.0, 5.0),
-        "length_ratio_hard":           trial.suggest_float("length_ratio_hard", 1.0, 3.0),
-        "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 1, 5),
+        "lr":                          trial.suggest_float("lr", 4e-7, 2e-6, log=True),
+        "dpo_beta":                    trial.suggest_float("dpo_beta", 0.08, 0.25, log=True),
+        "lambda_easy":                 trial.suggest_float("lambda_easy", 0.10, 0.35, log=True),
+        "lambda_hard":                 trial.suggest_float("lambda_hard", 1e-4, 5e-4, log=True),
+        "kl_penalty_weight":           0.0,
+        "batch_size":                  8,
+        "gradient_accumulation_steps": trial.suggest_categorical("gradient_accumulation_steps", [1, 2]),
+        "loss_type":                   "dpo",
+        "length_ratio_easy":           trial.suggest_float("length_ratio_easy", 1.5, 3.0),
+        "length_ratio_hard":           trial.suggest_float("length_ratio_hard", 2.0, 3.0),
+        "max_pairs_per_problem":       trial.suggest_int("max_pairs_per_problem", 10, 20),
     }
 
 
@@ -212,17 +224,19 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
         else:
             os.environ.setdefault("WANDB_PROJECT", "budget-aware-dpo-hpo")
 
+        import time
+        trial_start = time.time()
         try:
             result = train_dpo(
                 use_budget_aware=search.budget_aware,
                 output_dir=output_dir,
-                val_split=0.2,
+                train_size=search.train_size,
+                val_size=search.val_size,
                 max_epochs=search.max_epochs,
                 batch_size=int(params["batch_size"]),
                 lr=float(params["lr"]),
                 checkpoint_every=10**9,  # skip per-epoch checkpoint writes
                 gradient_accumulation_steps=int(params["gradient_accumulation_steps"]),
-                data_limit=search.data_limit,
                 resume_from=None,
                 seed=search.seed,
                 use_wandb=search.use_wandb,
@@ -238,12 +252,13 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
                 num_workers=search.num_workers,
                 model_name=search.model_name,
                 loss_type=str(params["loss_type"]),
-                best_model_metric="val_loss",
+                best_model_metric="val_loss",  # TODO: best_model_metric="efficiency", accuracy_floor=search.accuracy_floor,
                 accuracy_floor=None,
                 length_ratio_easy=float(params["length_ratio_easy"]),
                 length_ratio_hard=float(params["length_ratio_hard"]),
                 max_pairs_per_problem=int(params["max_pairs_per_problem"]),
-                # max_unique_problems=50,  # TODO - VERY TEMPORARY (CHECK THE A SMALL FULL RUN)
+                max_seq_len=search.max_seq_len,
+                val_gen_batch_size=search.val_gen_batch_size,
                 ctx=ctx,
             )
         except torch.cuda.OutOfMemoryError:
@@ -270,10 +285,10 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
         trial.set_user_attr("output_dir", str(output_dir))
 
         score = _compute_objective(best_metrics, search.objective, search.accuracy_floor)
-
+        trial_elapsed = time.time() - trial_start
         logger.info(
-            "Trial %d done. score=%s best_metrics=%s",
-            trial.number, score, best_metrics,
+            "Trial %d done in %.0fs (%.1f min). score=%s best_metrics=%s",
+            trial.number, trial_elapsed, trial_elapsed / 60, score, best_metrics,
         )
 
         _cleanup_gpu()
@@ -351,17 +366,24 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
     # Training knobs (fixed across trials)
     p.add_argument("--max-epochs", type=int, default=3)
-    p.add_argument("--data-limit", type=int, default=None)
+    p.add_argument("--train-size", type=int, default=1000)
+    p.add_argument("--val-size", type=int, default=250)
     p.add_argument("--model", type=str, default=None)
-    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--no-mixed-precision", action="store_true")
+    p.add_argument("--max-seq-len", type=int, default=1536,
+                   help="Drop pairs where max(chosen, rejected) token length > this. Default 1536.")
+    p.add_argument("--val-gen-batch-size", type=int, default=8,
+                   help="Batch size for val generation (lower = less VRAM spike). Default 8.")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume an existing study by name. Default: always create a fresh study with auto-timestamp.")
     p.add_argument("--baseline", action="store_true",
                    help="Tune baseline DPO (no length penalty) instead of budget-aware")
 
     # Objective
     p.add_argument("--objective",
-                   choices=["tpca", "tokens_easy", "accuracy", "val_loss", "composite"],
-                   default="val_loss")
+                   choices=["tpca", "tokens_easy", "accuracy", "val_loss", "composite", "efficiency"],
+                   default="efficiency")
     p.add_argument("--accuracy-floor", type=float, default=0.10,
                    help="Trials with gen/accuracy_easy below this are infeasible (+inf).")
 
@@ -376,33 +398,45 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
 
+    # By default, always create a fresh study with a timestamp suffix.
+    # Pass --resume to load an existing study by its exact name.
+    if args.resume:
+        study_name = args.study_name
+        load_if_exists = True
+    else:
+        study_name = f"{args.study_name}_{datetime.now().strftime('%m%d_%H%M%S')}"
+        load_if_exists = False
+
     search = SearchConfig(
         budget_aware=not args.baseline,
         objective=args.objective,
         accuracy_floor=args.accuracy_floor,
         max_epochs=args.max_epochs,
         seed=args.seed,
-        data_limit=args.data_limit,
+        train_size=args.train_size,
+        val_size=args.val_size,
         model_name=args.model,
         num_workers=args.num_workers,
         use_mixed_precision=not args.no_mixed_precision,
         output_root=Path(args.output_root),
-        study_name=args.study_name,
+        study_name=study_name,
         use_wandb=args.wandb,
+        max_seq_len=args.max_seq_len,
+        val_gen_batch_size=args.val_gen_batch_size,
     )
     search.output_root.mkdir(parents=True, exist_ok=True)
 
-    storage = _make_storage(args.study_name, args.storage)
+    storage = _make_storage(study_name, args.storage)
     sampler = _build_sampler(args.sampler, args.seed)
     pruner = _build_pruner(args.pruner)
 
     study = optuna.create_study(
-        study_name=args.study_name,
+        study_name=study_name,
         storage=storage,
         sampler=sampler,
         pruner=pruner,
         direction="minimize",
-        load_if_exists=True,
+        load_if_exists=load_if_exists,
     )
     study.set_user_attr("objective", args.objective)
     study.set_user_attr("budget_aware", search.budget_aware)
@@ -411,7 +445,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     logger.info(
         "Starting study '%s' sampler=%s n_trials=%s timeout=%s storage=%s",
-        args.study_name, args.sampler, args.n_trials, args.timeout, storage,
+        study_name, args.sampler, args.n_trials, args.timeout, storage,
     )
 
     effective_model = args.model or MODEL_NAME

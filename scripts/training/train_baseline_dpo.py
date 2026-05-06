@@ -13,13 +13,13 @@ from src.training.dpo_trainer import train_dpo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--val-split", type=float, default=0.2, help='Validation fraction size, must be in (0, 1) (default 0.2)')
+    parser.add_argument("--train-size", type=int, default=65_000, help='Train size (no. of unique problems)')
+    parser.add_argument("--val-size", type=int, default=1000, help='Validation size (no. of unique problems)')
     parser.add_argument("--max-epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--checkpoint-every", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--data-limit", type=int, default=None)
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--wandb", action="store_true")
@@ -57,13 +57,13 @@ def main():
     train_dpo(
         use_budget_aware=False,
         output_dir=output_dir,
-        val_split=args.val_split,
+        train_size=args.train_size,
+        val_size=args.val_size,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         checkpoint_every=args.checkpoint_every,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        data_limit=args.data_limit,
         resume_from=args.resume_from,
         seed=args.seed,
         use_wandb=args.wandb,

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 from transformers import AutoTokenizer, PreTrainedTokenizer
@@ -102,7 +103,15 @@ def count_tokens_batch(
     return results
 
 
-def _tokenize_pairs_in_batches(pairs: list[dict], tokenizer: PreTrainedTokenizer, option: Literal["chosen", "rejected", "base"], max_length: int = 2048, batch_size: int = 20_000, padding: bool = False, show_progress: bool = True, description: str = 'Tokenizing') -> list[torch.Tensor] | dict[str, list[torch.Tensor]]:
+def _tokenize_pairs_in_batches(
+        pairs: list[dict],
+        tokenizer: PreTrainedTokenizer,
+        option: Literal["chosen", "rejected"],
+        max_length: int = 2048,
+        batch_size: int = 20_000,
+        show_progress: bool = True,
+        description: str = 'Tokenizing'
+    ) -> dict[str, torch.Tensor]:
     """Tokenize a list of texts in batches, returning a list of tensors or a dict of lists of tensors."""
     results = defaultdict(list)
     total= len(pairs)
@@ -119,13 +128,19 @@ def _tokenize_pairs_in_batches(pairs: list[dict], tokenizer: PreTrainedTokenizer
         elif option == "rejected":
             chunk = [build_zero_shot_prompt(p["problem"]) + p["rejected"] for p in batch]
         else:
-            chunk = [build_zero_shot_prompt(p["problem"]) for p in batch]
-        encodings = tokenizer(chunk, padding='max_length' if padding else 'do_not_pad', truncation=True, max_length=max_length, return_attention_mask=True if padding else False)
+            raise ValueError(f'Invalid value for option - {option}')
 
-        for key, value in encodings.items():
-            results[key].extend([torch.tensor(v, dtype=torch.long) for v in value])
+        encodings = tokenizer(chunk, padding=False, truncation=True, max_length=max_length, return_attention_mask=False)
 
-    return results
+        for input_id in encodings['input_ids']:
+            tensor_id = torch.tensor(input_id, dtype=torch.long)
+            results['input_ids'].append(tensor_id)
+            results['true_lengths'].append(len(tensor_id))
+
+    return {
+        'input_ids': pad_sequence(results['input_ids'], batch_first=True, padding_value=tokenizer.pad_token_id).to(torch.int32),
+        'true_lengths': torch.as_tensor(results['true_lengths'], dtype=torch.int16)
+    }
 
 
 def tokenize_and_save(
@@ -133,11 +148,10 @@ def tokenize_and_save(
         tokenizer: PreTrainedTokenizer | None = None,
         max_length: int = 2048,
         batch_size: int = 20_000,
-        padding: bool = False,
         show_progress: bool = True,
         output_paths: tuple[Path, Path, Path] = (CHOSEN_ENCODINGS_PATH, REJECTED_ENCODINGS_PATH, PROCESSED_PAIRS_INFO_PATH),
         reset: bool = True
-    ) -> None:
+    ) -> list[dict]:
     if tokenizer is None:
         tokenizer = get_model_tokenizer()
 
@@ -154,6 +168,7 @@ def tokenize_and_save(
         for start in iterator:
             batch = pairs[start:start + batch_size]
             for p in batch:
+                pairs_info["level"].append(level if (level := p.pop("level")) else -1)
                 pairs_info["complexity"].append(p.pop("complexity"))
                 pairs_info["rejection_reason"].append(p.pop("rejection_reason"))
                 pairs_info["chosen_length"].append(p.pop("chosen_length"))
@@ -165,19 +180,31 @@ def tokenize_and_save(
         prompt_lengths = count_tokens_batch(prompt_texts, tokenizer, internal_batch_size=batch_size, show_progress=False)
         pairs_info["prompt_length"] = prompt_lengths
 
-        pairs_info = {key: torch.tensor(value, dtype=torch.long) for key, value in pairs_info.items()}
+        prompt_lengths_tensor = torch.as_tensor(prompt_lengths, dtype=torch.int16)
+        chosen_length_tensor = torch.as_tensor(pairs_info["chosen_length"], dtype=torch.int16)
+        rejected_length_tensor = torch.as_tensor(pairs_info["rejected_length"], dtype=torch.int16)
+        max_full_prompt_length = prompt_lengths_tensor + torch.maximum(chosen_length_tensor, rejected_length_tensor)
+        mask_under_max_length = max_full_prompt_length < max_length
+
+        pairs_info = {key: torch.tensor(value, dtype=torch.long)[mask_under_max_length] for key, value in pairs_info.items()}
         torch.save(pairs_info, pairs_info_path)
         del prompt_texts, prompt_lengths, pairs_info
         gc.collect()
         logger.info("Saved pairs info to %s", pairs_info_path)
 
+    under_max_length_indices = torch.where(mask_under_max_length)[0]
+    relevant_pairs = [pairs[i] for i in tqdm(under_max_length_indices, desc="Filtering pairs under max length", unit="pair")]
+    logger.info(f"Filtered out {len(pairs) - len(relevant_pairs):,} pairs surpassing max length {max_length}")
+    del pairs
+    gc.collect()
+
     if reset or not chosen_encodings_path.exists():
         # Tokenize chosen prompts in batches
-        chosen_encodings = _tokenize_pairs_in_batches(pairs, tokenizer, option="chosen", max_length=max_length, batch_size=batch_size, padding=padding, show_progress=show_progress, description="Tokenizing chosen prompts")
+        chosen_encodings = _tokenize_pairs_in_batches(relevant_pairs, tokenizer, option="chosen", max_length=max_length, batch_size=batch_size, show_progress=show_progress, description="Tokenizing chosen prompts")
         iterator = range(0, num_pairs, batch_size)
         torch.save(chosen_encodings, chosen_encodings_path)
         # Remove tokenized texts from pairs to free memory
-        for p in pairs:
+        for p in relevant_pairs:
             p.pop("chosen")
         del chosen_encodings
         gc.collect()
@@ -185,10 +212,10 @@ def tokenize_and_save(
 
     if reset or not rejected_encodings_path.exists():
         # Tokenize rejected prompts in batches
-        rejected_encodings = _tokenize_pairs_in_batches(pairs, tokenizer, option="rejected", max_length=max_length, batch_size=batch_size, padding=padding, show_progress=show_progress, description="Tokenizing rejected prompts")
+        rejected_encodings = _tokenize_pairs_in_batches(relevant_pairs, tokenizer, option="rejected", max_length=max_length, batch_size=batch_size, show_progress=show_progress, description="Tokenizing rejected prompts")
         torch.save(rejected_encodings, rejected_encodings_path)
         # Remove tokenized texts from pairs to free memory
-        for p in pairs:
+        for p in relevant_pairs:
             p.pop("rejected")
         del rejected_encodings
         gc.collect()
@@ -196,230 +223,4 @@ def tokenize_and_save(
 
     logger.info(f"Tokenized a total of {num_pairs:,} pairs")
 
-
-def _tokenize_pair_batch(
-    pairs_batch: list[dict],
-    tokenizer: PreTrainedTokenizer,
-    max_length: int,
-) -> dict[str, torch.Tensor | list[torch.Tensor]]:
-    """Tokenize a batch of DPO pairs (core tokenization logic)."""
-    from src.evaluation.few_shot_exemplars import build_zero_shot_prompt
-    chosen_combined, rejected_combined = [], []
-    complexities_batch, rejection_reason_batch = [], []
-    chosen_length_batch, rejected_length_batch = [], []
-    problem_ids_batch, source_batch = [], []
-    prompt_texts = []
-    for pair in pairs_batch:
-        prompt_text = build_zero_shot_prompt(pair["problem"])
-        prompt_texts.append(prompt_text)
-        chosen_combined.append(prompt_text + pair["chosen"])
-        rejected_combined.append(prompt_text + pair["rejected"])
-        complexities_batch.append(pair.get("complexity", 0))
-        rejection_reason_batch.append(pair["rejection_reason"])
-        chosen_length_batch.append(pair.get("chosen_length", 0))
-        rejected_length_batch.append(pair.get("rejected_length", 0))
-        problem_ids_batch.append(pair.get("problem_id", 0))
-        source_batch.append(pair["problem_source"])
-
-    chosen_tok = tokenizer(chosen_combined, padding=False, truncation=True, max_length=max_length)
-    rejected_tok = tokenizer(rejected_combined, padding=False, truncation=True, max_length=max_length)
-    prompt_lengths = count_tokens_batch(prompt_texts, tokenizer=tokenizer, show_progress=True)
-
-    return {
-        "chosen_input_ids": [torch.tensor(enc, dtype=torch.long) for enc in chosen_tok["input_ids"]],
-        "rejected_input_ids": [torch.tensor(enc, dtype=torch.long) for enc in rejected_tok["input_ids"]],
-        "complexity": torch.tensor(complexities_batch, dtype=torch.long),
-        "rejection_reason": torch.tensor(rejection_reason_batch, dtype=torch.long),
-        "chosen_length": torch.tensor(chosen_length_batch, dtype=torch.long),
-        "rejected_length": torch.tensor(rejected_length_batch, dtype=torch.long),
-        "problem_id": torch.tensor(problem_ids_batch, dtype=torch.long),
-        "prompt_length": torch.tensor(prompt_lengths, dtype=torch.long),
-        "problem_source": torch.tensor(source_batch, dtype=torch.long),
-    }
-
-
-def _tokenize_shard(args: tuple) -> dict:
-    """Worker function - tokenize a shard of DPO pairs with internal batching."""
-    shard_idx, pairs_chunk, model_name, max_length, batch_size = args
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    num_pairs = len(pairs_chunk)
-    num_batches = (num_pairs + batch_size - 1) // batch_size
-
-    chosen_input_ids_all: list[torch.Tensor] = []
-    rejected_input_ids_all: list[torch.Tensor] = []
-    complexities_all: list[torch.Tensor] = []
-    rejection_reason_all: list[torch.Tensor] = []
-    chosen_length_all: list[torch.Tensor] = []
-    rejected_length_all: list[torch.Tensor] = []
-    problem_ids_all: list[torch.Tensor] = []
-    prompt_lengths_all: list[torch.Tensor] = []
-    problem_sources_all: list[torch.Tensor] = []
-
-    for batch_idx in range(num_batches):
-        start = batch_idx * batch_size
-        end = min(start + batch_size, num_pairs)
-        batch_pairs = pairs_chunk[start:end]
-        result = _tokenize_pair_batch(batch_pairs, tokenizer, max_length)
-
-        chosen_input_ids_all.extend(result["chosen_input_ids"])
-        rejected_input_ids_all.extend(result["rejected_input_ids"])
-        complexities_all.append(result["complexity"])
-        rejection_reason_all.append(result["rejection_reason"])
-        chosen_length_all.append(result["chosen_length"])
-        rejected_length_all.append(result["rejected_length"])
-        problem_ids_all.append(result["problem_id"])
-        prompt_lengths_all.append(result["prompt_length"])
-        problem_sources_all.append(result["problem_source"])
-
-    # OPTION A: write shard result to a temp file and return only the path.
-    # Returning 100K individual PyTorch tensors through the multiprocessing pipe
-    # requires pickling ~1.2GB of Python objects per shard, which serializes through
-    # the _result_handler thread and takes 30-90 min for 32 shards. torch.save()
-    # writes the same data in seconds via its optimized binary format, and the IPC
-    # payload shrinks from ~1.2GB to a ~50-byte file path string.
-    # See: docs/ipc_bug_analysis.md
-    shard_data = {
-        "shard_idx": shard_idx,
-        "chosen_input_ids": chosen_input_ids_all,
-        "rejected_input_ids": rejected_input_ids_all,
-        "complexity": torch.cat(complexities_all),
-        "rejection_reason": torch.cat(rejection_reason_all),
-        "chosen_length": torch.cat(chosen_length_all),
-        "rejected_length": torch.cat(rejected_length_all),
-        "problem_id": torch.cat(problem_ids_all),
-        "prompt_length": torch.cat(prompt_lengths_all),
-        "problem_source": torch.cat(problem_sources_all),
-    }
-    tmp_path = os.path.join(tempfile.gettempdir(), f"dpo_shard_{shard_idx}_{os.getpid()}.pt")
-    torch.save(shard_data, tmp_path)
-    return {"shard_idx": shard_idx, "tmp_path": tmp_path}
-
-    # ORIGINAL RETURN (Option A replacement — caused IPC deadlock):
-    # Returning the full dict through multiprocessing pipe pickles 200K individual
-    # PyTorch tensors (~1.2GB) which serializes through a single _result_handler
-    # thread. With 32 workers each queuing ~1.2GB simultaneously, effective
-    # throughput drops to ~10MB/s (pipe buffer contention + per-tensor pickle
-    # overhead), making the full pipeline take 30-90 min on the IPC step alone.
-    # return {
-    #     "shard_idx": shard_idx,
-    #     "chosen_input_ids": chosen_input_ids_all,
-    #     "rejected_input_ids": rejected_input_ids_all,
-    #     "complexity": torch.cat(complexities_all),
-    #     "rejection_reason": torch.cat(rejection_reason_all),
-    #     "chosen_length": torch.cat(chosen_length_all),
-    #     "rejected_length": torch.cat(rejected_length_all),
-    #     "problem_id": torch.cat(problem_ids_all),
-    #     "prompt_length": torch.cat(prompt_lengths_all),
-    #     "problem_source": torch.cat(problem_sources_all),
-    # }
-
-
-def tokenize_dpo_pairs_parallel(
-    pairs: list[dict],
-    model_name: str,
-    output_path: Path,
-    max_length: int = 512,
-    num_workers: int = 32,
-    batch_size: int = 10_000,
-    show_progress: bool = True,
-    pad_token_id: int = 0,
-    batches_per_shard: int | None = None,
-) -> int:
-    """Tokenize DPO pairs in parallel using multiprocessing with incremental processing."""
-    num_pairs = len(pairs)
-
-    if batches_per_shard is None:
-        batches_per_shard = max(1, 100000 // batch_size)
-    shard_size = batch_size * batches_per_shard
-    num_shards = (num_pairs + shard_size - 1) // shard_size
-
-    shard_args = [
-        (shard_idx, pairs[start:start + shard_size], model_name, max_length, batch_size)
-        for shard_idx in range(num_shards)
-        if (start := shard_idx * shard_size) < num_pairs
-    ]
-
-    logger.info(f"Tokenizing {num_pairs:,} pairs across {num_shards} shards (batch_size={batch_size}, batches_per_shard={batches_per_shard}) using {num_workers} workers...")
-
-    all_chosen_input_ids = []
-    all_rejected_input_ids = []
-    all_complexities = []
-    all_rejection_reason = []
-    all_chosen_length = []
-    all_rejected_length = []
-    all_problem_ids = []
-    all_prompt_lengths = []
-    all_problem_sources = []
-    buffered_results = {}
-    next_shard_idx = 0
-
-    def _merge_shard(result: dict) -> None:
-        all_chosen_input_ids.extend(result["chosen_input_ids"])
-        all_rejected_input_ids.extend(result["rejected_input_ids"])
-        all_complexities.append(result["complexity"])
-        all_rejection_reason.append(result["rejection_reason"])
-        all_chosen_length.append(result["chosen_length"])
-        all_rejected_length.append(result["rejected_length"])
-        all_problem_ids.append(result["problem_id"])
-        all_prompt_lengths.append(result["prompt_length"])
-        all_problem_sources.append(result["problem_source"])
-
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_tokenize_shard, args): args for args in shard_args}
-        iterator = as_completed(futures)
-        if show_progress:
-            iterator = tqdm(iterator, total=len(futures), desc="Tokenizing shards")
-        for future in iterator:
-            # OPTION A: load shard data from temp file written by the worker.
-            # The worker returns only a file path; actual tensor data is on disk.
-            raw = future.result()
-            tmp_path = raw.get("tmp_path")
-            if tmp_path:
-                result = torch.load(tmp_path, map_location="cpu", weights_only=False)
-                os.unlink(tmp_path)
-            else:
-                # ORIGINAL fallback: result arrived through the pipe directly.
-                # This path is now dead code (workers always write temp files).
-                result = raw
-            shard_idx = result["shard_idx"]
-            if shard_idx == next_shard_idx:
-                _merge_shard(result)
-                next_shard_idx += 1
-                while next_shard_idx in buffered_results:
-                    _merge_shard(buffered_results.pop(next_shard_idx))
-                    next_shard_idx += 1
-            else:
-                buffered_results[shard_idx] = result
-
-    logger.info(f"Merging {num_shards} shards into final tensors...")
-    final_chosen = list(itertools.chain.from_iterable(all_chosen_input_ids))
-    final_rejected = list(itertools.chain.from_iterable(all_rejected_input_ids))
-    final_complexities = torch.cat(all_complexities)
-    final_rejection_reason = torch.cat(all_rejection_reason)
-    final_chosen_length = torch.cat(all_chosen_length)
-    final_rejected_length = torch.cat(all_rejected_length)
-    final_problem_ids = torch.cat(all_problem_ids)
-    final_prompt_lengths = torch.cat(all_prompt_lengths)
-    final_problem_sources = torch.cat(all_problem_sources)
-
-    torch.save(
-        {
-            "chosen_input_ids": final_chosen,
-            "rejected_input_ids": final_rejected,
-            "complexity": final_complexities,
-            "rejection_reason": final_rejection_reason,
-            "chosen_length": final_chosen_length,
-            "rejected_length": final_rejected_length,
-            "problem_id": final_problem_ids,
-            "prompt_length": final_prompt_lengths,
-            "problem_source": final_problem_sources,
-            "pad_token_id": pad_token_id,
-        },
-        output_path,
-    )
-    logger.info(f"Saved {num_pairs:,} tokenized pairs to {output_path}")
-    return num_pairs
+    return relevant_pairs

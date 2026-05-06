@@ -13,37 +13,39 @@ from src.training.dpo_trainer import train_dpo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--val-split", type=float, default=0.2, help='Validation fraction size, must be in (0, 1) (default 0.2)')
-    parser.add_argument("--max-epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--train-size", type=int, default=10_000, help='Train size (no. of unique problems)')
+    parser.add_argument("--val-size", type=int, default=500, help='Validation size')
+    parser.add_argument("--max-epochs", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=8e-7)
     parser.add_argument("--checkpoint-every", type=int, default=1)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--data-limit", type=int, default=None)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=2)
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--wandb", action="store_true", default=True)
-    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument("--early-stopping-patience", type=int, default=3)
     parser.add_argument("--early-stopping-threshold", type=float, default=0.0)
-    parser.add_argument("--dpo-beta", type=float, default=0.1)
-    parser.add_argument("--lambda-easy", type=float, default=0.05)
+    parser.add_argument("--dpo-beta", type=float, default=0.2)
+    parser.add_argument("--lambda-easy", type=float, default=0.28)
     parser.add_argument("--lambda-hard", type=float, default=0.001)
     parser.add_argument("--kl-penalty", type=float, default=0.0, help="KL divergence penalty weight to prevent model collapse (0.0 = disabled)")
     parser.add_argument("--no-mixed-precision", action="store_true")
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--run-name", type=str, default=None, help="WandB run name (auto-generated if omitted)")
-    parser.add_argument("--model", type=str, default=None, help="Model name/path (default: Qwen/Qwen2.5-0.5B)")
+    parser.add_argument("--model", type=str, default=None, help="Model name/path (default: Qwen/Qwen2.5-Math-1.5B)")
     parser.add_argument("--loss-type", type=str, default="dpo", choices=["dpo", "simpo"], help="Loss function type")
-    parser.add_argument("--length-ratio-easy", type=float, default=1.5, help="Min length ratio for easy pairs (complexity=0). 1.0 = no filter.")
-    parser.add_argument("--length-ratio-hard", type=float, default=1.0, help="Min length ratio for hard pairs (complexity=1). 1.0 = no filter.")
+    parser.add_argument("--length-ratio-easy", type=float, default=2, help="Min length ratio for easy pairs (complexity=0). 1.0 = no filter.")
+    parser.add_argument("--length-ratio-hard", type=float, default=3, help="Min length ratio for hard pairs (complexity=1). 1.0 = no filter.")
     parser.add_argument("--max-pairs-per-problem", type=int, default=10, help="Maximum number of DPO pairs per problem (stratified by rejection_reason), enter -1 for no limit")
+    parser.add_argument("--max-seq-len", type=int, default=1536, help="Drop pairs where max(chosen, rejected) token length > this. Default 1536.")
     parser.add_argument(
         "--best-model-metric",
         type=str,
-        default="val_loss",
+        default="efficiency",
         choices=[
             "val_loss",
+            "efficiency",
             "gen_tokens_easy",
             "gen_tpca",
             "gen_tokens_easy_with_accuracy_floor",
@@ -63,13 +65,13 @@ def main():
     train_dpo(
         use_budget_aware=True,
         output_dir=output_dir,
-        val_split=args.val_split,
+        train_size=args.train_size,
+        val_size=args.val_size,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         checkpoint_every=args.checkpoint_every,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        data_limit=args.data_limit,
         resume_from=args.resume_from,
         seed=args.seed,
         use_wandb=args.wandb,
@@ -88,6 +90,7 @@ def main():
         length_ratio_easy=args.length_ratio_easy,
         length_ratio_hard=args.length_ratio_hard,
         max_pairs_per_problem=args.max_pairs_per_problem,
+        max_seq_len=args.max_seq_len,
         best_model_metric=args.best_model_metric,
         accuracy_floor=args.accuracy_floor,
     )

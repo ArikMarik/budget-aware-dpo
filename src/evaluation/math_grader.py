@@ -5,7 +5,7 @@ from math_verify import parse, verify
 
 from src.qwen_evaluation.grader import math_equal
 from src.qwen_evaluation.parser import strip_string
-from src.utils import get_logger, setup_global_exception_handler
+from src.utils import get_logger
 
 
 logger = get_logger(__name__)
