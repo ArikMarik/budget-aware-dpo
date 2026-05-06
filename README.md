@@ -1,117 +1,98 @@
 # Budget-Aware DPO
 
-Training small math models with budget-aware Direct Preference Optimization — short answers for easy problems, full chain-of-thought for hard problems.
+Training math LLMs to allocate inference compute based on problem difficulty — short answers for easy problems, shorter chain-of-thought for hard ones.
 
 ---
 
 ## What This Project Does
 
-**Budget-Aware DPO** is a training method that teaches the Qwen-2.5-0.5B model to adapt its response length based on problem difficulty:
-
-| Problem Type | Example | Target Response |
-|--------------|---------|-----------------|
-| **Easy** (C=0) | GSM8K-style arithmetic | Short, direct answer |
-| **Hard** (C=1) | MATH-style proofs | Full chain-of-thought |
-
-The key innovation is a custom DPO loss with a **length penalty** term:
+**Budget-Aware DPO** fine-tunes `Qwen/Qwen2.5-Math-1.5B` with a modified DPO loss that adds a complexity-conditioned length penalty:
 
 ```
-R_budget(x, y) = β · log(π_θ(y|x) / π_ref(y|x)) − λ(C) · |y|
+R_budget(x, y) = β · log(π_θ(y|x) / π_ref(y|x)) − λ(C) · (chosen_len − rejected_len) / avg_len
 ```
 
-Where:
-- `π_θ` = policy model (being trained)
-- `π_ref` = frozen reference model
-- `β` = DPO temperature (default 0.1)
-- `C` = complexity flag (0=Easy, 1=Hard)
-- `λ(C)` = length penalty coefficient: **high (0.05)** for Easy, **low (0.001)** for Hard
-- `|y|` = response length in tokens
 
-This encourages the model to give concise answers for simple problems while preserving detailed reasoning for complex ones.
+| Symbol | Meaning                                                                     |
+| ------ | --------------------------------------------------------------------------- |
+| `β`    | DPO temperature (controls deviation from reference)                         |
+| `C`    | Complexity flag: 0 = Easy, 1 = Hard                                         |
+| `λ(C)` | Length penalty: **high (~0.28)** for Easy, **near zero (~0.0001)** for Hard |
+
+
+The goal: easy problems (GSM8K-style arithmetic) get concise answers; hard problems (MATH Level 4–5) keep their chain-of-thought. Measured by **TPCA** (Tokens Per Correct Answer) and **avg_tokens_easy**.
 
 ---
 
 ## Prerequisites
 
-- **Python** 3.11+
-- **GPU** with CUDA support (training requires GPU)
-- **HuggingFace account** (for downloading Qwen-2.5-0.5B model)
-- **Internet access** (for downloading model weights and datasets)
+- Python 3.11+
+- CUDA GPU (training requires GPU; A100 / RTX 6000 Ada used in development)
+- HuggingFace access to `Qwen/Qwen2.5-Math-1.5B`
 
 ---
 
 ## Installation
 
 ```bash
-# 1. Clone the repository
-git clone <repository-url>
+git clone https://github.com/ArikMarik/budget-aware-dpo
 cd nlp_final_project
 
-# 2. Create virtual environment
 python3 -m venv .venv
-
-# 3. Activate virtual environment
 source .venv/bin/activate
-# On Windows: .venv\Scripts\activate
-
-# 4. Install dependencies
 pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 
-# 5. Set PYTHONPATH (required for all scripts)
+# Required for all scripts
 export PYTHONPATH="$PWD:$PYTHONPATH"
-# Add to .bashrc for convenience: echo 'export PYTHONPATH="$PWD:$PYTHONPATH"' >> ~/.bashrc
-```
-
-### Optional: Cluster Storage Configuration
-
-If using cluster storage (avoids filling home directory quota):
-
-```bash
-export DATA_PATH="/vol/joberant_nobck/data/NLP_368307701_2526a/<username>"
-export CHECKPOINT_DIR="$DATA_PATH/checkpoints"
-export HF_HOME="$DATA_PATH/.cache/huggingface"
-export PIP_CACHE_DIR="$DATA_PATH/.cache/pip"
 ```
 
 ---
 
 ## Quick Start
 
-### Option A: Run Everything (Dummy Data)
+End-to-end pipeline from raw data to trained model. See **Pipeline Overview** below for full details on each step.
 
 ```bash
-cd nlp_final_project
-source .venv/bin/activate
 export PYTHONPATH="$PWD:$PYTHONPATH"
+export CUDA_VISIBLE_DEVICES=0
 
-# Run complete dummy pipeline (~2-5 minutes)
-USE_DUMMY_DATA=1 ./scripts/run_all_dummy.sh
-```
+# Step 1 — Build FAISS similarity index for deduplication
+python -m scripts.build_math_problem_index
 
-This runs:
-1. Generate dummy data (50 synthetic examples)
-2. Model load check
-3. Preprocessing (4-way augmentation)
-4. Sanity check (overfitting)
+# Step 2 — Download OpenMathInstruct-2 + GSM8K/MATH test sets
+python -m scripts.load_real_data --split train
+python -m scripts.load_real_data --test-sets-only
 
-### Option B: Step-by-Step
+# Step 3 — Token length analysis + base model ground truth
+python -m scripts.analysis.analyze_prompt_token_lengths
+PYTHONUNBUFFERED=1 python scripts/eval_base_model.py \
+  --output eval_results/base_model.json --use-real
 
-```bash
-# 1. Generate dummy data
-USE_DUMMY_DATA=1 python -m scripts.generate_dummy_data
+# Step 4 — Build DPO preference pairs
+python -m scripts.preprocess_dpo_data
 
-# 2. Verify model loads
-USE_DUMMY_DATA=1 python -m scripts.check_model_load
+# Step 5 — Hyperparameter search (TPE, ~25 h on 1 GPU)
+PYTHONUNBUFFERED=1 nohup python -m scripts.optuna_hpo \
+  --n-trials 20 --max-epochs 3 --train-size 1000 --val-size 250 \
+  --objective efficiency --accuracy-floor 0.15 \
+  --max-seq-len 1536 --val-gen-batch-size 8 --sampler tpe --wandb \
+  > logs/hpo_run.log 2>&1 &
 
-# 3. Preprocess into DPO pairs
-USE_DUMMY_DATA=1 python -m scripts.preprocess_dpo_data
+# Step 6 — Deep training with best HPO config (trial 6: efficiency=1.35)
+PYTHONUNBUFFERED=1 nohup python -m scripts.training.train_budget_aware_dpo \
+  --output-dir checkpoints/deep_run_1 --max-epochs 8 --batch-size 8 \
+  --lr 1.05e-6 --dpo-beta 0.229 --lambda-easy 0.112 --lambda-hard 1.37e-4 \
+  --kl-penalty 0.0 --gradient-accumulation-steps 2 \
+  --best-model-metric efficiency --run-name deep_run_1 --wandb \
+  > logs/deep_run_1.log 2>&1 &
 
-# 4. Sanity check (overfit on small set)
-USE_DUMMY_DATA=1 python -m scripts.train_sanity_check
+# Step 7 — Evaluate trained checkpoint (8-shot, 500 problems)
+PYTHONUNBUFFERED=1 python scripts/run_evaluation.py \
+  --checkpoint-path checkpoints/deep_run_1/best-model --few-shot
 
-# 5. Inspect sanity outputs
-USE_DUMMY_DATA=1 python -m scripts.inspect_sanity_outputs
+# Step 8 — Generate figures
+python -m scripts.run_visualization
 ```
 
 ---
@@ -120,262 +101,361 @@ USE_DUMMY_DATA=1 python -m scripts.inspect_sanity_outputs
 
 ```
 nlp_final_project/
-├── .venv/                      # Python virtual environment
-├── .cursorrules                # Project rules for AI agents
 ├── src/
-│   ├── config.py               # Paths, model name, USE_DUMMY_DATA flag
-│   ├── utils.py                # Utility functions (set_seed, tiktoken)
+│   ├── config.py                            # Paths, model name, env flags
+│   ├── utils.py                             # set_seed, logging helpers
 │   ├── data/
-│   │   └── preprocessing.py    # 4-way augmentation, DPO pair creation
+│   │   ├── preprocessing.py                 # DPO pair construction (4-way augmentation)
+│   │   └── worker_utils.py                  # Parallel tokenization (dynamic padding)
 │   ├── models/
-│   │   ├── budget_aware_dpo_loss.py   # Custom loss with length penalty
-│   │   └── standard_dpo_loss.py       # Standard DPO loss (baseline)
+│   │   ├── budget_aware_dpo_loss.py         # Custom loss with length penalty
+│   │   ├── standard_dpo_loss.py             # Baseline DPO loss
+│   │   └── simpo_loss.py                    # SimPO (reference-free) — not recommended
 │   ├── training/
-│   │   └── dpo_trainer.py      # Shared training loop
+│   │   └── dpo_trainer.py                   # Training loop, in-training gen eval, metrics
 │   ├── evaluation/
-│   │   ├── answer_extraction.py # Parse answers from model outputs
-│   │   └── run_evaluation.py    # Accuracy, TPCA metrics
-│   └── visualization/
-│       └── plot_results.py     # Histograms, results tables
+│   │   ├── run_evaluation.py                # Tiered eval (Tier 0+1+2)
+│   │   ├── answer_extraction.py             # Parse answers from model outputs
+│   │   ├── math_grader.py                   # Symbolic + LLM grading
+│   │   └── few_shot_exemplars.py            # 8-shot prompt construction
+│   ├── visualization/
+│   │   └── plot_results.py                  # Figures for reports
+│   └── qwen_evaluation/                     # Qwen's own grader (Tier 2 LLM judge)
+│       ├── grader.py
+│       ├── parser.py
+│       └── utils.py
 ├── scripts/
-│   ├── generate_dummy_data.py        # Create 50 synthetic examples
-│   ├── check_model_load.py           # Verify Qwen2.5-0.5B loads
-│   ├── load_real_data.py             # Load OpenMathInstruct-2, GSM8K, MATH
-│   ├── preprocess_dpo_data.py        # Build DPO pairs (4-way augmentation)
-│   ├── train_sanity_check.py         # Overfit sanity check
-│   ├── inspect_sanity_outputs.py     # Inspect overfitted model outputs
-│   ├── run_evaluation.py             # Evaluate checkpoints
-│   ├── run_visualization.py          # Generate PDF figures
-│   └── training/
-│       ├── train_baseline_dpo.py       # Standard DPO baseline
-│       └── train_budget_aware_dpo.py   # Budget-aware DPO (main)
+│   ├── build_math_problem_index.py          # FAISS similarity index (Step 1)
+│   ├── load_real_data.py                    # Download data + test sets (Step 2)
+│   ├── eval_base_model.py                   # Raw base model eval (Step 3)
+│   ├── eval_checkpoint.py                   # Evaluate a saved LoRA checkpoint
+│   ├── eval_baseline_all_configs.sh         # Sweep eval across all baseline configs
+│   ├── preprocess_dpo_data.py               # Build DPO pairs (Step 4)
+│   ├── optuna_hpo.py                        # Optuna HPO sweep (Step 5)
+│   ├── run_evaluation.py                    # General eval — base or checkpoint (Step 7)
+│   ├── run_visualization.py                 # Generate PDF figures (Step 8)
+│   ├── check_model_load.py                  # Verify model loads correctly
+│   ├── subsample_balanced_pairs.py          # Subsample DPO pairs with balance constraints
+│   ├── subsample_capped_balanced.py         # Subsample with per-problem caps
+│   ├── subsample_capped_pairs.py            # Subsample with hard pair caps
+│   ├── training/
+│   │   ├── train_budget_aware_dpo.py        # Budget-aware DPO CLI (Step 6)
+│   │   ├── train_baseline_dpo.py            # Baseline DPO CLI
+│   │   └── train_sft.py                     # SFT (supervised fine-tuning) CLI
+│   └── analysis/
+│       ├── analyze_prompt_token_lengths.py  # Token length analysis (Step 3)
+│       ├── analyze_dpo_results.py           # Compare eval results across runs
+│       ├── analyze_percentile_bands.py      # Token length percentile banding
+│       ├── analyze_similarity_search.py     # FAISS dedup similarity analysis
+│       ├── analyze_complexity_heuristics.py # Complexity classifier evaluation
+│       ├── dataset_stats.py                 # Dataset size and composition stats
+│       ├── debug_pairs_per_problem.py       # Inspect pair counts per problem
+│       ├── percentile_table_by_group.py     # Token length tables by complexity
+│       └── visualize_percentile_bands.py    # Percentile band plots
 ├── data/
-│   ├── dummy_openmathinstruct.jsonl          # Dummy data (50 examples)
-│   ├── processed_dpo_dataset/                # Processed dummy DPO pairs
-│   ├── real_openmathinstruct.jsonl           # Real data (gitignored)
-│   ├── processed_dpo_dataset_real/           # Processed real DPO pairs
-│   ├── gsm8k_test.jsonl                      # GSM8K test set
-│   └── math_test.jsonl                       # MATH test set
-├── checkpoints/
-│   ├── baseline_dpo/                 # Dummy baseline checkpoints
-│   ├── budget_aware_dpo/             # Dummy budget-aware checkpoints
-│   ├── baseline_dpo_real/            # Real baseline checkpoints
-│   └── budget_aware_dpo_real/        # Real budget-aware checkpoints
+│   ├── openmathinstruct.jsonl               # Raw training source (~17G, 13.9M examples)
+│   ├── gsm8k_test.jsonl                     # GSM8K test set (1,319 problems)
+│   ├── math_test.jsonl                      # MATH test set (5,000 problems)
+│   ├── processed_dpo_dataset/               # DPO pairs (train.jsonl, val.jsonl, metadata.json)
+│   └── math_problem_index/                  # FAISS index for similarity dedup
+│       ├── index.faiss
+│       ├── metadata.jsonl
+│       └── config.json
+├── checkpoints/                             # Saved LoRA adapters, one dir per run
+│   └── optuna/                              # HPO trial checkpoints + SQLite study DBs
+├── eval_results/                            # Per-run evaluation JSON outputs
 ├── reports/
-│   ├── figures/                      # PDF figures from real runs
-│   └── figures_dummy/                # PDF figures from dummy runs
-├── docs/
-│   ├── USER_MANUAL.md                # Detailed user guide
-│   ├── feature_reports/              # Phase-by-phase reports
-│   └── misc/                         # Additional documentation
-└── requirements.txt                  # Python dependencies
+│   ├── figures/                             # PDF and PNG figures for the paper
+│   └── data/                               # token_length_stats.csv, outlier lists
+├── notebooks/
+│   ├── token_length_analysis.ipynb          # Interactive token length exploration
+│   └── visualize_optuna_study.ipynb         # HPO importance + slice plots
+└── requirements.txt
 ```
 
 ---
 
-## Running the Pipeline
+## Pipeline Overview
 
-### Dummy vs Real Mode
+### Step 1: Build Math Problem Index
 
-All scripts respect the `USE_DUMMY_DATA` environment variable:
+Build a FAISS similarity index over all OpenMathInstruct problems. Used during preprocessing to deduplicate near-duplicate pairs and ensure train/test separation.
 
-| Mode | Data | Checkpoints |
-|------|------|-------------|
-| `USE_DUMMY_DATA=1` | 50 synthetic examples | `checkpoints/*/` |
-| `USE_DUMMY_DATA=0` | OpenMathInstruct-2 (5000) | `checkpoints/*_real/` |
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 python -m scripts.build_math_problem_index
+```
+
+Output: `data/math_problem_index/` (FAISS index + problem mapping).
 
 ---
 
-### Phase 1: Generate Data
+### Step 2: Load Real Data
 
-#### Dummy Data (Quick Testing)
+Download OpenMathInstruct-2 (training source) and the official GSM8K + MATH test sets.
+
 ```bash
-USE_DUMMY_DATA=1 python -m scripts.generate_dummy_data
-```
+# Full dataset (~14M examples, 17G)
+python -m scripts.load_real_data --split train
 
-#### Real Data (Production)
-```bash
-# Load OpenMathInstruct-2 + test sets
-python -m scripts.load_real_data --split train         # Full train set (~14M examples)
-python -m scripts.load_real_data --split train_1M      # 1M examples
-python -m scripts.load_real_data --split train_1M --limit 5000  # Load 5000 examples
-python -m scripts.load_real_data --split train_2M      # 2M examples
-python -m scripts.load_real_data --split train_5M      # 5M examples
+# Smaller subsets for faster iteration
+python -m scripts.load_real_data --split train --limit 5000
 
-# Or load only test sets (for evaluation)
+# Test sets only (for evaluation without redownloading train)
 python -m scripts.load_real_data --test-sets-only
 ```
 
----
-
-### Phase 2: Preprocessing
-
-```bash
-# Dummy preprocessing
-USE_DUMMY_DATA=1 python -m scripts.preprocess_dpo_data
-
-# Real preprocessing
-USE_DUMMY_DATA=0 python -m scripts.preprocess_dpo_data
-```
-
-This creates DPO pairs using **4-way augmentation**:
-- **Easy + Correct:** Short answer = Preferred, verbose = Rejected
-- **Hard + Correct:** Full CoT = Preferred, short = Rejected
-- **Incorrect:** Always Rejected
-
-Output: `train.jsonl`, `val.jsonl`, `train_tokens.pt`, `val_tokens.pt`, `metadata.json`
+Output: `data/openmathinstruct.jsonl`, `data/gsm8k_test.jsonl`, `data/math_test.jsonl`.
 
 ---
 
-### Phase 3: Sanity Check (Overfitting)
+### Step 3: Analysis & Baseline Evaluation
+
+#### 3.1 Token Length Analysis
+
+Understand the solution length distribution before committing to length thresholds.
 
 ```bash
-# Dummy only - verify model can learn the loss
-USE_DUMMY_DATA=1 python -m scripts.train_sanity_check
-
-# Inspect outputs
-USE_DUMMY_DATA=1 python -m scripts.inspect_sanity_outputs
+python -m scripts.analysis.analyze_prompt_token_lengths
 ```
 
-Expected: Easy prompts → short tokens; Hard prompts → long CoT
+Output: `reports/data/token_length_stats.csv`, `reports/figures/token_lengths.png`.
+
+#### 3.2 Base Model Evaluation
+
+Establish the ground-truth accuracy of the untrained model before any fine-tuning.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 python -m scripts.eval_base_model \
+  --output eval_results/base_model.json --use-real
+```
+
+Output: `eval_results/base_model.json`. Expect ~40% GSM8K (8-shot), ~10% MATH L4-5 (zero-shot).
 
 ---
 
-### Phase 4: Full Training
+### Step 4: Data Preprocessing
 
-#### Baseline DPO (Standard DPO without length penalty)
+Build DPO preference pairs from OpenMathInstruct-2 using **4-way augmentation**:
+
+
+| Scenario       | Chosen (preferred)                         | Rejected (dispreferred) |
+| -------------- | ------------------------------------------ | ----------------------- |
+| Easy + Correct | Short answer (≤ `len_ratio_easy × median`) | Verbose answer          |
+| Hard + Correct | Full CoT (≥ `len_ratio_hard × median`)     | Short/oversimplified    |
+| Incorrect      | —                                          | Incorrect answer        |
+
+
 ```bash
-# Dummy
-USE_DUMMY_DATA=1 python -m scripts.training.train_baseline_dpo --max-epochs 10 --batch-size 4
-
-# Real
-USE_DUMMY_DATA=0 python -m scripts.training.train_baseline_dpo --max-epochs 10 --batch-size 4
+python -m scripts.preprocess_dpo_data
 ```
 
-#### Budget-Aware DPO (Main Method)
+Output: `data/processed_dpo_dataset/train.jsonl`, `val.jsonl`, `metadata.json`.
+
+---
+
+### Step 5: Hyperparameter Optimization (Optuna)
+
+Run a TPE-sampled sweep over key training hyperparameters. Objective: **efficiency** = accuracy / (mean_gen_length / 1024). Studies persist in SQLite and are resumable.
+
 ```bash
-# Dummy
-USE_DUMMY_DATA=1 python -m scripts.training.train_budget_aware_dpo --max-epochs 10 --batch-size 4
+CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 nohup python -m scripts.optuna_hpo \
+  --n-trials 20 \
+  --max-epochs 3 \
+  --train-size 1000 \
+  --val-size 250 \
+  --objective efficiency \
+  --accuracy-floor 0.15 \
+  --max-seq-len 1536 \
+  --val-gen-batch-size 8 \
+  --sampler tpe \
+  --wandb \
+  > logs/hpo_run.log 2>&1 &
 
-# Real
-USE_DUMMY_DATA=0 python -m scripts.training.train_budget_aware_dpo --max-epochs 10 --batch-size 4
+# Monitor
+grep -E "Trial [0-9]+ (done|OOM|pruned)" logs/hpo_run.log
+tail -f logs/hpo_run.log | grep -E "Trial|Epoch|score|efficiency"
+```
 
-# With W&B logging
-USE_DUMMY_DATA=0 python -m scripts.training.train_budget_aware_dpo --max-epochs 10 --wandb
+Visualize results: `notebooks/visualize_optuna_study.ipynb` — produces parameter importance plots and slice plots.
+
+---
+
+### Step 6: Deep Training
+
+After selecting the best hyperparameters from the HPO sweep, run a full training job.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 nohup python -m scripts.training.train_budget_aware_dpo \
+  --output-dir checkpoints/deep_run_1 \
+  --max-epochs 8 \
+  --batch-size 8 \
+  --lr <lr_from_hpo> \
+  --dpo-beta <beta_from_hpo> \
+  --lambda-easy <lambda_easy_from_hpo> \
+  --lambda-hard <lambda_hard_from_hpo> \
+  --kl-penalty 0.0 \
+  --gradient-accumulation-steps <from_hpo> \
+  --best-model-metric efficiency \
+  --run-name deep_run_1 \
+  --wandb \
+  > logs/deep_run_1.log 2>&1 &
+```
+
+Baseline DPO (no length penalty, for comparison):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 python -m scripts.training.train_baseline_dpo \
+  --output-dir checkpoints/baseline_run \
+  --max-epochs 8 --batch-size 8 --lr 7.9e-7 --dpo-beta 0.1 \
+  --kl-penalty 0.0 --run-name baseline_run --wandb
 ```
 
 ---
 
-### Phase 5: Evaluation
+### Step 7: Evaluation
 
 ```bash
-# Dummy evaluation
-USE_DUMMY_DATA=1 python -m scripts.run_evaluation --dummy
+# Evaluate a trained LoRA checkpoint (8-shot, 500 problems)
+CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 python -m scripts.run_evaluation \
+  --checkpoint-path checkpoints/deep_run_1/best-model \
+  --few-shot --output eval_results/deep_run_1_8shot.json
 
-# Real evaluation (requires GSM8K + MATH test sets)
-USE_DUMMY_DATA=0 python -m scripts.run_evaluation
-
-# Quick test (50 problems)
-USE_DUMMY_DATA=0 python -m scripts.run_evaluation --limit 50
+# Full test set (6,319 problems, ~5–6 hours with LLM judge)
+CUDA_VISIBLE_DEVICES=0 python -m scripts.run_evaluation \
+  --checkpoint-path checkpoints/deep_run_1/best-model --few-shot
 ```
-
-Output: `checkpoints/evaluation_results_real.json`
 
 ---
 
-### Phase 6: Visualization
+### Step 8: Visualization
+
+Generate publication-ready figures comparing response length distributions and accuracy across models.
 
 ```bash
-# Real data (default)
 python -m scripts.run_visualization
-
-# Dummy data
-python -m scripts.run_visualization --dummy
 ```
 
-Output:
-- `reports/figures/length_histograms_real.pdf`
-- `reports/figures/length_by_complexity_real.pdf`
-- `reports/figures/results_table_real.md`
+Output: `reports/figures/length_histograms_real.pdf`, `reports/figures/length_by_complexity_real.pdf`, `reports/figures/results_table_real.md`.
 
 ---
 
-## All CLI Commands Reference
+## Answer Verification (Tiered)
 
-### generate_dummy_data.py
-```bash
-python -m scripts.generate_dummy_data
+
+| Tier | Method                       | Used When               |
+| ---- | ---------------------------- | ----------------------- |
+| 0    | Exact string match           | Always                  |
+| 1    | math-verify symbolic (SymPy) | When Tier 0 fails       |
+| 2    | LLM judge (Qwen2.5-Math-7B)  | Post-training eval only |
+
+
+Tier 2 is the ground truth but slow (~5s/problem). In-training gen eval uses Tier 0+1 only.
+
+---
+
+## Key Results
+
+### Base Model Baselines (Qwen2.5-Math-1.5B, no fine-tuning)
+
+
+| Eval Mode           | Easy Acc  | Hard Acc          | Overall   | Avg Tok Easy | TPCA |
+| ------------------- | --------- | ----------------- | --------- | ------------ | ---- |
+| Raw base, zero-shot | —         | 10.6% (MATH only) | —         | —            | 1961 |
+| Raw base, 8-shot    | **40.7%** | **32.0%**         | **36.4%** | 156.7        | 476  |
+
+
+### Budget-Aware DPO (0.5B model, Phases 1–3)
+
+
+| Run                          | Easy Acc | Hard Acc | Overall | Avg Tok Easy | TPCA | Notes         |
+| ---------------------------- | -------- | -------- | ------- | ------------ | ---- | ------------- |
+| Baseline + KL=0.01 (iter6)   | 27.6%    | 14.8%    | 21.2%   | 179          | 891  | Fair baseline |
+| Budget DPO (iter5, λ=5)      | 29.2%    | 14.8%    | 22.0%   | 177          | 846  | Phase 1 best  |
+| 1.5B Budget DPO (iter7b, E2) | 24.0%    | 27.6%    | 25.8%   | 240          | 812  | Phase 2 best  |
+
+
+### Easy-Only Budget DPO (0.5B model, Phase 4, 8-shot eval)
+
+
+| Run                                             | Overall   | Avg Tok Easy | TPCA    | Notes                         |
+| ----------------------------------------------- | --------- | ------------ | ------- | ----------------------------- |
+| Budget easy-only iter12 (λ=5.0)                 | 29.0%     | 155.7        | 633     | Matches base easy acc (41.6%) |
+| Budget easy-only iter13 (token-eff select)      | 27.6%     | 154.1        | 664     | Lower overall                 |
+| Budget easy-only iter14 (λ=3.0, acc floor=0.55) | **30.4%** | 155.3        | **603** | Best overall                  |
+
+
+### Optuna HPO v6 — Stable Trials (Qwen2.5-Math-1.5B, study `budget_dpo_hpo_0504_150740`)
+
+15 of 20 trials completed. Trials split into two regimes: **stable** (val_loss ≥ 0.59, genuine learning) and **collapsed** (val_loss → 0, reward divergence — high efficiency is artificial). Only stable trials produce usable checkpoints.
+
+
+| Trial | Efficiency | Overall   | Easy Acc  | Easy Tokens | val_loss | λ_easy | lr      | grad_accum |
+| ----- | ---------- | --------- | --------- | ----------- | -------- | ------ | ------- | ---------- |
+| **5** | **1.506**  | 28.8%     | 32.8%     | 150         | 0.597    | 0.192  | 1.16e-6 | 2          |
+| **9** | **1.440**  | 29.2%     | 33.6%     | 146         | 0.641    | 0.108  | 1.09e-6 | 2          |
+| **6** | **1.348**  | **35.2%** | **41.6%** | 187         | 0.643    | 0.112  | 1.05e-6 | 2          |
+| 12    | 1.142      | **35.6%** | **43.2%** | 231         | 0.676    | 0.103  | 5.42e-7 | 1          |
+| 4     | 1.104      | 30.4%     | 32.8%     | 211         | 0.630    | 0.236  | 6.53e-7 | 2          |
+| 7     | 0.971      | 33.2%     | 40.8%     | 247         | 0.663    | 0.197  | 7.10e-7 | 1          |
+| 2     | 0.962      | 34.8%     | 40.8%     | 250         | 0.666    | 0.215  | 8.02e-7 | 2          |
+| 8     | 0.889      | 34.8%     | 42.4%     | 295         | 0.662    | 0.242  | 4.04e-7 | 1          |
+
+
+Candidates for deep training (top 3 stable by efficiency): **Trial 9** (best efficiency/accuracy balance), **Trial 5** (second), **Trial 6** (highest easy accuracy at 41.6%, matches untrained base model).
+
+**Full test set evaluation — Trial 10 (collapsed, zero-shot):**
+Accuracy 20.4%, Easy acc 29.7%, Easy tokens **79**, TPCA **84.7**. High efficiency is from reward divergence, not learned brevity — hard accuracy degrades to 16.8% on full MATH test.
+
+---
+
+## CLI Reference
+
+### `scripts/optuna_hpo.py`
+
+```
+--n-trials          Number of trials to run (default: 20)
+--max-epochs        Epochs per trial (default: 3)
+--train-size        Unique training problems per trial (default: 1000)
+--val-size          Unique validation problems per trial (default: 250)
+--objective         Metric to optimize: efficiency | val_loss | accuracy (default: efficiency)
+--accuracy-floor    Prune trial if acc_easy < threshold (default: 0.15)
+--max-seq-len       Max token sequence length (default: 1536)
+--val-gen-batch-size  Generation batch size for val eval (default: 8)
+--sampler           tpe | grid | random (default: tpe)
+--study-name        Name for the Optuna study (auto-generated if omitted)
+--wandb             Enable W&B logging
 ```
 
-### check_model_load.py
-```bash
-python -m scripts.check_model_load
+### `scripts/training/train_budget_aware_dpo.py`
+
+```
+--output-dir                      Checkpoint output directory
+--max-epochs                      (default: 10)
+--batch-size                      (default: 4)
+--lr                              Learning rate (default: 1e-5)
+--dpo-beta                        DPO beta (default: 0.1)
+--lambda-easy                     Length penalty for easy (default: 0.05)
+--lambda-hard                     Length penalty for hard (default: 0.001)
+--kl-penalty                      KL divergence penalty (default: 0.0)
+--gradient-accumulation-steps     (default: 1)
+--best-model-metric               val_loss | efficiency | gen_tokens_easy_with_accuracy_floor
+--accuracy-floor                  Floor for gen_tokens_easy_with_accuracy_floor selector
+--max-seq-len                     Max token length (default: 512)
+--early-stopping-patience         (default: 5)
+--data-limit                      Limit training pairs (quick tests)
+--run-name                        W&B run name
+--wandb                           Enable W&B logging
 ```
 
-### load_real_data.py
-```bash
-python -m scripts.load_real_data --split train         # Full train set (~14M examples)
-python -m scripts.load_real_data --split train_1M      # 1M examples
-python -m scripts.load_real_data --split train_1M --limit 5000  # Load 5000 examples
-python -m scripts.load_real_data --split train_2M     # 2M examples
-python -m scripts.load_real_data --split train_5M     # 5M examples
-python -m scripts.load_real_data --test-sets-only     # Load only test sets
-```
+### `scripts/eval_checkpoint.py`
 
-### preprocess_dpo_data.py
-```bash
-USE_DUMMY_DATA=1 python -m scripts.preprocess_dpo_data  # Dummy
-USE_DUMMY_DATA=0 python -m scripts.preprocess_dpo_data  # Real
 ```
-
-### train_sanity_check.py
-```bash
-USE_DUMMY_DATA=1 python -m scripts.train_sanity_check
-```
-
-### train_baseline_dpo.py
-```bash
-python -m scripts.training.train_baseline_dpo \
-    --output-dir checkpoints/baseline_dpo \
-    --max-epochs 10 \
-    --batch-size 4 \
-    --lr 1e-5 \
-    --checkpoint-every 1 \
-    --data-limit 100 \
-    --seed 42 \
-    --wandb \
-    --dpo-beta 0.1
-```
-
-### train_budget_aware_dpo.py
-```bash
-python -m scripts.training.train_budget_aware_dpo \
-    --output-dir checkpoints/budget_aware_dpo \
-    --max-epochs 10 \
-    --batch-size 4 \
-    --lr 1e-5 \
-    --checkpoint-every 1 \
-    --data-limit 100 \
-    --seed 42 \
-    --wandb \
-    --dpo-beta 0.1 \
-    --lambda-easy 0.05 \
-    --lambda-hard 0.001 \
-    --early-stopping-patience 5 \
-    --early-stopping-threshold 0.0
-```
-
-### run_evaluation.py
-```bash
-python -m scripts.run_evaluation --dummy           # Dummy evaluation
-python -m scripts.run_evaluation                   # Real evaluation
-python -m scripts.run_evaluation --limit 50        # Quick test
-```
-
-### run_visualization.py
-```bash
-python -m scripts.run_visualization    # Real data
-python -m scripts.run_visualization --dummy  # Dummy data
+--checkpoint        Path to LoRA checkpoint directory
+--output            Output JSON path
+--use-real          Use real GSM8K + MATH test sets
+--limit             Max problems to evaluate (default: all)
+--few-shot N        N-shot prompting (default: 0-shot)
+--max-new-tokens    (default: 256)
 ```
 
 ---
@@ -384,106 +464,81 @@ python -m scripts.run_visualization --dummy  # Dummy data
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `USE_DUMMY_DATA` | `0` | Use dummy (1) or real (0) data |
-| `DATA_PATH` | `./data` | Data directory |
-| `CHECKPOINT_DIR` | `./checkpoints` | Model checkpoints directory |
-| `PYTHONPATH` | (required) | Must include project root |
-| `WANDB_PROJECT` | - | W&B project name |
-| `WANDB_RUN_NAME` | - | W&B run name |
-| `WANDB_MODE` | `online` | W&B mode (`online`, `offline`, `disabled`) |
-| `EASY_TOKEN_THRESHOLD` | `70` | Tokens below = Easy |
-| `HARD_TOKEN_THRESHOLD` | `130` | Tokens above = Hard |
 
-### Model Configuration
+| Variable               | Default         | Description                                  |
+| ---------------------- | --------------- | -------------------------------------------- |
+| `DATA_PATH`            | `./data`        | Data directory                               |
+| `CHECKPOINT_DIR`       | `./checkpoints` | Checkpoint directory                         |
+| `DATASET_PATH`         | (computed)      | Override dataset path (absolute or relative) |
+| `CUDA_VISIBLE_DEVICES` | —               | GPU selection                                |
+| `PYTHONPATH`           | (required)      | Must include project root                    |
+| `WANDB_PROJECT`        | —               | W&B project name                             |
+| `WANDB_MODE`           | `online`        | `online` / `offline` / `disabled`            |
 
-- **Base model:** `Qwen/Qwen2.5-0.5B`
-- **Unsloth model:** `unsloth/Qwen2.5-0.5B`
-- **LoRA rank:** r=128, alpha=256
-- **Target modules:** q_proj, v_proj, k_proj, o_proj
 
----
+### Model
 
-## Key Concepts
 
-### 1. Direct Preference Optimization (DPO)
+| Setting           | Value                          |
+| ----------------- | ------------------------------ |
+| Base model        | `Qwen/Qwen2.5-Math-1.5B`       |
+| LoRA rank         | r=128, alpha=256               |
+| Target modules    | q_proj, v_proj, k_proj, o_proj |
+| Mixed precision   | float16 (autocast)             |
+| Gradient clipping | max_norm=1.0                   |
 
-DPO trains a model to prefer chosen responses over rejected ones. The loss uses a reference model to compute log-ratios:
 
-```
-loss = -log(σ(r_chosen - r_rejected))
+### Complexity Classification
 
-where r = β · log(π_θ(y|x) / π_ref(y|x))
-```
 
-### 2. Complexity Classification
+| Class | Name | Source         | Criterion                  |
+| ----- | ---- | -------------- | -------------------------- |
+| C=0   | Easy | GSM8K          | Short solution token count |
+| C=1   | Hard | MATH Level 2–5 | Long solution token count  |
 
-Problems are classified as:
-
-| Flag | Name | Source | Token Count |
-|------|------|--------|-------------|
-| C=0 | Easy | GSM8K | < 70 tokens |
-| C=1 | Hard | MATH Level 4-5 | > 130 tokens |
-
-MATH Level 1-2 → Easy; Level 4-5 → Hard; Level 3 → token fallback
-
-### 3. 4-Way Augmentation
-
-For each problem, create DPO pairs based on correctness and length:
-
-| Scenario | Chosen (Preferred) | Rejected (Dispreferred) |
-|----------|-------------------|------------------------|
-| Easy + Correct | Short answer | Verbose answer |
-| Hard + Correct | Full CoT | Short/oversimplified |
-| Incorrect | (none) | Incorrect answer |
-
-### 4. Budget-Aware Loss
-
-The length penalty `λ(C)` is dynamic:
-
-```python
-if complexity == 0:  # Easy
-    lambda_penalty = 0.05   # Strong penalty → shorter outputs
-else:  # Hard
-    lambda_penalty = 0.001  # Weak penalty → preserve CoT
-```
 
 ---
 
-## Output Files
+## Datasets
 
-### Checkpoints
-```
-checkpoints/
-├── baseline_dpo/
-│   ├── checkpoint-500/
-│   ├── training_config.json
-│   └── metrics.json
-├── budget_aware_dpo/
-│   ├── checkpoint-500/
-│   ├── training_config.json
-│   └── metrics.json
-├── baseline_dpo_real/
-└── budget_aware_dpo_real/
-```
+### Training
 
-### Evaluation Results
-```
-checkpoints/
-├── evaluation_results_dummy.json
-├── evaluation_results_real.json
-├── baseline_eval_real.json
-└── budget_aware_eval_real.json
-```
 
-### Figures
-```
-reports/figures/
-├── length_histograms_real.pdf
-├── length_by_complexity_real.pdf
-└── results_table_real.md
-```
+| Dataset                                 | Size       | Description                              |
+| --------------------------------------- | ---------- | ---------------------------------------- |
+| `data/processed_dpo_dataset/`      | ~606K pairs | Full mixed easy+hard (1.5B tokenization) |
+| `data/processed_dpo_dataset_easy_only/` | ~25K pairs | Easy problems only (complexity=0)        |
+
+
+Each dataset contains `train + validation` as .pt file, and `metadata.json`.
+
+### Evaluation (held-out, zero overlap with training)
+
+
+| Dataset                 | Problems | Source                                |
+| ----------------------- | -------- | ------------------------------------- |
+| `data/gsm8k_test.jsonl` | 1,319    | GSM8K official test split             |
+| `data/math_test.jsonl`  | 5,000    | MATH official test split (all levels) |
+
+
+---
+
+## W&B Monitoring
+
+- **Project**: `budget-aware-dpo`
+- **Entity**: `ariksheer-tel-aviv-university`
+
+Metrics logged per training step:
+
+- `train/reward_diff` — learning vs. collapse signal
+- `train/gradient_norm` — instability detector
+- `train/complexity_0_loss` / `train/complexity_1_loss` — per-class DPO loss
+
+Metrics logged per epoch (val):
+
+- `val/reward_diff`, `val/accuracy`, `val/accuracy_easy`, `val/accuracy_hard`
+- `val/token_easy` — average tokens on easy problems
+- `val/efficiency` — the HPO objective
 
 ---
 
@@ -495,76 +550,29 @@ reports/figures/
 export PYTHONPATH="$PWD:$PYTHONPATH"
 ```
 
-### CUDA out of memory
+### CUDA out of memory during HPO
+
+- `batch_size=16` always OOMs with Qwen2.5-Math-1.5B + LoRA. Use `batch_size=8`.
+- Progressive VRAM fragmentation after many trials: restart the process.
+- The `--train-size` and `--val-size` flags control data per trial and affect VRAM indirectly (longer sequences stay in memory during generation).
+
+### CUDA out of memory during training
 
 ```bash
-# Reduce batch size
-python -m scripts.training.train_budget_aware_dpo --batch-size 2
-
-# Or limit data
-python -m scripts.training.train_budget_aware_dpo --data-limit 500
+# Reduce batch size or gradient accumulation
+python -m scripts.training.train_budget_aware_dpo --batch-size 4 --gradient-accumulation-steps 1
 ```
 
-### Real data not found
-
-```bash
-# First load the data
-python -m scripts.load_real_data --split train_1M --limit 5000
-
-# Then preprocess
-USE_DUMMY_DATA=0 python -m scripts.preprocess_dpo_data
-```
-
-### GSM8K/MATH test sets not found
-
-```bash
-python -m scripts.load_real_data --test-sets-only
-```
-
-### WandB login required
+### W&B login required
 
 ```bash
 wandb login
-# Or use offline mode
-export WANDB_MODE=offline
+# Or disable
+export WANDB_MODE=disabled
 ```
-
----
-
-## Dataset Statistics
-
-### Training Data Composition (Real)
-
-| Category | Count | Percentage |
-|----------|-------|------------|
-| MATH | 40,740 | 81.5% |
-| GSM8K | 9,260 | 18.5% |
-
-### DPO Pairs (After Preprocessing)
-
-| Type | Easy (C=0) | Hard (C=1) |
-|------|------------|------------|
-| Real pairs | ~742 | ~4,252 |
-| Synthesized pairs | Variable | Variable |
-
-### Token Statistics (tiktoken cl100k_base)
-
-| Source | Avg Tokens | P25 | P50 | P75 |
-|--------|------------|-----|-----|-----|
-| MATH | 330.2 | 185 | 279 | 427 |
-| GSM8K | 147.3 | 106 | 134 | 175 |
-
----
-
-## Further Reading
-
-- `docs/USER_MANUAL.md` — Detailed user guide
-- `docs/feature_reports/` — Phase-by-phase implementation reports
-- `docs/misc/knowledge_distillation_vs_dpo.md` — DPO vs distillation explanation
-- `implementation_plan.md` — Full project plan
 
 ---
 
 ## License
 
-This project is for research and educational purposes.
+Research and educational use.

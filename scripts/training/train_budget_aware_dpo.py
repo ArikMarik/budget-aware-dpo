@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--train-size", type=int, default=10_000, help='Train size (no. of unique problems)')
     parser.add_argument("--val-size", type=int, default=500, help='Validation size')
-    parser.add_argument("--max-epochs", type=int, default=10)
+    parser.add_argument("--max-epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=8e-7)
     parser.add_argument("--checkpoint-every", type=int, default=1)
@@ -45,7 +45,7 @@ def main():
         default="efficiency",
         choices=[
             "val_loss",
-            "efficiency"
+            "efficiency",
             "gen_tokens_easy",
             "gen_tpca",
             "gen_tokens_easy_with_accuracy_floor",

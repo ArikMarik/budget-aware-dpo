@@ -15,8 +15,8 @@
     "num_hard": 4563,
     "num_easy_correct": 1250,
     "num_hard_correct": 2018,
-    "easy_accuracy": 0.7118451025056948,
-    "hard_accuracy": 0.44225290379136534,
+    "accuracy_easy": 0.7118451025056948,
+    "accuracy_hard": 0.44225290379136534,
     "math_by_level": {
       "Level 3": {
         "total": 1131,

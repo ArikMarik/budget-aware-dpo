@@ -252,7 +252,7 @@ def _build_objective_fn(search: SearchConfig, use_grid: bool, ctx: StaticTrainin
                 num_workers=search.num_workers,
                 model_name=search.model_name,
                 loss_type=str(params["loss_type"]),
-                best_model_metric="val_loss",
+                best_model_metric="val_loss",  # TODO: best_model_metric="efficiency", accuracy_floor=search.accuracy_floor,
                 accuracy_floor=None,
                 length_ratio_easy=float(params["length_ratio_easy"]),
                 length_ratio_hard=float(params["length_ratio_hard"]),

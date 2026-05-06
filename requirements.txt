@@ -1,7 +1,7 @@
 # Core ML stack (PINNED for compatibility)
 torch==2.4.1
-transformers==4.41.2
-peft==0.10.0
+transformers==4.57.6
+peft==0.18.1
 accelerate==1.13.0
 
 # Data + training

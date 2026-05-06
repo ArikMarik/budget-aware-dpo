@@ -5,11 +5,11 @@ Histograms of response lengths, results table.
 
 import json
 from pathlib import Path
-from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 
 def load_eval_results(baseline_path: Path, budget_path: Path) -> tuple[list, list]:
@@ -26,20 +26,31 @@ def plot_length_histograms(
     budget_results: list[dict],
     output_path: Path,
 ) -> None:
-    """Plot histograms of response token lengths for both models."""
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    """Plot overlaid histograms of response token lengths for both models."""
     baseline_tokens = [r["tokens"] for r in baseline_results]
     budget_tokens = [r["tokens"] for r in budget_results]
 
-    axes[0].hist(baseline_tokens, bins=15, color="steelblue", edgecolor="black", alpha=0.7)
-    axes[0].set_title("Baseline DPO")
-    axes[0].set_xlabel("Response tokens")
-    axes[0].set_ylabel("Count")
+    # Shared bins for aligned comparison
+    all_tokens = baseline_tokens + budget_tokens
+    if all_tokens:
+        min_tok = min(all_tokens)
+        max_tok = max(all_tokens)
+    else:
+        min_tok = 0
+        max_tok = 100
 
-    axes[1].hist(budget_tokens, bins=15, color="darkorange", edgecolor="black", alpha=0.7)
-    axes[1].set_title("Budget-Aware DPO")
-    axes[1].set_xlabel("Response tokens")
-    axes[1].set_ylabel("Count")
+    n_bins = 20
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+    ax.set_axisbelow(True)            # draw grid below artists with default zorder
+    ax.grid(axis='y', color='gray', linestyle='--', linewidth=0.5)
+    ax.hist(baseline_tokens, bins=n_bins, range=(min_tok, max_tok), color="tab:blue", alpha=0.5, label="Baseline")
+    ax.hist(budget_tokens, bins=n_bins, range=(min_tok, max_tok), color="tab:orange", alpha=0.5, label="Budget-Aware DPO")
+    ax.set_title("Response Token Length Distribution")
+    ax.set_xlabel("Response tokens")
+    ax.set_ylabel("Count")
+    ax.legend()
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=20))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=15))
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -80,43 +91,71 @@ def generate_results_table(metrics_path: Path, output_path: Path) -> None:
     with open(metrics_path) as f:
         data = json.load(f)
     metrics = data.get("metrics", data)
-    has_math45 = any(m.get("math_level_4_5_accuracy") is not None for m in metrics.values())
-    if has_math45:
-        headers = "| Model | Accuracy | TPCA | Avg Tokens (Easy) | Avg Tokens (Hard) | MATH L4-5 |"
-        sep = "|-------|----------|------|--------------------|-------------------|----------|"
-    else:
-        headers = "| Model | Accuracy | TPCA | Avg Tokens (Easy) | Avg Tokens (Hard) |"
-        sep = "|-------|----------|------|--------------------|-------------------|"
-    lines = [headers, sep]
+
+    # Single header row with parenthesized subcolumn names
+    header = "| Model | Acc (Overall) | Acc (Easy) | Acc (Hard) | TPCA (Overall) | TPCA (Easy) | TPCA (Hard) | Tok (Total) | Tok (Easy) | Tok (Hard) | Eff (Overall) | Eff (Easy) | Eff (Hard) |"
+    sep = "|-------|--------------|-----------|-----------|---------------|------------|------------|-------------|-----------|-----------|---------------|-----------|-----------|"
+
+    lines = [header, sep]
     for name, m in metrics.items():
-        acc = f"{m['accuracy']:.1%}"
-        tpca = f"{m['tpca']:.1f}"
-        easy = f"{m['avg_tokens_easy']:.1f}"
-        hard = f"{m['avg_tokens_hard']:.1f}"
-        row = f"| {name} | {acc} | {tpca} | {easy} | {hard} |"
-        if has_math45:
-            math45 = f"{m.get('math_level_4_5_accuracy', 0):.1%}" if m.get("math_level_4_5_accuracy") is not None else "—"
-            row += f" {math45} |"
+        # Accuracy (Overall, Easy, Hard)
+        acc_overall = f"{m['accuracy']:.1%}"
+        acc_easy_val = m.get('accuracy_easy')
+        acc_easy = f"{acc_easy_val:.1%}" if acc_easy_val is not None else "—"
+        acc_hard_val = m.get('accuracy_hard')
+        acc_hard = f"{acc_hard_val:.1%}" if acc_hard_val is not None else "—"
+
+        # TPCA (Overall, Easy, Hard)
+        tpca_overall = f"{m['tpca']:.1f}"
+        tpca_easy_val = m.get('avg_tokens_easy_correct')
+        tpca_easy = f"{tpca_easy_val:.1f}" if tpca_easy_val is not None else "—"
+        tpca_hard_val = m.get('avg_tokens_hard_correct')
+        tpca_hard = f"{tpca_hard_val:.1f}" if tpca_hard_val is not None else "—"
+
+        # Avg Tokens (Total, Easy, Hard)
+        avg_total_val = m.get('average_tokens_length')
+        avg_total = f"{avg_total_val:.1f}" if avg_total_val is not None else "—"
+        avg_easy = f"{m['avg_tokens_easy']:.1f}"
+        avg_hard = f"{m['avg_tokens_hard']:.1f}"
+
+        # Efficiency (Overall, Easy, Hard)
+        eff_overall_val = m.get('efficiency')
+        eff_overall = f"{eff_overall_val:.2f}" if eff_overall_val is not None else "—"
+        eff_easy_val = m.get('efficiency_easy')
+        eff_easy = f"{eff_easy_val:.2f}" if eff_easy_val is not None else "—"
+        eff_hard_val = m.get('efficiency_hard')
+        eff_hard = f"{eff_hard_val:.2f}" if eff_hard_val is not None else "—"
+
+        # Build row (13 fixed columns)
+        row_parts = [
+            name,
+            acc_overall, acc_easy, acc_hard,
+            tpca_overall, tpca_easy, tpca_hard,
+            avg_total, avg_easy, avg_hard,
+            eff_overall, eff_easy, eff_hard
+        ]
+
+        row = "| " + " | ".join(row_parts) + " |"
         lines.append(row)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         f.write("\n".join(lines))
 
 
 def generate_figures(
-    eval_dir: Path,
+    baseline_results_path: Path,
+    budget_results_path: Path,
     output_dir: Path,
     suffix: str = "_dummy",
 ) -> list[Path]:
     """Generate all figures from evaluation results."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    baseline_path = eval_dir / f"baseline_eval{suffix}.json"
-    budget_path = eval_dir / f"budget_aware_eval{suffix}.json"
 
-    if not baseline_path.exists() or not budget_path.exists():
-        raise FileNotFoundError(f"Evaluation files not found: {baseline_path}, {budget_path}")
+    if not baseline_results_path.exists() or not budget_results_path.exists():
+        raise FileNotFoundError(f"Evaluation files not found: {baseline_results_path}, {budget_results_path}")
 
-    baseline_res, budget_res = load_eval_results(baseline_path, budget_path)
+    baseline_res, budget_res = load_eval_results(baseline_results_path, budget_results_path)
     paths = []
 
     p1 = output_dir / f"length_histograms{suffix}.pdf"
