@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--limit", type=int, default=500, help="Number of problems")
     parser.add_argument("--output", type=str, required=True, help="Output JSON path")
     parser.add_argument("--use-real", action="store_true", help="Use GSM8K+MATH test sets (not training data)")
-    parser.add_argument("--base-model", type=str, default=None, help="Base model name (default: Qwen/Qwen2.5-0.5B)")
+    parser.add_argument("--base-model", type=str, default=None, help="Base model name (default: Qwen/Qwen2.5-Math-1.5B)")
     parser.add_argument("--zero-shot", action="store_true", help="Use zero-shot prompting instead of few-shot exemplars")
     args = parser.parse_args()
 
@@ -86,8 +86,8 @@ def main():
     logger.info("=== RESULTS ===")
     logger.info("Accuracy: %.2f%% (easy=%.2f%%, hard=%.2f%%)",
                 metrics["accuracy"] * 100,
-                metrics.get("easy_accuracy", 0) * 100,
-                metrics.get("hard_accuracy", 0) * 100)
+                metrics.get("accuracy_easy", 0) * 100,
+                metrics.get("accuracy_hard", 0) * 100)
     logger.info("Avg tokens: easy=%.1f, hard=%.1f",
                 metrics.get("avg_tokens_easy", 0),
                 metrics.get("avg_tokens_hard", 0))

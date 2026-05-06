@@ -145,8 +145,8 @@ def run_gen_eval(model, tokenizer, epoch, step, use_wandb=False):
     if use_wandb:
         wandb.log({
             "gen/accuracy": metrics["accuracy"],
-            "gen/easy_accuracy": easy_correct / max(len(easy_r), 1),
-            "gen/hard_accuracy": hard_correct / max(len(hard_r), 1),
+            "gen/accuracy_easy": easy_correct / max(len(easy_r), 1),
+            "gen/accuracy_hard": hard_correct / max(len(hard_r), 1),
             "gen/avg_tokens_easy": metrics["avg_tokens_easy"],
             "gen/avg_tokens_hard": metrics["avg_tokens_hard"],
             "gen/tpca": metrics["tpca"],

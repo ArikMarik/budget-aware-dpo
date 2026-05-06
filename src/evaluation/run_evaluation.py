@@ -183,7 +183,7 @@ def generate_and_evaluate(
     return results
 
 
-def compute_metrics(results: list[dict]) -> dict:
+def compute_metrics(results: list[dict], max_new_tokens: int = 1024) -> dict:
     """Compute accuracy, TPCA, avg tokens by complexity. MATH level 4-5 when available."""
     # MATH level 4-5 retention (Phase 9)
     def is_math_level_45(level) -> bool:
@@ -238,27 +238,36 @@ def compute_metrics(results: list[dict]) -> dict:
     tpca = total_tokens_correct / len(correct) if correct else float("inf")
     average_tokens_length = total_tokens / len(results) if results else 0
 
+    accuracy_easy = len(easy_correct) / len(easy_results) if easy_results else 0
+    accuracy_hard = len(hard_correct) / len(hard_results) if hard_results else 0
+
+    avg_tokens_easy = total_tokens_easy / len(easy_results) if easy_results else 0
+    avg_tokens_hard = total_tokens_hard / len(hard_results) if hard_results else 0
+
     for v in math_by_level.values():
         v["accuracy"] = v["correct"] / v["total"] if v["total"] > 0 else 0
 
     out = {
         "accuracy": accuracy,
+        "efficiency": accuracy / (average_tokens_length / max_new_tokens),
+        "tpca": tpca,
         "num_correct": len(correct),
         "num_total": len(with_expected),
-        "tpca": tpca,
         "average_tokens_length": average_tokens_length,
         "total_tokens": total_tokens,
         "total_tokens_correct": total_tokens_correct,
-        "avg_tokens_easy": total_tokens_easy / len(easy_results) if easy_results else 0,
-        "avg_tokens_hard": total_tokens_hard / len(hard_results) if hard_results else 0,
+        "avg_tokens_easy": avg_tokens_easy,
+        "avg_tokens_hard": avg_tokens_hard,
+        "efficiency_easy": accuracy_easy / (avg_tokens_easy / max_new_tokens) if easy_correct else 0,
+        "efficiency_hard": accuracy_hard / (avg_tokens_hard / max_new_tokens) if hard_correct else 0,
         "avg_tokens_easy_correct": total_tokens_easy_correct / len(easy_correct) if easy_correct else 0,
         "avg_tokens_hard_correct": total_tokens_hard_correct / len(hard_correct) if hard_correct else 0,
         "num_easy": len(easy_results),
         "num_hard": len(hard_results),
         "num_easy_correct": len(easy_correct),
         "num_hard_correct": len(hard_correct),
-        "easy_accuracy": len(easy_correct) / len(easy_results) if easy_results else 0,
-        "hard_accuracy": len(hard_correct) / len(hard_results) if hard_results else 0,
+        "accuracy_easy": accuracy_easy,
+        "accuracy_hard": accuracy_hard,
         "math_by_level": math_by_level
     }
 
@@ -275,13 +284,29 @@ def evaluate_checkpoint(
     output_path: Optional[Path] = None,
     base_model: Optional[str] = None,
     prompt_fn: Optional[callable] = None,
+    max_new_tokens: int = 1024,
+    batch_size: int = 32,
 ) -> dict:
-    """Load model, run evaluation, return metrics."""
+    """Load model, run evaluation, return metrics and results."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_name = base_model or MODEL_NAME
+
+    # Determine base model: explicit param > adapter config > default MODEL_NAME
+    if base_model:
+        model_name = base_model
+    else:
+        adapter_config_path = checkpoint_path / "adapter_config.json"
+        if adapter_config_path.exists():
+            with open(adapter_config_path) as f:
+                adapter_config = json.load(f)
+                model_name = adapter_config.get("base_model_name_or_path", MODEL_NAME)
+        else:
+            model_name = MODEL_NAME
+
+    # Load tokenizer from base model, not checkpoint (adapter may have corrupted tokenizer)
+    # tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path), trust_remote_code=True)
     base = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -291,14 +316,17 @@ def evaluate_checkpoint(
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model.eval()
 
-    results = generate_and_evaluate(model, tokenizer, problems, prompt_fn=prompt_fn)
+    results = generate_and_evaluate(
+        model, tokenizer, problems,
+        max_new_tokens=max_new_tokens,
+        prompt_fn=prompt_fn,
+        batch_size=batch_size,
+    )
     metrics = compute_metrics(results)
 
     out = {"metrics": metrics, "results": results}
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        # Truncate results for JSON (full responses can be long)
-        out_save = {"metrics": metrics, "results": results}
         with open(output_path, "w") as f:
-            json.dump(out_save, f, indent=2)
-    return metrics
+            json.dump(out, f, indent=2)
+    return out
